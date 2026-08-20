@@ -30,6 +30,47 @@ from tools.registry import build_default_registry
 from api.turns import Turn, TurnQueue
 
 
+# The tool switches the UI may flip, and the Config field each one sets.
+#
+# Enabling a tool and enabling its sharp end are separate switches, exactly as
+# they are separate environment variables: `depends_on` is what makes the UI
+# nest the second under the first rather than offering it on its own.
+@dataclasses.dataclass(frozen=True)
+class ToolFlag:
+    id: str
+    field: str
+    label: str
+    depends_on: str | None = None
+
+
+TOOL_FLAGS: tuple[ToolFlag, ...] = (
+    ToolFlag("file_writes", "file_writes_enabled", "File writes"),
+    ToolFlag("python", "python_tool_enabled", "Python"),
+    ToolFlag(
+        "python_unrestricted",
+        "python_unrestricted",
+        "Python — unrestricted scripts",
+        depends_on="python",
+    ),
+    ToolFlag("terminal", "shell_tool_enabled", "Terminal"),
+    ToolFlag("http", "http_tool_enabled", "HTTP"),
+    ToolFlag(
+        "http_writes",
+        "http_allow_writes",
+        "HTTP — state-changing methods",
+        depends_on="http",
+    ),
+    ToolFlag("git", "git_tool_enabled", "Git"),
+    ToolFlag(
+        "git_writes", "git_allow_writes", "Git — commit and branch", depends_on="git"
+    ),
+    ToolFlag("memory", "memory_tool_enabled", "Memory"),
+    ToolFlag("ocr", "ocr_enabled", "OCR"),
+)
+
+FLAGS_BY_ID = {flag.id: flag for flag in TOOL_FLAGS}
+
+
 class Runtime:
     """The objects a request needs, built once for the process."""
 
@@ -42,6 +83,34 @@ class Runtime:
         self.manager = manager if manager is not None else ModelManager()
         self.store = ChatStore(self.config.db_path)
         self.queue = TurnQueue(self.run_turn)
+        # Tool switches flipped from the UI, applied on top of the environment.
+        # Held in memory only: a restart returns to whatever the environment
+        # says, so the env vars stay the durable answer to "what is on here"
+        # and a switch cannot quietly become permanent.
+        self._overrides: dict[str, bool] = {}
+
+    # --- tool switches ---
+
+    @property
+    def overrides(self) -> dict[str, bool]:
+        return dict(self._overrides)
+
+    def set_override(self, flag_id: str, enabled: bool) -> None:
+        """Turn one tool switch on or off for this process."""
+        flag = FLAGS_BY_ID[flag_id]
+        self._overrides[flag.field] = enabled
+        if not enabled:
+            # Turning off a tool turns off its sharp end too, so the pair can
+            # never end up in the state "unrestricted Python, no Python tool".
+            for other in TOOL_FLAGS:
+                if other.depends_on == flag_id:
+                    self._overrides[other.field] = False
+
+    def effective_config(self) -> Config:
+        """The config with the UI's switches applied."""
+        if not self._overrides:
+            return self.config
+        return dataclasses.replace(self.config, **self._overrides)
 
     # --- introspection used by several routes ---
 
@@ -55,9 +124,15 @@ class Runtime:
         return build_default_registry(config)
 
     def turn_config(self, *, qwen_url: str, enable_thinking: bool) -> Config:
-        """The frozen config for one turn, with per-turn settings applied."""
+        """The frozen config for one turn, with per-turn settings applied.
+
+        Built from `effective_config` so a tool switched on in the UI is
+        available to the very next turn, with no restart.
+        """
         return dataclasses.replace(
-            self.config, qwen_url=qwen_url, enable_thinking=enable_thinking
+            self.effective_config(),
+            qwen_url=qwen_url,
+            enable_thinking=enable_thinking,
         )
 
     # --- seams ---
@@ -144,6 +219,13 @@ class Runtime:
             def on_token(text: str) -> None:
                 turn.emit("token", text=text)
 
+            def on_reasoning(text: str) -> None:
+                # Streamed on its own channel and never stored: the agent's
+                # history keeps the answer and the tool calls only, and
+                # replaying a thinking trace to the model is not something the
+                # chat template expects.
+                turn.emit("reasoning", text=text)
+
             def on_tool(event: ToolEvent) -> None:
                 entry = {
                     "name": event.call.name,
@@ -157,7 +239,12 @@ class Runtime:
                 turn.emit("tool", **entry)
 
             turn.emit("start", model_key=target)
-            result = agent.send(request.prompt, observer=on_tool, on_token=on_token)
+            result = agent.send(
+                request.prompt,
+                observer=on_tool,
+                on_token=on_token,
+                on_reasoning=on_reasoning,
+            )
             elapsed = round(time.time() - started, 1)
 
             message_id = self.store.add_message(

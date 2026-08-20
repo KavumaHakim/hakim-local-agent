@@ -134,15 +134,24 @@ class TurnQueue:
         return turn
 
     def position(self, turn: Turn) -> int:
-        """How many turns must finish first. 0 means this one is running."""
+        """How many turns must finish before this one starts.
+
+        0 means nothing is ahead of it - either it is already running, or it is
+        next and the worker has simply not picked it up yet. That distinction
+        is invisible from outside and lasts microseconds, and counting it as a
+        turn ahead would tell the user they are behind a queue of one that does
+        not exist.
+        """
         with self._condition:
             if self._current is turn:
                 return 0
             try:
-                return self._waiting.index(turn) + 1
+                index = self._waiting.index(turn)
             except ValueError:
                 # Finished, or never submitted; either way nothing is ahead.
                 return 0
+            # The running turn, if there is one, is also ahead of this.
+            return index + (1 if self._current is not None else 0)
 
     def depth(self) -> int:
         """Turns waiting, not counting the one running."""

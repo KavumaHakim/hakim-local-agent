@@ -81,19 +81,25 @@ class Agent:
         user_input: str,
         observer: Observer | None = None,
         on_token: TokenCallback | None = None,
+        on_reasoning: TokenCallback | None = None,
     ) -> AssistantTurn:
         """Run one user turn to completion and return the final assistant turn.
 
         If `on_token` is given and the client supports streaming, content
         fragments are delivered as they arrive. Tool-call rounds stream too,
         but produce no content, so the caller sees tool events instead.
+
+        `on_reasoning` receives the model's thinking when it produces any. It
+        is never added to history: `_assistant_entry` stores the answer and the
+        tool calls only, and that has to stay true however the trace is
+        displayed.
         """
         self._history.append({"role": "user", "content": user_input})
 
         definitions = self._tools.get_tool_definitions()
 
         for _ in range(max(1, self._config.max_iterations)):
-            message = self._chat(definitions, on_token)
+            message = self._chat(definitions, on_token, on_reasoning)
 
             try:
                 turn = parse_assistant_message(message)
@@ -134,13 +140,17 @@ class Agent:
         self,
         definitions: list[dict[str, Any]],
         on_token: TokenCallback | None,
+        on_reasoning: TokenCallback | None = None,
     ) -> dict[str, Any]:
         """One model round, streaming when the caller asked for it."""
-        if on_token is not None:
+        if on_token is not None or on_reasoning is not None:
             stream = getattr(self._client, "chat_stream", None)
             if callable(stream):
                 return stream(
-                    self._messages(), tools=definitions, on_token=on_token
+                    self._messages(),
+                    tools=definitions,
+                    on_token=on_token,
+                    on_reasoning=on_reasoning,
                 )
         return self._client.chat(self._messages(), tools=definitions)
 

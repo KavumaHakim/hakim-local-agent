@@ -113,6 +113,8 @@ export function useConversations() {
 
 export function useTools() {
   const [data, setData] = useState<ToolsResponse | null>(null)
+  const [pending, setPending] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let live = true
@@ -127,7 +129,21 @@ export function useTools() {
     }
   }, [])
 
-  return data
+  const toggle = useCallback(async (id: string, enabled: boolean) => {
+    setPending(id)
+    setError(null)
+    try {
+      // The response is the whole roster, so the tool list and the switches
+      // update together and cannot disagree about what is on.
+      setData(await api.setTool(id, enabled))
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setPending(null)
+    }
+  }, [])
+
+  return { data, toggle, pending, error }
 }
 
 /** Fires `handler` on a key chord, e.g. ctrl/cmd+K. */

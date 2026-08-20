@@ -4,7 +4,7 @@
 
 import { Markdown } from '../lib/markdown'
 import type { Message, ToolCall } from '../lib/types'
-import { AlertIcon, CheckIcon, SparkIcon, ToolIcon } from './Icons'
+import { AlertIcon, BrainIcon, CheckIcon, SparkIcon, ToolIcon } from './Icons'
 
 export function ToolPills({ tools }: { tools: ToolCall[] }) {
   if (!tools.length) return null
@@ -35,6 +35,49 @@ export function ToolPills({ tools }: { tools: ToolCall[] }) {
   )
 }
 
+/**
+ * The model's thinking, folded away by default.
+ *
+ * Collapsed because it is usually long and rambling, and the answer is what
+ * you came for. Rendered as plain text rather than markdown: a thinking trace
+ * is half-formed by nature and formatting it lends it a confidence it has not
+ * earned.
+ */
+export function ReasoningPanel({
+  text,
+  live = false,
+}: {
+  text: string
+  live?: boolean
+}) {
+  if (!text.trim()) return null
+  return (
+    <details className="group mb-2 rounded-xl border border-line bg-sunken/60">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs text-muted transition hover:text-fg">
+        <BrainIcon
+          className={`size-3.5 shrink-0 text-accent ${live ? 'animate-breathe' : ''}`}
+        />
+        <span>{live ? 'Thinking…' : 'Thinking'}</span>
+        <span className="text-faint">
+          {text.length.toLocaleString()} characters
+        </span>
+        <span className="ml-auto text-faint transition group-open:rotate-90">›</span>
+      </summary>
+      <div className="max-h-72 overflow-y-auto border-t border-line px-3 py-2">
+        <p className="font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-muted">
+          {text}
+        </p>
+        {!live && (
+          <p className="mt-2 border-t border-line-soft pt-2 text-[11px] text-faint">
+            Not saved — the model is never shown its own thinking again, and
+            this disappears when the page reloads.
+          </p>
+        )}
+      </div>
+    </details>
+  )
+}
+
 export function MessageView({ message }: { message: Message }) {
   if (message.role === 'user') {
     return (
@@ -50,6 +93,7 @@ export function MessageView({ message }: { message: Message }) {
 
   return (
     <div className="animate-rise">
+      {message.reasoning && <ReasoningPanel text={message.reasoning} />}
       <ToolPills tools={message.tools} />
       <div className="text-[15px] text-fg">
         <Markdown text={message.content} />

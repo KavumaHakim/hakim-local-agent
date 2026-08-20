@@ -119,16 +119,39 @@ class DisabledToolOut(BaseModel):
     reason: str
 
 
-class ToolsOut(BaseModel):
-    """The tool roster, and why the missing ones are missing.
+class SwitchOut(BaseModel):
+    """One tool switch the UI can flip."""
 
-    Disabled tools are reported with their reason because that reason names the
-    environment variable that would turn them on, which is the only way to
-    discover it from the UI.
+    id: str
+    label: str
+    enabled: bool
+    # True when this is on because the environment says so, rather than
+    # because someone flipped it here. Shown so the UI can say which switches
+    # will survive a restart.
+    from_env: bool
+    # The switch this one is the sharp end of, if any: unrestricted Python is
+    # meaningless without the Python tool.
+    depends_on: str | None = None
+    # The same text the disabled list carries: what the tool can do and what
+    # it cannot protect you from.
+    risk: str = ''
+
+
+class ToggleRequest(BaseModel):
+    enabled: bool
+
+
+class ToolsOut(BaseModel):
+    """The tool roster, why the missing ones are missing, and the switches.
+
+    Disabled tools are reported with their reason because that reason states
+    the real boundary - and, for anything switched on from here, it is the
+    only place that boundary is written down.
     """
 
     tools: list[ToolOut]
     disabled: list[DisabledToolOut]
+    switches: list[SwitchOut] = []
     workspace: str
 
 

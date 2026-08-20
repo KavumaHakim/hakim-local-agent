@@ -107,6 +107,18 @@ class TurnQueueTests(unittest.TestCase):
         for turn in (first, second, third):
             list(drain(turn, timeout=0.05))
 
+    def test_the_first_turn_in_an_empty_queue_has_nothing_ahead_of_it(self):
+        """position() used to add one unconditionally, so a turn that was next
+        with nothing running reported a queue of one ahead of it - and the UI
+        showed 'Queued - 1 turn ahead' for a turn about to start."""
+        self.queue = TurnQueue(lambda turn: None)
+        # Deliberately not started: nothing is running, one turn is waiting.
+        turn = self.queue.submit(make_turn())
+        self.assertEqual(self.queue.position(turn), 0)
+
+        behind = self.queue.submit(make_turn())
+        self.assertEqual(self.queue.position(behind), 1)
+
     def test_backlog_is_bounded(self):
         release = threading.Event()
 

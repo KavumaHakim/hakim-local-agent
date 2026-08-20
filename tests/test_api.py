@@ -56,18 +56,33 @@ class ScriptedClient:
     def __init__(self, responses: list[dict[str, Any]]) -> None:
         self._responses = list(responses)
         self.seen: list[list[dict[str, Any]]] = []
+        # What the model was actually offered, which is how the tool switches
+        # are checked: the registry is what decides, not the roster endpoint.
+        self.tools_seen: list[list[dict[str, Any]] | None] = []
 
-    def _next(self, messages: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    def _next(
+        self,
+        messages: Iterable[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         self.seen.append([dict(m) for m in messages])
+        self.tools_seen.append(tools)
         if not self._responses:
             raise AssertionError("ScriptedClient ran out of responses")
         return self._responses.pop(0)
 
     def chat(self, messages, *, tools=None):
-        return self._next(messages)
+        return self._next(messages, tools)
 
-    def chat_stream(self, messages, *, tools=None, on_token=None):
-        message = self._next(messages)
+    def chat_stream(self, messages, *, tools=None, on_token=None, on_reasoning=None):
+        message = dict(self._next(messages, tools))
+        # `_reasoning` stands in for llama.cpp's reasoning_content deltas. The
+        # real client never puts them in the assembled message either, so it is
+        # popped rather than returned.
+        thinking = message.pop("_reasoning", "")
+        if on_reasoning and thinking:
+            on_reasoning(thinking)
+
         content = message.get("content") or ""
         if on_token and content:
             # Two fragments, so the test can tell streaming from a single
@@ -256,7 +271,7 @@ class ChatStreamTests(ApiTestCase):
         from models.qwen import QwenConnectionError
 
         class Broken(ScriptedClient):
-            def chat_stream(self, messages, *, tools=None, on_token=None):
+            def chat_stream(self, messages, *, tools=None, on_token=None, on_reasoning=None):
                 raise QwenConnectionError("server went away")
 
         self.runtime.make_client = lambda config: Broken([])
@@ -369,6 +384,123 @@ class ModelRouteTests(ApiTestCase):
         self.assertEqual(
             self.client.post("/api/models/nope/unload").status_code, 404
         )
+
+
+class ReasoningTests(ApiTestCase):
+    """Thinking is shown to the user but never fed back to the model."""
+
+    def test_reasoning_streams_as_its_own_event(self):
+        self.runtime.responses = [
+            {
+                "role": "assistant",
+                "content": "Paris.",
+                "_reasoning": "The capital of France is Paris.",
+            }
+        ]
+        events = self.say("capital of France?")
+
+        self.assertIn("reasoning", kinds(events))
+        self.assertEqual(
+            first(events, "reasoning")["text"], "The capital of France is Paris."
+        )
+        # It arrives on a separate channel, so it can never be mistaken for
+        # part of the answer.
+        tokens = "".join(data["text"] for name, data in events if name == "token")
+        self.assertEqual(tokens, "Paris.")
+
+    def test_reasoning_is_not_stored(self):
+        self.runtime.responses = [
+            {"role": "assistant", "content": "Paris.", "_reasoning": "thinking hard"}
+        ]
+        conversation_id = first(
+            self.say("capital of France?"), "accepted"
+        )["conversation_id"]
+
+        stored = self.client.get(f"/api/conversations/{conversation_id}").json()
+        blob = json.dumps(stored)
+        self.assertNotIn("thinking hard", blob)
+        self.assertEqual(stored["messages"][-1]["content"], "Paris.")
+
+    def test_reasoning_is_never_replayed_to_the_model(self):
+        """The chat template does not expect a thinking trace coming back in."""
+        self.runtime.responses = [
+            {"role": "assistant", "content": "first", "_reasoning": "private thoughts"}
+        ]
+        conversation_id = first(self.say("one"), "accepted")["conversation_id"]
+
+        self.runtime.responses = [{"role": "assistant", "content": "second"}]
+        self.say("two", conversation_id=conversation_id)
+
+        sent = json.dumps(self.runtime.clients[-1].seen[0])
+        self.assertNotIn("private thoughts", sent)
+
+
+class ToolSwitchTests(ApiTestCase):
+    def switches(self) -> dict[str, dict[str, Any]]:
+        body = self.client.get("/api/tools").json()
+        return {entry["id"]: entry for entry in body["switches"]}
+
+    def test_everything_risky_is_off_to_begin_with(self):
+        for identifier, entry in self.switches().items():
+            self.assertFalse(entry["enabled"], f"{identifier} was on by default")
+
+    def test_turning_a_switch_on_offers_the_tool_to_the_model(self):
+        body = self.client.post("/api/tools/python", json={"enabled": True}).json()
+        names = {tool["name"] for tool in body["tools"]}
+        self.assertIn("run_python", names)
+
+        # And the next turn actually sees it.
+        self.runtime.responses = [{"role": "assistant", "content": "ok"}]
+        self.say("hello")
+        offered = {
+            definition["function"]["name"]
+            for definition in (self.runtime.clients[-1].tools_seen[0] or [])
+        }
+        self.assertIn("run_python", offered)
+
+    def test_turning_it_off_again_withdraws_it(self):
+        self.client.post("/api/tools/python", json={"enabled": True})
+        body = self.client.post("/api/tools/python", json={"enabled": False}).json()
+        self.assertNotIn(
+            "run_python", {tool["name"] for tool in body["tools"]}
+        )
+
+    def test_a_sharp_end_needs_its_parent_first(self):
+        response = self.client.post(
+            "/api/tools/git_writes", json={"enabled": True}
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Git", response.json()["detail"])
+
+    def test_turning_a_parent_off_takes_its_sharp_end_with_it(self):
+        """Otherwise you could end up with unrestricted Python and no Python."""
+        self.client.post("/api/tools/python", json={"enabled": True})
+        self.client.post("/api/tools/python_unrestricted", json={"enabled": True})
+        self.assertTrue(self.switches()["python_unrestricted"]["enabled"])
+
+        self.client.post("/api/tools/python", json={"enabled": False})
+        self.assertFalse(self.switches()["python_unrestricted"]["enabled"])
+
+    def test_the_risk_text_survives_being_enabled(self):
+        """The warning matters most when the switch is on, so it must not be
+        harvested from the disabled list alone."""
+        before = self.switches()["terminal"]["risk"]
+        self.assertIn("AGENT_ENABLE_SHELL_TOOL", before)
+
+        self.client.post("/api/tools/terminal", json={"enabled": True})
+        after = self.switches()["terminal"]
+        self.assertTrue(after["enabled"])
+        self.assertEqual(after["risk"], before)
+
+    def test_an_unknown_switch_is_a_404(self):
+        response = self.client.post("/api/tools/nonsense", json={"enabled": True})
+        self.assertEqual(response.status_code, 404)
+
+    def test_overrides_do_not_claim_to_come_from_the_environment(self):
+        self.client.post("/api/tools/memory", json={"enabled": True})
+        entry = self.switches()["memory"]
+        self.assertTrue(entry["enabled"])
+        self.assertFalse(entry["from_env"])
 
 
 class MetaRouteTests(ApiTestCase):

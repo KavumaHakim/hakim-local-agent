@@ -20,6 +20,14 @@ export interface Message {
   elapsed: number | null
   model_key: string | null
   created_at: string
+  /**
+   * The model's thinking for this turn, when it produced any.
+   *
+   * Client-side only. The server streams it but never stores it, because a
+   * thinking trace is per-turn and must not be replayed to the model on the
+   * next round. So it survives until the page reloads and no longer.
+   */
+  reasoning?: string
 }
 
 export interface Conversation {
@@ -83,9 +91,22 @@ export interface DisabledTool {
   reason: string
 }
 
+export interface ToolSwitch {
+  id: string
+  label: string
+  enabled: boolean
+  /** On because the environment says so, so it survives a restart. */
+  from_env: boolean
+  /** The switch this one is the sharp end of, e.g. python for unrestricted. */
+  depends_on: string | null
+  /** What the tool can do, and what it cannot protect you from. */
+  risk: string
+}
+
 export interface ToolsResponse {
   tools: Tool[]
   disabled: DisabledTool[]
+  switches: ToolSwitch[]
   workspace: string
 }
 
@@ -106,6 +127,7 @@ export type TurnEvent =
   | { type: 'model'; key: string; label: string; state: 'loading' | 'ready'; warning?: string }
   | { type: 'start'; model_key: string }
   | { type: 'token'; text: string }
+  | { type: 'reasoning'; text: string }
   | { type: 'tool'; name: string; ok: boolean; summary: string }
   | { type: 'done'; message_id: number; content: string; tools: ToolCall[]; elapsed: number; model_key: string }
   | {

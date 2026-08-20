@@ -26,6 +26,13 @@ export interface TurnState {
   position: number
   /** Text streamed so far in the current round. */
   text: string
+  /**
+   * The model's thinking, accumulated across every round of this turn.
+   *
+   * Unlike `text` this is not cleared on a tool round: the whole point is
+   * seeing how it got there, and the rounds read as one train of thought.
+   */
+  reasoning: string
   tools: ToolCall[]
   modelKey: string | null
   modelLabel: string | null
@@ -40,6 +47,7 @@ const IDLE: TurnState = {
   phase: 'idle',
   position: 0,
   text: '',
+  reasoning: '',
   tools: [],
   modelKey: null,
   modelLabel: null,
@@ -110,6 +118,9 @@ export function useChat(options: ChatOptions) {
       setTurn({ ...IDLE, phase: 'queued' })
       const controller = new AbortController()
       abort.current = controller
+      // Kept alongside the state copy so `done` can attach the finished trace
+      // to the message without reading state it may not have committed yet.
+      let thinking = ''
 
       try {
         await streamChat(body, {
@@ -187,6 +198,14 @@ export function useChat(options: ChatOptions) {
             setTurn((current) => ({ ...current, text: current.text + event.text }))
             break
 
+          case 'reasoning':
+            thinking += event.text
+            setTurn((current) => ({
+              ...current,
+              reasoning: current.reasoning + event.text,
+            }))
+            break
+
           case 'tool':
             // A tool round produces no prose, so the streamed text is cleared
             // rather than glued to whatever the next round writes.
@@ -206,6 +225,8 @@ export function useChat(options: ChatOptions) {
               elapsed: event.elapsed,
               model_key: event.model_key,
               created_at: '',
+              // Not persisted server-side, so it lasts until a reload.
+              reasoning: thinking || undefined,
             }
             setMessages((current) => [...current, answer])
             setTurn(IDLE)

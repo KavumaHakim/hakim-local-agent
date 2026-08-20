@@ -98,8 +98,8 @@ export default function App() {
           break
         case 'tools':
           setNote(
-            tools
-              ? `Enabled: ${tools.tools.map((tool) => tool.name).join(', ')}\nDisabled: ${tools.disabled.map((item) => item.category).join(', ')}`
+            tools.data
+              ? `Enabled: ${tools.data.tools.map((tool) => tool.name).join(', ')}\nOff: ${tools.data.disabled.map((item) => item.category).join(', ')}`
               : 'Tools not loaded yet.',
           )
           break
@@ -152,7 +152,10 @@ export default function App() {
             if (id === chat.conversationId) newConversation()
           }}
           onNewConversation={newConversation}
-          tools={tools}
+          tools={tools.data}
+          toolPending={tools.pending}
+          toolError={tools.error}
+          onToggleTool={(id, enabled) => void tools.toggle(id, enabled)}
           autoRoute={autoRoute}
           onAutoRoute={setAutoRoute}
           thinking={thinking}

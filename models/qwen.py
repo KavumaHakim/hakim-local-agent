@@ -119,6 +119,7 @@ class QwenClient:
         *,
         tools: list[dict[str, Any]] | None = None,
         on_token: TokenCallback | None = None,
+        on_reasoning: TokenCallback | None = None,
     ) -> Message:
         """Stream a reply, then return the same assembled message `chat` would.
 
@@ -126,8 +127,12 @@ class QwenClient:
         takes minutes, so streaming is the difference between a usable
         interface and a blank screen.
 
-        `reasoning_content` deltas are counted but never passed to `on_token`:
-        the caller may show that thinking is happening, never what it says.
+        `reasoning_content` deltas go to `on_reasoning`, kept on a separate
+        channel from the answer. They are still never added to the assembled
+        message: thinking is per-turn and replaying it to the model on the next
+        round is exactly what the chat template does not expect. Showing it and
+        storing it are different questions, and only the first is the caller's
+        to make.
         """
         payload = self._build_payload(messages, tools)
         payload["stream"] = True
@@ -152,8 +157,10 @@ class QwenClient:
                     on_token(piece)
 
             thought = delta.get("reasoning_content")
-            if isinstance(thought, str):
+            if isinstance(thought, str) and thought:
                 reasoning_chars += len(thought)
+                if on_reasoning is not None:
+                    on_reasoning(thought)
 
             for fragment in delta.get("tool_calls") or []:
                 if isinstance(fragment, dict):

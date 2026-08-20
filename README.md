@@ -80,6 +80,7 @@ Use `tiny` or `fast` for day-to-day work. Reach for `reasoning` deliberately.
 ### Prerequisites
 
 - Python 3.11+
+- Node 20+ for the front end (verified on 26.7.0)
 - `llama-server.exe` from llama.cpp — this project was verified against
   **build 10373**
 - GGUF model files
@@ -92,8 +93,14 @@ python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
 
-Dependencies are only `requests` and `streamlit`. Everything else is standard
-library.
+Python dependencies are only `requests`, `fastapi` and `uvicorn`. Everything
+else is standard library.
+
+The front end needs Node (verified on 26.7.0):
+
+```bash
+npm --prefix web install
+```
 
 ### Point it at your files
 
@@ -114,13 +121,39 @@ No model paths are hardcoded anywhere in the Python.
 
 ### Web UI
 
+Two processes: the API, and the front end that talks to it.
+
 ```bash
-cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && .venv\Scripts\streamlit run app.py
+cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && .venv\Scripts\python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 
-Opens on <http://localhost:8501>. Pick a model in the sidebar, click **Load**,
-then chat. The model server starts automatically on your first message if it
-is not already up.
+```bash
+cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && npm --prefix web run dev
+```
+
+Opens on <http://127.0.0.1:5173>. Vite proxies `/api` to the API, so the
+browser sees one origin. Pick a model in the sidebar, click **Load**, then
+chat — or just send a message and the model starts on demand.
+
+Both bind to **127.0.0.1 on purpose**. With the tool flags on, this API can
+write files and run commands; that is fine as a local tool and unacceptable on
+a network interface. See [section 15](#15-security-posture).
+
+Two flags that matter:
+
+- **`--workers 1`** is the only supported setting, and is the default. The
+  model manager owns the `llama-server.exe` child processes, so a second
+  worker would mean a second manager fighting it for the same ports.
+- **Do not use `--reload`.** The reloader kills the worker in a way that does
+  not reliably reach the shutdown handler, and every restart then leaks a
+  `llama-server` holding gigabytes.
+
+For a single process serving both, build the front end first — FastAPI then
+serves it from the same origin and Vite is not involved:
+
+```bash
+npm --prefix web run build
+```
 
 ### Terminal
 
@@ -148,21 +181,30 @@ rather than starting a rival.
 
 ```
 local-agent/
-├── app.py               Streamlit chat UI
 ├── main.py              terminal CLI
 ├── config.py            all settings, environment-driven
 ├── models.json          model registry (paths, ports, RAM thresholds)
 ├── chat_store.py        SQLite conversation history
 ├── memory_store.py      durable facts, same SQLite file
-│
-├── ui_style.py          stylesheet + HTML fragments for the web UI
-├── ui_commands.py       slash commands + the dropdown/toggle scripts
 ├── requirements.txt
 ├── .gitignore           keeps weights/ and data/ out of any repo
 │
 ├── weights/             the GGUF model files (~9.5 GB, git-ignored)
 ├── data/                generated state: the SQLite database
 ├── samples/             example images for the OCR tool
+│
+├── api/                 the HTTP layer the front end talks to
+│   ├── main.py          app, lifespan, static serving
+│   ├── runtime.py       process-wide objects; runs one turn
+│   ├── turns.py         the queue: one turn at a time, with positions
+│   ├── schemas.py       request and response bodies
+│   └── routes/          chat (SSE), conversations, models, meta
+│
+├── web/                 React + TypeScript + Vite + Tailwind
+│   ├── src/lib/         api client, SSE reader, markdown, commands
+│   ├── src/hooks/       the turn state machine and data hooks
+│   ├── src/components/  sidebar, transcript, composer, palette
+│   └── dist/            build output (git-ignored)
 │
 ├── agent/
 │   ├── loop.py          the reasoning/action cycle
@@ -187,7 +229,7 @@ local-agent/
 │   ├── ocr_tool.py      GLM-OCR client (working)
 │   └── web.py           placeholder
 │
-└── tests/               388 tests, no server required
+└── tests/               418 tests, no server required
 ```
 
 ---
@@ -319,17 +361,25 @@ this". The figures are derived from measurement — GLM-OCR's 906 MB file holds
 deliberately high because a 4.8 GB model on an 8 GB machine genuinely thrashes.
 
 
-### Why in-process, not a separate service
+### Why it is now behind an API, having argued it should not be
 
-The plan this was built from suggested a FastAPI service on port 9000 proxying
-to the model ports. That was not built, for two reasons:
+An earlier version of this document rejected a FastAPI service, for two
+reasons: every caller was already Python, and the venv carried a
+`fastapi` ↔ `starlette` conflict. Both have since changed.
 
-1. Every caller is already Python. A second daemon and another port to keep
-   alive buys nothing for a single-user local tool.
-2. The venv already carries a `fastapi` ↔ `starlette` version conflict.
+The first reason ended when the front end became a browser application. A
+React app cannot import a Python class, so something has to speak HTTP, and
+the choice is only *where* the boundary sits — not whether there is one.
 
-The manager is a class you import. Wrapping it in HTTP later is a small change,
-and it is written so that stays true.
+The second was real and had to be cleared rather than worked around: FastAPI
+0.115 pinned `starlette<0.46` while Streamlit had already installed 1.3.1, so
+the venv could not have imported FastAPI at all. Upgrading FastAPI resolved
+towards the version already present, and deleting Streamlit removed the other
+side of the conflict entirely.
+
+What the old note got right is that the manager stayed a plain class you
+import. `api/` calls the same objects the CLI does and adds no logic of its
+own, so the CLI still runs with no API and no Node anywhere in sight.
 
 ---
 

@@ -51,6 +51,12 @@ export const api = {
 
   tools: () => request<ToolsResponse>('/tools'),
 
+  setTool: (id: string, enabled: boolean) =>
+    request<ToolsResponse>(`/tools/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
+
   models: () => request<ModelsResponse>('/models'),
 
   loadModel: (key: string) =>

@@ -10,7 +10,7 @@
 import { Markdown } from '../lib/markdown'
 import { useElapsed } from '../hooks/useResources'
 import type { TurnState } from '../hooks/useChat'
-import { formatDuration, ToolPills } from './Messages'
+import { formatDuration, ReasoningPanel, ToolPills } from './Messages'
 import { AlertIcon, ChipIcon, StopIcon } from './Icons'
 
 interface Props {
@@ -104,6 +104,10 @@ export function TurnStatus({ turn, onEscalate, onDismiss, onCancel }: Props) {
 
       {turn.phase === 'generating' && (
         <div>
+          {/* Open while it streams: on this hardware the thinking is often
+              the only thing arriving for minutes, and hiding it would put the
+              screen back to blank. */}
+          <ReasoningPanel text={turn.reasoning} live />
           <ToolPills tools={turn.tools} />
           {turn.text ? (
             <div className="text-[15px] text-fg">

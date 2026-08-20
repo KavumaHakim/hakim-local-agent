@@ -7,8 +7,14 @@
  */
 
 import { useState } from 'react'
-import type { Conversation, ModelsResponse, ToolsResponse } from '../lib/types'
+import type {
+  Conversation,
+  ModelsResponse,
+  ToolsResponse,
+  ToolSwitch,
+} from '../lib/types'
 import {
+  AlertIcon,
   ChipIcon,
   FolderIcon,
   PlusIcon,
@@ -33,6 +39,9 @@ interface Props {
   onNewConversation: () => void
 
   tools: ToolsResponse | null
+  toolPending: string | null
+  toolError: string | null
+  onToggleTool: (id: string, enabled: boolean) => void
 
   autoRoute: boolean
   onAutoRoute: (value: boolean) => void
@@ -219,23 +228,30 @@ export function Sidebar(props: Props) {
               ))}
             </div>
 
-            {tools.disabled.length > 0 && (
-              <details className="mt-3">
-                <summary className="cursor-pointer text-[11px] text-faint hover:text-muted">
-                  {tools.disabled.length} disabled
-                </summary>
-                <div className="mt-2 space-y-2">
-                  {tools.disabled.map((item) => (
-                    <div key={item.category} className="text-[11px]">
-                      <span className="text-muted">{item.category}</span>
-                      <p className="mt-0.5 leading-relaxed text-faint">
-                        {item.reason}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </details>
+            <div className="mt-3 space-y-1 border-t border-line-soft pt-3">
+              {tools.switches
+                .filter((entry) => !entry.depends_on)
+                .map((entry) => (
+                  <ToolSwitchRow
+                    key={entry.id}
+                    entry={entry}
+                    sharpEnds={tools.switches.filter(
+                      (other) => other.depends_on === entry.id,
+                    )}
+                    pending={props.toolPending}
+                    onToggle={props.onToggleTool}
+                  />
+                ))}
+            </div>
+
+            {props.toolError && (
+              <p className="mt-2 text-[11px] text-danger">{props.toolError}</p>
             )}
+
+            <p className="mt-3 text-[11px] leading-relaxed text-faint">
+              Switches last until the API restarts; the environment variables
+              are what make one permanent.
+            </p>
 
             <div className="mt-3 flex items-start gap-1.5 text-[11px] text-faint">
               <FolderIcon className="mt-px size-3 shrink-0" />
@@ -251,6 +267,108 @@ export function Sidebar(props: Props) {
         Nothing leaves this machine.
       </footer>
     </aside>
+  )
+}
+
+/**
+ * One tool switch, with its sharp end nested underneath.
+ *
+ * The risk text is shown against the switch rather than hidden behind a
+ * tooltip. These flags were environment variables precisely so that turning
+ * one on was a considered act; making it a click is the trade, and the least
+ * this can do is put the reason where the switch is.
+ */
+function ToolSwitchRow({
+  entry,
+  sharpEnds,
+  pending,
+  onToggle,
+}: {
+  entry: ToolSwitch
+  sharpEnds: ToolSwitch[]
+  pending: string | null
+  onToggle: (id: string, enabled: boolean) => void
+}) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 py-0.5">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={entry.enabled}
+          aria-label={entry.label}
+          disabled={pending !== null}
+          onClick={() => onToggle(entry.id, !entry.enabled)}
+          className={`relative h-4 w-7 shrink-0 rounded-full transition disabled:opacity-40 ${
+            entry.enabled ? 'bg-accent' : 'bg-line'
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 size-3 rounded-full bg-white transition-all ${
+              entry.enabled ? 'left-3.5' : 'left-0.5'
+            }`}
+          />
+        </button>
+        <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
+          {entry.label}
+        </span>
+        {entry.from_env && (
+          <span
+            title="On because the environment says so, so it survives a restart."
+            className="shrink-0 rounded border border-line px-1 text-[10px] text-faint"
+          >
+            env
+          </span>
+        )}
+        {entry.risk && (
+          <button
+            type="button"
+            onClick={() => setOpen((value) => !value)}
+            title="What this allows"
+            className="shrink-0 text-faint transition hover:text-warn"
+          >
+            <AlertIcon className="size-3" />
+          </button>
+        )}
+      </div>
+
+      {open && entry.risk && (
+        <p className="mt-1 mb-1.5 ml-9 border-l-2 border-warn/40 pl-2 text-[11px] leading-relaxed text-faint">
+          {entry.risk}
+        </p>
+      )}
+
+      {sharpEnds.length > 0 && entry.enabled && (
+        <div className="ml-9 space-y-0.5">
+          {sharpEnds.map((child) => (
+            <div key={child.id} className="flex items-center gap-2 py-0.5">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={child.enabled}
+                aria-label={child.label}
+                disabled={pending !== null}
+                onClick={() => onToggle(child.id, !child.enabled)}
+                className={`relative h-3.5 w-6 shrink-0 rounded-full transition disabled:opacity-40 ${
+                  child.enabled ? 'bg-warn' : 'bg-line'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 size-2.5 rounded-full bg-white transition-all ${
+                    child.enabled ? 'left-3' : 'left-0.5'
+                  }`}
+                />
+              </button>
+              <span className="min-w-0 flex-1 truncate text-[11px] text-faint">
+                {child.label.replace(/^.*— /, '')}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 

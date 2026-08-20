@@ -206,7 +206,7 @@ class AgentStreamingTests(unittest.TestCase):
             def chat(self, messages, *, tools=None):
                 return {"role": "assistant", "content": "non-streamed"}
 
-            def chat_stream(self, messages, *, tools=None, on_token=None):
+            def chat_stream(self, messages, *, tools=None, on_token=None, on_reasoning=None):
                 self.streamed = True
                 if on_token:
                     on_token("streamed")
@@ -233,7 +233,7 @@ class AgentStreamingTests(unittest.TestCase):
             def chat(self, messages, *, tools=None):
                 return {"role": "assistant", "content": "non-streamed"}
 
-            def chat_stream(self, messages, *, tools=None, on_token=None):
+            def chat_stream(self, messages, *, tools=None, on_token=None, on_reasoning=None):
                 self.streamed = True
                 return {"role": "assistant", "content": "streamed"}
 

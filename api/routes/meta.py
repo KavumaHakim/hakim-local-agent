@@ -1,31 +1,45 @@
-"""The tool roster and a health check.
+"""The tool roster, its switches, and a health check.
 
-Both are read-only views of how the process was configured. Neither can change
-anything: the tool flags are environment variables read at startup, and
-exposing a switch for them over HTTP would defeat the point of having them be
-deliberate.
+The switches are a deliberate loosening of the original design, and it is
+worth being honest about which one.
+
+Every risky tool is off unless an environment variable says otherwise, and the
+point of that was that turning one on is a considered act taken before the
+process starts. Flipping them from a browser makes it one click. What has not
+changed is everything underneath: the allowlists, the workspace jail, the
+absence of delete and rename, and the fact that the Python and terminal tools
+are not sandboxes. What now carries more weight is the loopback binding - this
+API can hand a model a shell, so it must never be reachable from anywhere but
+this machine.
+
+Overrides live in memory only. A restart returns to what the environment says,
+so a switch cannot quietly become the permanent state of the system.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+import dataclasses
+
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.deps import get_runtime
-from api.runtime import Runtime
-from api.schemas import DisabledToolOut, HealthOut, ToolOut, ToolsOut
+from api.runtime import FLAGS_BY_ID, TOOL_FLAGS, Runtime
+from api.schemas import (
+    DisabledToolOut,
+    HealthOut,
+    SwitchOut,
+    ToggleRequest,
+    ToolOut,
+    ToolsOut,
+)
 
 router = APIRouter(tags=["meta"])
 
 
-@router.get("/tools", response_model=ToolsOut)
-def list_tools(runtime: Runtime = Depends(get_runtime)):
-    """Which tools the model is offered, and why the others are withheld.
+def _tools_snapshot(runtime: Runtime) -> ToolsOut:
+    config = runtime.effective_config()
+    registry, disabled = runtime.registry_for(config)
 
-    The reasons are included because each one names the environment variable
-    that would enable it - otherwise there is no way to find that out from the
-    interface.
-    """
-    registry, disabled = runtime.registry_for(runtime.config)
     tools = [
         ToolOut(
             name=tool.name,
@@ -36,11 +50,89 @@ def list_tools(runtime: Runtime = Depends(get_runtime)):
         for category, entries in registry.categories().items()
         for tool in entries
     ]
+
+    # A tool drops out of the disabled list the moment it is enabled, which
+    # would take its explanation with it - and a switch that is ON is when the
+    # warning matters most. So the reasons are harvested from a registry built
+    # with everything off, which yields all of them whatever is currently on.
+    _, every_reason = runtime.registry_for(
+        dataclasses.replace(config, **{flag.field: False for flag in TOOL_FLAGS})
+    )
+    reasons = {item.category: item.reason for item in every_reason}
+    overrides = runtime.overrides
+
+    switches = []
+    for flag in TOOL_FLAGS:
+        # Sub-flags have no category of their own; they inherit the warning
+        # from the tool they are the sharp end of.
+        risk = reasons.get(flag.id.replace("_", " "), "")
+        if not risk and flag.depends_on:
+            risk = reasons.get(flag.depends_on.replace("_", " "), "")
+
+        switches.append(
+            SwitchOut(
+                id=flag.id,
+                label=flag.label,
+                enabled=bool(getattr(config, flag.field)),
+                from_env=flag.field not in overrides
+                and bool(getattr(runtime.config, flag.field)),
+                depends_on=flag.depends_on,
+                risk=risk,
+            )
+        )
+
     return ToolsOut(
         tools=tools,
         disabled=[DisabledToolOut(**vars(item)) for item in disabled],
-        workspace=str(runtime.config.workspace),
+        switches=switches,
+        workspace=str(config.workspace),
     )
+
+
+@router.get("/tools", response_model=ToolsOut)
+def list_tools(runtime: Runtime = Depends(get_runtime)):
+    """Which tools the model is offered, and why the others are withheld."""
+    return _tools_snapshot(runtime)
+
+
+@router.post("/tools/{flag_id}", response_model=ToolsOut)
+def set_tool(
+    flag_id: str,
+    body: ToggleRequest,
+    runtime: Runtime = Depends(get_runtime),
+):
+    """Turn one tool on or off for this process.
+
+    Refused mid-turn: the registry is built when a turn starts, so changing it
+    underneath one would either do nothing or change what the model is offered
+    halfway through, and neither is worth the confusion.
+    """
+    if flag_id not in FLAGS_BY_ID:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"Unknown tool switch {flag_id!r}. "
+            f"Available: {', '.join(FLAGS_BY_ID)}.",
+        )
+
+    if runtime.queue.busy():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "A turn is running. Tool changes apply from the next turn, so this "
+            "would not affect it anyway.",
+        )
+
+    flag = FLAGS_BY_ID[flag_id]
+    if body.enabled and flag.depends_on:
+        parent = FLAGS_BY_ID[flag.depends_on]
+        if not getattr(runtime.effective_config(), parent.field):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Turn on {parent.label} first: {flag.label} is its sharp end, "
+                f"not a tool of its own.",
+            )
+
+    runtime.set_override(flag_id, body.enabled)
+    return _tools_snapshot(runtime)
 
 
 @router.get("/health", response_model=HealthOut)
