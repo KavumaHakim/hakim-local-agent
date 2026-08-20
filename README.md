@@ -3,8 +3,9 @@
 A local AI agent built on llama.cpp. Runs entirely on your machine — no API keys,
 no network calls, nothing leaves the box.
 
-Two front ends over one engine: a Streamlit chat UI and a terminal CLI. Both use
-the same agent, the same tools and the same model manager.
+Two front ends over one engine: a React web app talking to a FastAPI layer, and
+a terminal CLI. Both use the same agent, the same tools and the same model
+manager — the API adds transport, not a second implementation.
 
 ---
 
@@ -237,16 +238,20 @@ local-agent/
 ## 6. Architecture
 
 ```
-User
- → Agent            (agent/loop.py)
- → Qwen             (models/qwen.py → llama-server)
+Browser            (web/ — React, talks only to /api)
+ → FastAPI         (api/routes/chat.py — one POST, one SSE stream)
+ → Turn queue      (api/turns.py — one turn at a time, the rest wait)
+ → Agent           (agent/loop.py)
+ → Qwen            (models/qwen.py → llama-server)
  → tool call
- → Tool Registry    (tools/base.py)
+ → Tool Registry   (tools/base.py)
  → tool execution
  → tool result
  → Qwen
- → final response
+ → final response  (streamed back out as events the whole way)
 ```
+
+The CLI enters at **Agent** and skips the first three rows entirely.
 
 `Agent.send()` loops up to `max_iterations`:
 
@@ -261,10 +266,12 @@ type, or a tool throwing — all come back as `ToolResult(ok=False)` whose text
 goes to the model so it can correct itself. Only genuinely broken server output
 becomes an error the user sees.
 
-**Reasoning is never replayed or displayed.** llama.cpp returns thinking in
-`reasoning_content`, separate from `content`. The agent stores only `content`
-and `tool_calls`; the streaming client counts reasoning characters but discards
-the text.
+**Reasoning is displayed but never replayed.** llama.cpp returns thinking in
+`reasoning_content`, separate from `content`. It streams to the UI on its own
+callback, and the agent still stores only `content` and `tool_calls` — so it is
+never sent back to the model and never written to the database. Showing it and
+feeding it back are different questions; only the first is the caller's to
+decide. See [section 11](#11-the-web-ui).
 
 **History trimming** only cuts immediately before a `user` message, so a tool
 result is never orphaned from the call it belongs to — which the chat template
@@ -446,6 +453,17 @@ turn; guessing big wastes minutes on every simple question.
 
 Disabled tools are not registered at all — sending the model a definition it can
 only fail on wastes context and a whole round-trip.
+
+**Turning them on.** Each of these has an environment variable, listed in
+[section 13](#13-configuration), and each can also be switched from the
+sidebar. The switches apply from the next turn and last until the API
+restarts; the environment variables are what make a choice permanent. The
+second flags — unrestricted Python, git commits, state-changing HTTP — are
+separate switches nested under their tool, and go off with it.
+
+Read the section for a tool before enabling it. What each one can and cannot
+protect you from is written there, and the same text appears next to its
+switch.
 
 ### calculator
 
@@ -665,8 +683,9 @@ Two tables. `conversations` holds title, model, timestamps. `messages` holds
 role, content, tool calls as JSON, elapsed time. Tool calls are display metadata
 rather than conversation state, so they do not earn their own table.
 
-A connection is opened per operation rather than held open — Streamlit reruns on
-background threads, and a shared `sqlite3` connection is not safe across them.
+A connection is opened per operation rather than held open — turns run on a
+worker thread while requests are served on others, and a shared `sqlite3`
+connection is not safe across threads.
 
 Timestamps are microsecond resolution. At second resolution several updates land
 in the same tick and "most recently updated" ordering silently falls back to
@@ -686,50 +705,74 @@ Stored at `data/chat_history.db`; `AGENT_DB_PATH` moves it.
 
 ## 11. The web UI
 
-- User turns are right-aligned violet bubbles; replies sit flat and full-width
-- Tool activity appears as rounded pills with green/red status dots
-- Animated typing dots until the first token arrives
-- Empty state with four clickable starter prompts
-- Sidebar: model picker and status stay visible; **Settings**, **Tools** and
-  **History** fold into collapsible sections so the panel stays short
-- **Hide panel / Show panel** button, top right
+React 19, TypeScript, Vite 8 and Tailwind 4, in [`web/`](web/). About 70 kB
+gzipped, because the dependency list stops at those four.
 
-### Two Streamlit details worth remembering
+- User turns are right-aligned accent bubbles; replies sit flat and full-width
+- Tool activity appears as pills, and a tool round clears the streamed text
+  rather than gluing two rounds together
+- **Each stage of a turn is named** — queued with its position, model loading,
+  generating — with a live elapsed timer. One spinner for all three says
+  nothing on a machine where each takes minutes, and telling slow progress
+  from a hang is the entire difficulty
+- The model's **reasoning** streams into a collapsible panel — see below
+- **Tool switches** in the sidebar, with each tool's own risk text
+- Slash completion inline in the composer, and a ⌘K palette over commands,
+  models and conversations
+- Sidebar folds away; light and dark both supported
 
-**Role detection.** Custom emoji avatars render as a bare `<div>` whose only
-distinguishing class is a build-specific emotion hash. The stable hook is
-Streamlit's own `aria-label="Chat message from user"`.
+### No markdown library, and no innerHTML
 
-**Layering.** Streamlit's `stHeader` sits at `z-index: 999990` with an opaque
-background covering the top 60 px. Anything you pin up there must clear it —
-this is why the sidebar toggle was invisible until its z-index was raised above
-that.
+[`web/src/lib/markdown.tsx`](web/src/lib/markdown.tsx) renders the subset that
+actually appears in replies — fenced code, headings, lists, quotes, and inline
+code, bold, italic and links — in about a hundred lines.
 
-Also: `st.components.v1.html` is deprecated (removal dated 2026-06-01) — use
-`st.iframe`, which also grants the same-origin access the scripts need. Note
-`height=0` renders nothing; use `height=1`.
+It builds React elements, never HTML, so there is no `dangerouslySetInnerHTML`
+anywhere in the app and no sanitiser to get wrong. A model that emits
+`<script>` emits eight harmless characters. Links are restricted to `http(s)`,
+so a `javascript:` URL renders as text.
 
-Both browser scripts degrade safely: if the frame cannot reach the parent
-document they do nothing, and every command still works typed in full.
+### Reasoning
+
+With `--reasoning-format deepseek`, llama.cpp returns thinking as
+`reasoning_content` deltas. Those stream on their own channel — `on_reasoning`,
+never mixed into the answer — as far as a `reasoning` event and a collapsed
+panel.
+
+**It is never sent back to the model, and never stored.** `_assistant_entry`
+keeps the answer and the tool calls only, so no thinking trace is replayed
+into a later prompt, and nothing writes it to the database. It lives until the
+page reloads, and the panel says so.
+
+Only models that think produce any: Qwen3 with **Extended thinking** on.
+Ministral does not, and its panel simply never appears.
 
 ---
 
 ## 12. Commands
 
-Type `/` in the chat box and a dropdown appears. ↑/↓ to move, Enter or Tab to
-accept, Esc to dismiss, or click.
+Type `/` in the composer and a dropdown appears. ↑/↓ to move, Enter or Tab to
+accept, Esc to dismiss, or click. **⌘K / Ctrl+K** opens a palette over the same
+commands plus every model and saved conversation.
 
 | Command | Does |
 |---|---|
 | `/help` | Show the commands |
 | `/models` | List models and which is loaded |
-| `/model <key>` | Switch model |
+| `/model <key>` | Select a model; it loads on your next message |
+| `/load <key>` | Load a model now |
 | `/unload` | Unload the current model, free its RAM |
-| `/tools` | List available tools |
+| `/tools` | List enabled tools and what is off |
 | `/auto` | Toggle automatic routing |
-| `/clear` | Start a new conversation |
+| `/thinking` | Toggle extended thinking |
+| `/new`, `/clear` | Start a new conversation |
 
-The CLI has the same set plus `/quit`.
+**The server knows nothing about commands.** It has REST endpoints, and these
+are the client's shorthand for them — unlike the Streamlit build, where
+`/model` was parsed out of the message text server-side. Everything a command
+does is also a control in the UI.
+
+The CLI has its own smaller set plus `/quit`.
 
 ---
 
@@ -787,7 +830,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**388 tests, no model server needed.** They run in about 10 seconds.
+**430 tests, no model server needed.** They run in about 30 seconds.
 
 | File | Covers |
 |---|---|
@@ -802,6 +845,12 @@ cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && .venv\Scripts\python -m unittest dis
 | `test_shell_tool.py` | Allowlist, chaining, dangerous options, path confinement |
 | `test_http_tool.py` | Host/scheme allowlist, redirect refusal, method gating |
 | `test_port_reclaim.py` | Reclaiming a port from a llama-server we did not start |
+| `test_turns.py` | The queue: serialisation, positions, bounded backlog, a runner that raises |
+| `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches |
+
+The API tests use the same manager harness as the model tests and a scripted
+chat client, so none of them depend on whether something happens to be
+listening on a port — which has produced false greens here before.
 | `test_file_writes.py` | Writing, overwrite gating, self-protection |
 | `test_python_scripts.py` | Script files in both modes, and the workspace guard |
 | `test_git_tool.py` | Real throwaway repositories; write gating |
@@ -832,8 +881,32 @@ on its allowlist.
 - Git: off by default; no push, and nothing that discards uncommitted work
 - Registry: validates arguments, converts every failure into a message for the
   model rather than a crash
-- Web UI binds to localhost; the agent can read your workspace, so do not expose
-  it to a network you do not control
+- Front end: no `dangerouslySetInnerHTML` anywhere, so model output cannot
+  become markup; links are restricted to `http(s)`
+
+### The API changes this, and it is worth being exact about how
+
+With tools enabled, the API can write files, run allowlisted commands and
+execute Python. That is a **remote code execution surface** if it is reachable,
+so:
+
+- **It binds to `127.0.0.1`, stated explicitly in the run command** rather than
+  left to a default someone could helpfully "fix" later. Do not put it on
+  `0.0.0.0`.
+- **There is no CORS middleware at all.** Vite proxies `/api` in development
+  and FastAPI serves the built app in production, so both are same-origin and
+  none is needed. Permissive CORS would let any page you happened to have open
+  drive your agent.
+- There is no authentication, because loopback binding on a single-user
+  machine is the boundary. If that ever stops being true, this needs auth
+  before it needs anything else.
+
+**Tool switches are a deliberate loosening.** The flags were environment
+variables so that enabling one was a considered act taken before startup; the
+UI makes it a click. Nothing underneath moved — allowlists, workspace jail, no
+delete or rename, and the Python and terminal tools are still not sandboxes.
+Overrides are held in memory only, so a restart returns to whatever the
+environment says and a switch cannot quietly become permanent.
 
 ---
 
@@ -855,23 +928,38 @@ Being straight about this, because the difference matters.
   prompt it wrote, read the result and answered "HK-4127-B, 36 crates" in 89 s
 - **The model manager starts models for real**, not just against a fake process
   layer
+- **A full turn through the React UI and the API**, against Ministral on 8084:
+  `17 * 43 - 209` → `calculate` tool call → **522**, correct, 127.1 s. Every
+  stage arrived as its own event, and the answer was stored with its tool list
+  and elapsed time.
+- **History is written by real model turns.** Conversation 10 was created,
+  titled from the prompt, and holds the user message and the answer with
+  `model_key=mistral`, `elapsed=127.1`, `tools=['calculate']`.
+- **The manager adopts a server it did not start.** The llama-server already
+  running on 8084 was reported `ready, adopted` rather than fought over.
 
 ### Verified without the model
 
-- 388 tests
-- Model registry resolves all three files; RAM probe reads correctly
-- Router decisions
-- Slash dropdown: filtering, positioning, hide rules
+- 430 tests
+- The React app against the real API: conversation list, tool roster with its
+  real disabled reasons, model list, theme in both schemes, no sideways scroll
+- **Tool switches, in the browser.** Turning Python on took the roster from 3
+  tools to 5 and offered `run_python` and `run_python_file` to the next turn;
+  turning it off withdrew them
+- `GET /api/models` latency, before and after the fix: **18.7 s → 1.0 s**
 - Terminal tool: ran `git` for real in a scratch repository and confirmed that
   `&&` and `;` chaining does not execute a second command
-- Sidebar toggle in expanded and collapsed states
-- History: write, read, list, delete, and rendering in the sidebar
 
 ### Not verified
 
+- **Reasoning has never been seen from a live thinking model.** The plumbing is
+  covered by tests using a scripted client — the event streams, it is not
+  stored, and it is not replayed into the next prompt — but no Qwen3 model has
+  been run with thinking on to watch a real trace arrive. That needs the 8B
+  loaded, which evicts whatever else is resident.
 - **Auto-routing has never actually switched a model live.**
-- **History has never been written by a real model turn** — only by direct
-  store calls.
+- **The queue has never been exercised by two concurrent real turns.** Its
+  behaviour is covered by tests, including that only one runs at a time.
 
 ---
 
@@ -891,9 +979,14 @@ Close something, or pick a smaller model. Thresholds are in `models.json`.
 pages from disk on every token. `reasoning` needs ~6.2 GB free on an 8 GB
 machine, which is tight. Also confirm `-t` matches your 4 logical processors.
 
-**Sidebar edits do not appear** — Streamlit caches imported modules. Changes to
-`ui_style.py` or `ui_commands.py` need the Streamlit **process** restarted, not
-just a page reload.
+**Front-end edits do not appear** — Vite hot-reloads `web/` on save. Changes to
+anything under `api/` need the **uvicorn process** restarted, since it runs
+without `--reload` on purpose (see [section 4](#4-running-it)).
+
+**Orphaned `llama-server.exe`** — the API stops the models it started when it
+shuts down. Killing it in a way that skips that handler, or running it with
+`--reload`, leaves one holding gigabytes. Check with
+`netstat -ano | findstr :808` and stop it by PID.
 
 **Tool calling stops working** — check the server was started with `--jinja`
 (default on build 10373). Without it, llama.cpp does not parse tool calls and
@@ -924,4 +1017,4 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 
 ---
 
-*Built with llama.cpp, Python 3.11, Streamlit and no agent frameworks.*
+*Built with llama.cpp, Python 3.11, FastAPI, React and no agent frameworks.*
