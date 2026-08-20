@@ -12,3 +12,13 @@ __pycache__/
 
 # Stray downloads.
 *.apk
+
+# Secrets. The cloud providers need API keys, and this is a git repository now,
+# so the keys live in a file that can never be committed. There is deliberately
+# no .env.example with real-looking values in it either - only the variable
+# names, documented in the README.
+.env
+.env.*
+!.env.example
+*.key
+secrets.json
