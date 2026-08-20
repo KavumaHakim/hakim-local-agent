@@ -200,6 +200,16 @@ class ModelManager:
     def default_key(self) -> str:
         return self._default
 
+    @property
+    def max_active(self) -> int:
+        """How many models may be resident at once. 1 on this machine."""
+        return self._max_active
+
+    @property
+    def idle_timeout(self) -> float:
+        """Seconds of disuse before a model is unloaded. 0 disables it."""
+        return self._idle_timeout
+
     def specs(self) -> list[ModelSpec]:
         return list(self._specs.values())
 
