@@ -12,7 +12,8 @@ import { Composer } from './components/Composer'
 import { EmptyState, MessageView } from './components/Messages'
 import { Sidebar } from './components/Sidebar'
 import { TurnStatus } from './components/TurnStatus'
-import { SidebarIcon } from './components/Icons'
+import { CloudIcon, SidebarIcon } from './components/Icons'
+import { RemoteConsent } from './components/RemoteConsent'
 import { useChat } from './hooks/useChat'
 import { useConversations, useHotkey, useModels, useTools } from './hooks/useResources'
 import { COMMANDS, parseCommand, type CommandId } from './lib/commands'
@@ -131,6 +132,8 @@ export default function App() {
     [chat, runCommand],
   )
 
+  const selectedModel =
+    models.models?.models.find((model) => model.key === modelKey) ?? null
   const empty = chat.messages.length === 0 && chat.turn.phase === 'idle'
 
   return (
@@ -173,9 +176,12 @@ export default function App() {
           >
             <SidebarIcon className="size-4" />
           </button>
-          <p className="min-w-0 truncate text-xs text-faint">
-            {models.models?.models.find((model) => model.key === modelKey)?.label ??
-              'No model'}
+          <p className="flex min-w-0 items-center gap-1.5 truncate text-xs text-faint">
+            {selectedModel?.remote && (
+              <CloudIcon className="size-3 shrink-0 text-warn" />
+            )}
+            {selectedModel?.label ?? 'No model'}
+            {selectedModel?.remote && ` · ${selectedModel.provider}`}
             {autoRoute && ' · auto-routing'}
             {thinking && ' · thinking'}
           </p>
@@ -244,6 +250,22 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {chat.consent && (
+        <RemoteConsent
+          request={chat.consent.request}
+          localLabel={
+            models.models?.models.find(
+              (model) => model.key === models.models?.default_key,
+            )?.label ?? 'the local model'
+          }
+          onApprove={chat.approveRemote}
+          onDecline={() =>
+            chat.declineRemote(models.models?.default_key ?? 'mistral')
+          }
+          onDismiss={chat.dismissConsent}
+        />
+      )}
 
       <CommandPalette
         open={paletteOpen}

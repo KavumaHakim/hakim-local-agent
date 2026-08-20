@@ -17,6 +17,33 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
+def load_env_file(path: Path | None = None) -> None:
+    """Read `.env` into the environment, without overriding what is already set.
+
+    Hand-rolled rather than adding python-dotenv: the format needed here is
+    KEY=value, and a dependency for that is not worth it.
+
+    Real environment variables win, so exporting a key in the shell overrides
+    the file rather than being silently ignored - which is the behaviour people
+    expect when they are trying to test one key quickly.
+    """
+    path = path or (PROJECT_ROOT / ".env")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip()
+        value = value.strip().strip('"').strip("'")
+        if name and name not in os.environ:
+            os.environ[name] = value
+
+
 def _env_str(name: str, default: str) -> str:
     value = os.environ.get(name, "").strip()
     return value or default
@@ -246,5 +273,10 @@ class Config:
 
 
 def load_config() -> Config:
-    """Build the configuration from the environment."""
+    """Build the configuration from the environment.
+
+    `.env` is read first so API keys land in the environment before anything
+    looks for them.
+    """
+    load_env_file()
     return Config.from_env()

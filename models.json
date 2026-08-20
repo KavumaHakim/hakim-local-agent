@@ -7,7 +7,8 @@
     "of ~0.75, so small models get file*0.8 plus ~250 MB headroom. 'reasoning' is",
     "deliberately far more conservative: at 4.8 GB it cannot stay resident on an",
     "8 GB machine and pages from disk, so it needs real headroom, not a formula.",
-    "models_dir points at local-agent/weights. runner.bat reads its own path from ../config_model.txt, which was updated to match. Forward slashes are used deliberately: Windows accepts them and they cannot be mistaken for escape sequences."
+    "models_dir points at local-agent/weights. runner.bat reads its own path from ../config_model.txt, which was updated to match. Forward slashes are used deliberately: Windows accepts them and they cannot be mistaken for escape sequences.",
+    "Entries with a 'provider' other than 'local' are hosted APIs: no file, no port, no RAM threshold, nothing to load, and they do not join the one-at-a-time rotation because they use no RAM. 'model' is the provider's own id and is the thing most likely to go stale - confirm it against GET /v1/models for the key rather than trusting it. Keys are named here, never stored here: put the values in .env, which is git-ignored."
   ],
   "server_exe": "C:\\Users\\SHAMI\\HAKIM\\AI\\LLAMA CP\\llama-server.exe",
   "models_dir": "C:/Users/SHAMI/HAKIM/AI/local-agent/weights",
@@ -58,6 +59,26 @@
       "threads": 4,
       "min_free_mb": 6200,
       "description": "Harder reasoning and longer tasks. Slow on this machine."
+    },
+    {
+      "key": "gemini",
+      "label": "Gemini",
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key_env": "GEMINI_API_KEY",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "context": 1048576,
+      "description": "Hosted. Seconds instead of minutes, and leaves this machine: prompts, conversation history and tool results all go to Google. Needs internet and GEMINI_API_KEY."
+    },
+    {
+      "key": "cerebras",
+      "label": "GPT-OSS 120B (Cerebras)",
+      "provider": "cerebras",
+      "model": "gpt-oss-120b",
+      "api_key_env": "CEREBRAS_API_KEY",
+      "base_url": "https://api.cerebras.ai/v1",
+      "context": 65536,
+      "description": "Hosted. An open 120B on Cerebras hardware, far faster than anything local here, and leaves this machine. Needs internet and CEREBRAS_API_KEY."
     }
   ]
 }

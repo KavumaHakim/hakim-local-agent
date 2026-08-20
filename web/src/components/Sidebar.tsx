@@ -9,6 +9,7 @@
 import { useState } from 'react'
 import type {
   Conversation,
+  Model,
   ModelsResponse,
   ToolsResponse,
   ToolSwitch,
@@ -16,6 +17,7 @@ import type {
 import {
   AlertIcon,
   ChipIcon,
+  CloudIcon,
   FolderIcon,
   PlusIcon,
   SparkIcon,
@@ -89,9 +91,10 @@ export function Sidebar(props: Props) {
           >
             {models?.models.map((model) => (
               <option key={model.key} value={model.key}>
+                {model.remote ? '☁ ' : ''}
                 {model.label}
-                {!model.available ? '  (file missing)' : ''}
-                {model.state === 'ready' ? '  ●' : ''}
+                {unusableReason(model, models.online)}
+                {model.state === 'ready' && !model.remote ? '  ●' : ''}
               </option>
             ))}
           </select>
@@ -102,10 +105,31 @@ export function Sidebar(props: Props) {
             </p>
           )}
 
-          {selected && !selected.available && (
+          {selected && !selected.available && !selected.remote && (
             <p className="mt-2 rounded-lg border border-danger/30 bg-danger/5 px-2 py-1.5 text-[11px] text-danger">
               Weights not on disk.
             </p>
+          )}
+
+          {selected?.remote && (
+            <div className="mt-2 space-y-1.5">
+              <p className="flex items-start gap-1.5 rounded-lg border border-warn/30 bg-warn/5 px-2 py-1.5 text-[11px] text-warn">
+                <CloudIcon className="mt-px size-3 shrink-0" />
+                <span>
+                  Runs on {selected.provider}'s servers. Prompts, history and
+                  tool results leave this machine.
+                </span>
+              </p>
+              {!selected.has_key && (
+                <p className="text-[11px] text-danger">{selected.error}</p>
+              )}
+              {selected.has_key && models && !models.online && (
+                <p className="text-[11px] text-danger">
+                  No internet — turns fall back to{' '}
+                  {models.models.find((m) => m.key === models.default_key)?.label}.
+                </p>
+              )}
+            </div>
           )}
 
           <div className="mt-2.5 flex items-center gap-2">
@@ -126,7 +150,7 @@ export function Sidebar(props: Props) {
             )}
           </div>
 
-          {selected && (
+          {selected && !selected.remote && (
             <button
               type="button"
               disabled={
@@ -263,8 +287,18 @@ export function Sidebar(props: Props) {
         )}
       </div>
 
-      <footer className="border-t border-line px-4 py-2.5 text-[11px] text-faint">
-        Nothing leaves this machine.
+      {/* This used to read "Nothing leaves this machine." Hosted models made
+          that untrue, and a reassurance that is only sometimes right is worse
+          than none - so it now reports the model actually selected. */}
+      <footer className="flex items-center gap-1.5 border-t border-line px-4 py-2.5 text-[11px] text-faint">
+        {selected?.remote ? (
+          <>
+            <CloudIcon className="size-3 shrink-0 text-warn" />
+            <span>Turns go to {selected.provider}.</span>
+          </>
+        ) : (
+          <span>Nothing leaves this machine.</span>
+        )}
       </footer>
     </aside>
   )
@@ -370,6 +404,14 @@ function ToolSwitchRow({
       )}
     </div>
   )
+}
+
+/** Why a model cannot be used right now, as a dropdown suffix. */
+function unusableReason(model: Model, online: boolean): string {
+  if (!model.remote) return model.available ? '' : '  (file missing)'
+  if (!model.has_key) return '  (no API key)'
+  if (!online) return '  (offline)'
+  return ''
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {

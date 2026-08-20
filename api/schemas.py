@@ -27,6 +27,11 @@ class ChatRequest(BaseModel):
     model_key: str | None = None
     enable_thinking: bool = False
     auto_route: bool = False
+    # Agreement to send this turn to a hosted provider, when the auto-router
+    # chose one rather than the user. Requests that need it and do not carry it
+    # are refused with 409 and the details, before anything is stored or run -
+    # the agent loop cannot pause mid-turn to ask.
+    confirm_remote: bool = False
 
 
 class ChatAccepted(BaseModel):
@@ -91,6 +96,14 @@ class ModelOut(BaseModel):
     error: str = ""
     warning: str = ""
     adopted: bool = False
+    # "local" for a llama-server on this machine, otherwise the hosted provider.
+    provider: str = "local"
+    remote: bool = False
+    # Remote only: whether the key is present, and whether it is usable right
+    # now. A model can have a key and still be unusable with no network, and
+    # the UI needs to say which of the two is wrong.
+    has_key: bool = True
+    usable: bool = True
 
 
 class ModelsOut(BaseModel):
@@ -102,6 +115,8 @@ class ModelsOut(BaseModel):
     max_active: int
     idle_timeout_seconds: int
     available_ram_mb: int | None = None
+    # Whether hosted models can be reached at all. Cached, so this is cheap.
+    online: bool = False
 
 
 # --- tools ---

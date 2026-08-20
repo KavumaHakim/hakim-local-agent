@@ -9,7 +9,7 @@
  */
 
 import { useCallback, useRef, useState } from 'react'
-import { api } from '../lib/api'
+import { ApiError, api, type RemoteConfirmation } from '../lib/api'
 import { streamChat } from '../lib/stream'
 import type { ChatRequest, Message, ToolCall, TurnEvent } from '../lib/types'
 
@@ -39,6 +39,11 @@ export interface TurnState {
   /** Set when the auto-router moved this turn to another model. */
   routeReason: string | null
   ramWarning: string | null
+  /** Set when a hosted model was wanted and there was no internet. */
+  fallback: { from: string; to: string; reason: string } | null
+  /** True while this turn is being answered off this machine. */
+  remote: boolean
+  provider: string | null
   startedAt: number | null
   error: { kind: string; message: string; canEscalate: boolean } | null
 }
@@ -53,6 +58,9 @@ const IDLE: TurnState = {
   modelLabel: null,
   routeReason: null,
   ramWarning: null,
+  fallback: null,
+  remote: false,
+  provider: null,
   startedAt: null,
   error: null,
 }
@@ -68,6 +76,11 @@ export function useChat(options: ChatOptions) {
   const [conversationId, setConversationId] = useState<number | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [turn, setTurn] = useState<TurnState>(IDLE)
+  // A turn the router wanted to send off this machine, waiting on a yes.
+  const [consent, setConsent] = useState<{
+    request: RemoteConfirmation
+    prompt: string
+  } | null>(null)
   const abort = useRef<AbortController | null>(null)
 
   // Read inside the stream callback, which would otherwise close over the
@@ -89,7 +102,7 @@ export function useChat(options: ChatOptions) {
   }, [])
 
   const send = useCallback(
-    async (prompt: string, overrideModel?: string) => {
+    async (prompt: string, overrideModel?: string, confirmRemote = false) => {
       const trimmed = prompt.trim()
       if (!trimmed) return
 
@@ -113,6 +126,7 @@ export function useChat(options: ChatOptions) {
         model_key: overrideModel ?? latest.current.modelKey,
         enable_thinking: latest.current.enableThinking,
         auto_route: latest.current.autoRoute,
+        confirm_remote: confirmRemote,
       }
 
       setTurn({ ...IDLE, phase: 'queued' })
@@ -129,6 +143,21 @@ export function useChat(options: ChatOptions) {
         })
       } catch (error) {
         if (controller.signal.aborted) return
+
+        // The consent gate. Nothing was stored or queued, so the retry is the
+        // same request with agreement attached - and the optimistic message
+        // has to come back out, because there is no turn yet.
+        const confirmation =
+          error instanceof ApiError ? error.confirmation : null
+        if (confirmation) {
+          setMessages((current) =>
+            current.filter((message) => message.id !== optimistic.id),
+          )
+          setTurn(IDLE)
+          setConsent({ request: confirmation, prompt: trimmed })
+          return
+        }
+
         setTurn((current) => ({
           ...current,
           phase: 'error',
@@ -173,6 +202,15 @@ export function useChat(options: ChatOptions) {
               routeReason: event.reason,
               modelKey: event.key,
               modelLabel: event.label,
+              remote: event.remote,
+            }))
+            break
+
+          case 'fallback':
+            setTurn((current) => ({
+              ...current,
+              fallback: { from: event.from, to: event.to, reason: event.reason },
+              remote: false,
             }))
             break
 
@@ -182,6 +220,8 @@ export function useChat(options: ChatOptions) {
               phase: event.state === 'loading' ? 'loading' : current.phase,
               modelKey: event.key,
               modelLabel: event.label,
+              remote: event.remote,
+              provider: event.provider,
               ramWarning: event.warning || current.ramWarning,
             }))
             break
@@ -253,6 +293,27 @@ export function useChat(options: ChatOptions) {
 
   const dismissError = useCallback(() => setTurn(IDLE), [])
 
+  /** Agree to send the waiting turn to the hosted provider. */
+  const approveRemote = useCallback(() => {
+    if (!consent) return
+    const { prompt, request } = consent
+    setConsent(null)
+    void send(prompt, request.model_key, true)
+  }, [consent, send])
+
+  /** Decline, and run it on the local model instead. */
+  const declineRemote = useCallback(
+    (localKey: string) => {
+      if (!consent) return
+      const { prompt } = consent
+      setConsent(null)
+      void send(prompt, localKey)
+    },
+    [consent, send],
+  )
+
+  const dismissConsent = useCallback(() => setConsent(null), [])
+
   const cancel = useCallback(() => {
     // Stops watching, not the turn itself. The server finishes and stores the
     // answer, which is the right trade when a turn has cost minutes already.
@@ -264,6 +325,10 @@ export function useChat(options: ChatOptions) {
     conversationId,
     messages,
     turn,
+    consent,
+    approveRemote,
+    declineRemote,
+    dismissConsent,
     busy: turn.phase !== 'idle' && turn.phase !== 'error',
     send,
     openConversation,

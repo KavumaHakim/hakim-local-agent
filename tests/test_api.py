@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,6 +44,9 @@ def write_registry(tmp: Path) -> Path:
              "port": 8080, "min_free_mb": 0},
             {"key": "big", "label": "Big 8B", "file": "big.gguf",
              "port": 8082, "min_free_mb": 0},
+            {"key": "cloud", "label": "Cloud 120B", "provider": "testcloud",
+             "model": "cloud-120b", "api_key_env": "TEST_CLOUD_KEY",
+             "base_url": "https://cloud.invalid/v1"},
         ],
     }
     path = tmp / "models.json"
@@ -93,6 +97,25 @@ class ScriptedClient:
         return message
 
 
+class FakeConnectivity:
+    """Connectivity with the network under the test's control.
+
+    The real one opens a socket. A test that depended on whether this machine
+    happened to have internet would pass or fail for reasons that have nothing
+    to do with the code.
+    """
+
+    def __init__(self, online: bool = True) -> None:
+        self.is_online = online
+        self.invalidated = 0
+
+    def online(self, *, force: bool = False) -> bool:
+        return self.is_online
+
+    def invalidate(self) -> None:
+        self.invalidated += 1
+
+
 class HarnessRuntime(Runtime):
     """Runtime with the model client scripted and the manager stubbed."""
 
@@ -100,8 +123,9 @@ class HarnessRuntime(Runtime):
         super().__init__(config, manager)
         self.responses: list[dict[str, Any]] = []
         self.clients: list[ScriptedClient] = []
+        self.connectivity = FakeConnectivity()
 
-    def make_client(self, config: Config) -> ScriptedClient:
+    def make_client(self, config: Config, spec: Any) -> ScriptedClient:
         client = ScriptedClient(self.responses)
         self.clients.append(client)
         return client
@@ -274,7 +298,7 @@ class ChatStreamTests(ApiTestCase):
             def chat_stream(self, messages, *, tools=None, on_token=None, on_reasoning=None):
                 raise QwenConnectionError("server went away")
 
-        self.runtime.make_client = lambda config: Broken([])
+        self.runtime.make_client = lambda config, spec: Broken([])
         events = self.say("hello")
 
         error = first(events, "error")
@@ -356,7 +380,11 @@ class ConversationRouteTests(ApiTestCase):
 class ModelRouteTests(ApiTestCase):
     def test_listing_reports_every_model_and_the_router_pair(self):
         body = self.client.get("/api/models").json()
-        self.assertEqual([m["key"] for m in body["models"]], ["fast", "big"])
+        # Membership, not the exact list: adding a model to the fixture should
+        # not break a test about the router pair.
+        keys = [m["key"] for m in body["models"]]
+        self.assertIn("fast", keys)
+        self.assertIn("big", keys)
         self.assertEqual(body["router_fast"], "fast")
         self.assertEqual(body["router_strong"], "big")
         self.assertEqual(body["default_key"], "fast")
@@ -501,6 +529,113 @@ class ToolSwitchTests(ApiTestCase):
         entry = self.switches()["memory"]
         self.assertTrue(entry["enabled"])
         self.assertFalse(entry["from_env"])
+
+
+class RemoteModelTests(ApiTestCase):
+    """Hosted models: consent before routing to one, and offline fallback."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # A key has to look present, or the model is unavailable for a reason
+        # unrelated to what each test is about.
+        self._previous = os.environ.get("TEST_CLOUD_KEY")
+        os.environ["TEST_CLOUD_KEY"] = "not-a-real-key"
+        self.addCleanup(self._restore_key)
+
+    def _restore_key(self) -> None:
+        if self._previous is None:
+            os.environ.pop("TEST_CLOUD_KEY", None)
+        else:
+            os.environ["TEST_CLOUD_KEY"] = self._previous
+
+    def route_to_cloud(self) -> None:
+        """Make the auto-router's strong model the hosted one."""
+        self.manager.router_strong = "cloud"
+
+    def test_a_hosted_model_is_listed_with_its_provider(self):
+        body = self.client.get("/api/models").json()
+        cloud = next(m for m in body["models"] if m["key"] == "cloud")
+        self.assertTrue(cloud["remote"])
+        self.assertEqual(cloud["provider"], "testcloud")
+        self.assertTrue(cloud["has_key"])
+        self.assertTrue(cloud["usable"])
+        self.assertTrue(body["online"])
+
+    def test_a_hosted_model_is_never_the_active_one(self):
+        """active_key answers 'what is holding RAM', and a hosted model is not."""
+        body = self.client.get("/api/models").json()
+        self.assertIsNone(body["active_key"])
+
+    def test_no_key_means_unusable_and_says_which_variable(self):
+        os.environ.pop("TEST_CLOUD_KEY", None)
+        body = self.client.get("/api/models").json()
+        cloud = next(m for m in body["models"] if m["key"] == "cloud")
+        self.assertFalse(cloud["has_key"])
+        self.assertFalse(cloud["usable"])
+        self.assertIn("TEST_CLOUD_KEY", cloud["error"])
+
+    def test_offline_makes_it_unusable_but_still_keyed(self):
+        self.runtime.connectivity.is_online = False
+        body = self.client.get("/api/models").json()
+        cloud = next(m for m in body["models"] if m["key"] == "cloud")
+        self.assertTrue(cloud["has_key"])
+        self.assertFalse(cloud["usable"])
+        self.assertFalse(body["online"])
+
+    def test_routing_to_a_hosted_model_needs_confirmation_first(self):
+        """Nothing may be stored or queued before the user agrees."""
+        self.route_to_cloud()
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "prompt": "debug this architecture and refactor it",
+                "auto_route": True,
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+        detail = response.json()["detail"]
+        self.assertEqual(detail["kind"], "remote_confirmation_required")
+        self.assertEqual(detail["model_key"], "cloud")
+        self.assertEqual(detail["provider"], "testcloud")
+
+        # And nothing happened.
+        self.assertEqual(self.client.get("/api/conversations").json(), [])
+
+    def test_confirming_lets_the_turn_run(self):
+        self.route_to_cloud()
+        self.runtime.responses = [{"role": "assistant", "content": "done"}]
+        events = self.say(
+            "debug this architecture and refactor it",
+            auto_route=True,
+            confirm_remote=True,
+        )
+        self.assertEqual(first(events, "done")["model_key"], "cloud")
+        self.assertTrue(first(events, "route")["remote"])
+
+    def test_choosing_a_hosted_model_yourself_needs_no_confirmation(self):
+        """Picking it is already deliberate; being moved onto it is not."""
+        self.runtime.responses = [{"role": "assistant", "content": "done"}]
+        events = self.say("hello", model_key="cloud")
+        self.assertEqual(first(events, "done")["model_key"], "cloud")
+        self.assertNotIn("route", kinds(events))
+
+    def test_offline_falls_back_to_local_and_says_so(self):
+        self.runtime.connectivity.is_online = False
+        self.runtime.responses = [{"role": "assistant", "content": "local answer"}]
+        events = self.say("hello", model_key="cloud")
+
+        fallback = first(events, "fallback")
+        self.assertEqual(fallback["from"], "cloud")
+        self.assertEqual(fallback["to"], "fast")
+        self.assertIn("internet", fallback["reason"])
+        self.assertEqual(first(events, "done")["model_key"], "fast")
+
+    def test_the_model_event_says_whether_the_turn_left_the_machine(self):
+        self.runtime.responses = [{"role": "assistant", "content": "done"}]
+        events = self.say("hello", model_key="cloud")
+        model = first(events, "model")
+        self.assertTrue(model["remote"])
+        self.assertEqual(model["provider"], "testcloud")
 
 
 class MetaRouteTests(ApiTestCase):

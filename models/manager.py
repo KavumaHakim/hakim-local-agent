@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import socket
 import subprocess
 import threading
@@ -64,13 +65,48 @@ class ModelSpec:
     min_free_mb: int
     description: str = ""
 
+    # --- remote models ---
+    #
+    # "local" means a llama-server this manager starts and owns. Anything else
+    # is a hosted API: no process, no port, no RAM threshold, and nothing to
+    # load. They are in the same registry because everything above the client
+    # - the agent loop, the tools, the history - is identical either way.
+    provider: str = "local"
+    # The provider's own name for the model, which is not our key.
+    model: str = ""
+    # Name of the environment variable holding the key. The key itself is never
+    # stored on the spec, so it cannot be serialised out to the UI by accident.
+    api_key_env: str = ""
+    base_url: str = ""
+
+    @property
+    def remote(self) -> bool:
+        return self.provider != "local"
+
     @property
     def url(self) -> str:
+        if self.remote:
+            return self.base_url
         return f"http://127.0.0.1:{self.port}"
 
     @property
+    def has_key(self) -> bool:
+        """Whether the API key for this provider is present."""
+        if not self.api_key_env:
+            return False
+        return bool(os.environ.get(self.api_key_env, "").strip())
+
+    @property
     def available(self) -> bool:
-        """Whether the weights are actually on disk."""
+        """Whether this model could be used at all.
+
+        For a local model that means the weights are on disk; for a remote one,
+        that a key exists. Neither says anything about whether it will work -
+        a remote model also needs the internet, which is checked separately
+        because it changes minute to minute.
+        """
+        if self.remote:
+            return self.has_key
         return self.path.is_file()
 
 
@@ -126,28 +162,51 @@ def load_registry(path: Path | None = None) -> dict[str, Any]:
     except ValueError as exc:
         raise ModelManagerError(f"{path} is not valid JSON: {exc}") from None
 
-    models_dir = Path(raw.get("models_dir", "")).expanduser()
+    models_dir = Path(models_dir_raw).expanduser() if (
+        models_dir_raw := raw.get("models_dir", "")
+    ) else Path()
     specs: dict[str, ModelSpec] = {}
     for entry in raw.get("models", []):
         try:
             key = entry["key"]
-            specs[key] = ModelSpec(
-                key=key,
-                label=entry.get("label", key),
-                path=(models_dir / entry["file"]).resolve(),
-                port=int(entry["port"]),
-                context=int(entry.get("context", 4096)),
-                threads=int(entry.get("threads", 4)),
-                min_free_mb=int(entry.get("min_free_mb", 0)),
-                description=entry.get("description", ""),
-            )
+            provider = entry.get("provider", "local")
+            if provider == "local":
+                specs[key] = ModelSpec(
+                    key=key,
+                    label=entry.get("label", key),
+                    path=(models_dir / entry["file"]).resolve(),
+                    port=int(entry["port"]),
+                    context=int(entry.get("context", 4096)),
+                    threads=int(entry.get("threads", 4)),
+                    min_free_mb=int(entry.get("min_free_mb", 0)),
+                    description=entry.get("description", ""),
+                )
+            else:
+                # A hosted model has no file, no port and no RAM threshold, so
+                # those fields are placeholders and nothing may read them: the
+                # `remote` property is what everything branches on.
+                specs[key] = ModelSpec(
+                    key=key,
+                    label=entry.get("label", key),
+                    path=Path(),
+                    port=0,
+                    context=int(entry.get("context", 0)),
+                    threads=0,
+                    min_free_mb=0,
+                    description=entry.get("description", ""),
+                    provider=provider,
+                    model=entry["model"],
+                    api_key_env=entry.get("api_key_env", ""),
+                    base_url=entry.get("base_url", "").rstrip("/"),
+                )
         except (KeyError, TypeError, ValueError) as exc:
             raise ModelManagerError(f"Bad model entry in {path}: {exc}") from None
 
     if not specs:
         raise ModelManagerError(f"{path} defines no models.")
 
-    ports = [spec.port for spec in specs.values()]
+    # Remote models all report port 0, so only the local ones are checked.
+    ports = [spec.port for spec in specs.values() if not spec.remote]
     if len(set(ports)) != len(ports):
         raise ModelManagerError("Two models share a port in models.json.")
 
@@ -231,9 +290,17 @@ class ModelManager:
         return [self._statuses[key] for key in self._specs]
 
     def active_key(self) -> str | None:
-        """The key of the model currently READY, if any."""
+        """The key of the local model currently resident, if any.
+
+        Remote models are skipped even though they report READY: this answers
+        "what is holding RAM right now", and a hosted model holds none. Without
+        the filter, adding a cloud model to the registry would make it look
+        like something was always loaded.
+        """
         self.refresh()
         for key, status in self._statuses.items():
+            if status.spec.remote:
+                continue
             if status.state is ModelState.READY:
                 return key
         return None
@@ -247,6 +314,23 @@ class ModelManager:
         """
         with self._lock:
             for key, status in self._statuses.items():
+                if status.spec.remote:
+                    # Nothing to reconcile: there is no process and no port.
+                    # A hosted model is usable when its key exists; whether the
+                    # network is up is a separate question, checked where it is
+                    # cheap to cache rather than on every status read.
+                    status.state = (
+                        ModelState.READY
+                        if status.spec.available
+                        else ModelState.STOPPED
+                    )
+                    status.error = (
+                        ""
+                        if status.spec.available
+                        else f"{status.spec.api_key_env} is not set."
+                    )
+                    continue
+
                 process = self._processes.get(key)
                 if process is not None and process.poll() is not None:
                     # Ours, and it exited.
@@ -286,6 +370,21 @@ class ModelManager:
         key = key or self._default
         spec = self.get_spec(key)
 
+        if spec.remote:
+            # Nothing to start, and deliberately nothing to stop either: a
+            # hosted model uses no RAM, so it does not join the one-at-a-time
+            # rotation. The local model stays resident, which means switching
+            # back to it later costs nothing instead of another cold load.
+            if not spec.available:
+                raise ModelManagerError(
+                    f"{spec.label}: {spec.api_key_env} is not set. Put it in "
+                    f".env or export it, then restart the API."
+                )
+            with self._lock:
+                self._statuses[key].state = ModelState.READY
+                self._statuses[key].last_used = time.time()
+            return spec.url
+
         with self._lock:
             self.refresh()
             status = self._statuses[key]
@@ -316,6 +415,12 @@ class ModelManager:
         """Stop a model we started. Returns False if it was not ours."""
         with self._lock:
             spec = self.get_spec(key)
+            if spec.remote:
+                # There is no process and no RAM to reclaim. Reporting success
+                # would put a "stopped" model in the UI that the next refresh
+                # flips straight back to ready.
+                return False
+
             status = self._statuses[key]
             process = self._processes.get(key)
 

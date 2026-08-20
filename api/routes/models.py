@@ -24,9 +24,14 @@ def _snapshot(runtime: Runtime) -> ModelsOut:
     # then active_key() would do the same work three times over.
     entries = manager.statuses()
     active = next(
-        (entry.spec.key for entry in entries if entry.state is ModelState.READY),
+        (
+            entry.spec.key
+            for entry in entries
+            if entry.state is ModelState.READY and not entry.spec.remote
+        ),
         None,
     )
+    online = runtime.connectivity.online()
 
     models = []
     for entry in entries:
@@ -47,6 +52,14 @@ def _snapshot(runtime: Runtime) -> ModelsOut:
                 error=entry.error,
                 warning=entry.warning,
                 adopted=entry.adopted,
+                provider=spec.provider,
+                remote=spec.remote,
+                has_key=spec.has_key if spec.remote else True,
+                # A local model is usable if its weights exist; a hosted one
+                # needs both a key and a network.
+                usable=(
+                    spec.available and online if spec.remote else spec.available
+                ),
             )
         )
     return ModelsOut(
@@ -58,6 +71,7 @@ def _snapshot(runtime: Runtime) -> ModelsOut:
         max_active=manager.max_active,
         idle_timeout_seconds=int(manager.idle_timeout),
         available_ram_mb=available_ram_mb(),
+        online=online,
     )
 
 

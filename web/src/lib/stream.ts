@@ -11,7 +11,7 @@
  * loads.
  */
 
-import { ApiError } from './api'
+import { ApiError, readError } from './api'
 import type { ChatRequest, TurnEvent } from './types'
 
 export interface StreamHandlers {
@@ -31,14 +31,10 @@ export async function streamChat(
   })
 
   if (!response.ok) {
-    let message = response.statusText
-    try {
-      const failure = await response.json()
-      if (typeof failure?.detail === 'string') message = failure.detail
-    } catch {
-      /* not JSON */
-    }
-    throw new ApiError(response.status, message)
+    // A 409 here is usually the consent gate: the turn would have gone to a
+    // hosted provider. The detail object survives so the caller can ask.
+    const { message, detail } = await readError(response)
+    throw new ApiError(response.status, message, detail)
   }
 
   if (!response.body) throw new Error('The server sent no stream.')

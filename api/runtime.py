@@ -23,8 +23,10 @@ from agent.loop import Agent, AgentError, IterationLimitError, ToolEvent
 from agent.router import TaskRouter
 from chat_store import ChatStore
 from config import Config, load_config
-from models.manager import ModelManager, ModelManagerError
+from models.connectivity import Connectivity
+from models.manager import ModelManager, ModelManagerError, ModelSpec
 from models.qwen import QwenClient, QwenError
+from models.remote import RemoteClient
 from tools.registry import build_default_registry
 
 from api.turns import Turn, TurnQueue
@@ -71,6 +73,23 @@ TOOL_FLAGS: tuple[ToolFlag, ...] = (
 FLAGS_BY_ID = {flag.id: flag for flag in TOOL_FLAGS}
 
 
+@dataclasses.dataclass(frozen=True)
+class ModelChoice:
+    """Which model will answer a turn, and how that was decided.
+
+    Worked out before the turn is queued rather than inside it, because a
+    hosted model needs the user's agreement first and the agent loop cannot
+    stop halfway through to ask for it.
+    """
+
+    key: str
+    reason: str = ""
+    # True when the auto-router picked this rather than the user.
+    routed: bool = False
+    # Set when a hosted model was wanted and the network was down.
+    fell_back_from: str | None = None
+
+
 class Runtime:
     """The objects a request needs, built once for the process."""
 
@@ -83,6 +102,7 @@ class Runtime:
         self.manager = manager if manager is not None else ModelManager()
         self.store = ChatStore(self.config.db_path)
         self.queue = TurnQueue(self.run_turn)
+        self.connectivity = Connectivity()
         # Tool switches flipped from the UI, applied on top of the environment.
         # Held in memory only: a restart returns to whatever the environment
         # says, so the env vars stay the durable answer to "what is on here"
@@ -143,28 +163,75 @@ class Runtime:
     # a test that quietly depends on whether a server happens to be listening
     # passes for the wrong reason and breaks the moment one is.
 
-    def make_client(self, config: Config) -> Any:
-        """The chat client for one turn."""
+    def make_client(self, config: Config, spec: ModelSpec) -> Any:
+        """The chat client for one turn.
+
+        The only place that decides whether a turn stays on this machine.
+        """
+        if spec.remote:
+            return RemoteClient(
+                spec,
+                temperature=config.temperature,
+                top_p=config.top_p,
+                max_tokens=config.max_tokens,
+            )
         return QwenClient(config)
+
+    def decide_model(
+        self,
+        prompt: str,
+        requested: str | None,
+        *,
+        auto_route: bool,
+        conversation_id: int | None,
+    ) -> ModelChoice:
+        """Pick the model for a turn, before anything is queued or stored.
+
+        Routing used to happen inside the turn. It moved out here because a
+        hosted model has to be agreed to first, and by the time the worker is
+        running there is no way to ask.
+        """
+        chosen = requested or self.manager.active_key() or self.manager.default_key
+        reason = ""
+        routed = False
+
+        if auto_route:
+            strong = self.manager.router_strong
+            stored = (
+                self.store.get_messages(conversation_id)
+                if conversation_id is not None
+                else []
+            )
+            router = TaskRouter(self.manager.router_fast, strong, enabled=True)
+            decision = router.choose(
+                prompt,
+                current_key=chosen,
+                escalated=any(message.model_key == strong for message in stored),
+            )
+            routed = decision.key != chosen
+            chosen = decision.key
+            reason = decision.reason
+
+        spec = self.manager.get_spec(chosen)
+        if spec.remote and not self.connectivity.online():
+            # Greyed out in the UI, but the network can drop between the page
+            # loading and the message being sent, so it is checked again here.
+            local = self.manager.default_key
+            return ModelChoice(
+                key=local,
+                reason=(
+                    f"{spec.label} needs the internet and there is none, so "
+                    f"this ran on {self.manager.get_spec(local).label} instead."
+                ),
+                routed=routed,
+                fell_back_from=chosen,
+            )
+
+        return ModelChoice(key=chosen, reason=reason, routed=routed)
 
     def ensure_model(self, key: str) -> str:
         """Make `key` resident, returning its base URL."""
         return self.manager.ensure(key)
-
-    def escalated(self, conversation_id: int) -> bool:
-        """Whether this conversation has already needed the strong model.
-
-        Derived from the stored messages rather than kept in a session, so it
-        survives a restart and needs no extra column. The router's no-downgrade
-        rule depends on it: once a conversation has paid to load the strong
-        model, going back would pay the switch cost twice to free RAM that is
-        already spent.
-        """
-        strong = self.manager.router_strong
-        return any(
-            message.model_key == strong
-            for message in self.store.get_messages(conversation_id)
-        )
 
     # --- the turn itself ---
 
@@ -192,13 +259,20 @@ class Runtime:
                 if message.id < request.user_message_id
             ]
 
-            target = self._route(turn, stored)
+            # Already decided, and agreed to, before this was queued.
             spec = self.manager.get_spec(target)
 
 
             # Loading is the long silence at the front of a cold turn - up to
             # 130 s for the 8B - so it gets its own event.
-            turn.emit("model", key=target, label=spec.label, state="loading")
+            turn.emit(
+                "model",
+                key=target,
+                label=spec.label,
+                state="loading",
+                provider=spec.provider,
+                remote=spec.remote,
+            )
             self.ensure_model(target)
             status = self.manager.status(target)
             turn.emit(
@@ -206,6 +280,8 @@ class Runtime:
                 key=target,
                 label=spec.label,
                 state="ready",
+                provider=spec.provider,
+                remote=spec.remote,
                 warning=status.warning or "",
             )
 
@@ -213,7 +289,7 @@ class Runtime:
                 qwen_url=spec.url, enable_thinking=request.enable_thinking
             )
             registry, _ = self.registry_for(config)
-            agent = Agent(self.make_client(config), config, registry)
+            agent = Agent(self.make_client(config, spec), config, registry)
             agent.load_history(history)
 
             def on_token(text: str) -> None:
@@ -280,32 +356,6 @@ class Runtime:
         except (QwenError, AgentError) as exc:
             turn.emit("error", kind="agent", message=str(exc), tools=calls)
 
-    def _route(self, turn: Turn, stored: list[Any]) -> str:
-        """Pick the model for this turn, announcing a change if there is one.
-
-        Routing happens before anything is loaded, so a correct guess costs
-        nothing at all. The decision's reason is reported because a model
-        changing underneath you without explanation is alarming.
-        """
-        request = turn.request
-        if not request.auto_route:
-            return request.model_key
-
-        strong = self.manager.router_strong
-        router = TaskRouter(self.manager.router_fast, strong, enabled=True)
-        decision = router.choose(
-            request.prompt,
-            current_key=request.model_key,
-            escalated=any(message.model_key == strong for message in stored),
-        )
-        if decision.key != request.model_key:
-            turn.emit(
-                "route",
-                key=decision.key,
-                label=self.manager.get_spec(decision.key).label,
-                reason=decision.reason,
-            )
-        return decision.key
 
 
 def open_conversation(

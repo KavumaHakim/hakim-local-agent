@@ -14,13 +14,57 @@ import type {
   ToolsResponse,
 } from './types'
 
+/** The structured body a 409 carries when a turn would leave the machine. */
+export interface RemoteConfirmation {
+  kind: 'remote_confirmation_required'
+  model_key: string
+  label: string
+  provider: string
+  reason: string
+  message: string
+}
+
 export class ApiError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  /**
+   * FastAPI's `detail`, unwrapped.
+   *
+   * Usually a string, but the remote-confirmation refusal sends an object,
+   * because "which model, whose servers, and why" cannot be reconstructed
+   * from a sentence.
+   */
+  detail: unknown
+
+  constructor(status: number, message: string, detail?: unknown) {
     super(message)
     this.status = status
+    this.detail = detail
     this.name = 'ApiError'
   }
+
+  /** The confirmation request, when that is what this refusal was. */
+  get confirmation(): RemoteConfirmation | null {
+    const detail = this.detail as RemoteConfirmation | undefined
+    return detail?.kind === 'remote_confirmation_required' ? detail : null
+  }
+}
+
+/** Pull FastAPI's `detail` out of an error body, whatever shape it is. */
+export async function readError(
+  response: Response,
+): Promise<{ message: string; detail: unknown }> {
+  try {
+    const body = await response.json()
+    const detail = body?.detail
+    if (typeof detail === 'string') return { message: detail, detail }
+    if (detail && typeof detail === 'object') {
+      const message = (detail as { message?: string }).message
+      return { message: message ?? response.statusText, detail }
+    }
+  } catch {
+    /* not JSON; the status line will have to do */
+  }
+  return { message: response.statusText, detail: undefined }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -30,16 +74,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
 
   if (!response.ok) {
-    // FastAPI puts the useful text in `detail`; fall back to the status line
-    // rather than showing an empty error.
-    let message = response.statusText
-    try {
-      const body = await response.json()
-      if (typeof body?.detail === 'string') message = body.detail
-    } catch {
-      /* not JSON; the status line will have to do */
-    }
-    throw new ApiError(response.status, message)
+    const { message, detail } = await readError(response)
+    throw new ApiError(response.status, message, detail)
   }
 
   if (response.status === 204) return undefined as T

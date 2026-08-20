@@ -65,6 +65,13 @@ export interface Model {
   warning: string
   /** True when the server was already running and we merely attached. */
   adopted: boolean
+  /** "local" for a llama-server here, otherwise the hosted provider's name. */
+  provider: string
+  remote: boolean
+  /** Remote only: whether the API key is present. */
+  has_key: boolean
+  /** Whether it can be used right now. A remote model needs a key AND network. */
+  usable: boolean
 }
 
 export interface ModelsResponse {
@@ -76,6 +83,8 @@ export interface ModelsResponse {
   max_active: number
   idle_timeout_seconds: number
   available_ram_mb: number | null
+  /** Whether hosted models can be reached at all. */
+  online: boolean
 }
 
 export interface Tool {
@@ -123,8 +132,17 @@ export interface Health {
 export type TurnEvent =
   | { type: 'accepted'; turn_id: string; conversation_id: number; user_message_id: number; position: number }
   | { type: 'queued'; position: number }
-  | { type: 'route'; key: string; label: string; reason: string }
-  | { type: 'model'; key: string; label: string; state: 'loading' | 'ready'; warning?: string }
+  | { type: 'route'; key: string; label: string; reason: string; remote: boolean }
+  | { type: 'fallback'; from: string; to: string; reason: string }
+  | {
+      type: 'model'
+      key: string
+      label: string
+      state: 'loading' | 'ready'
+      provider: string
+      remote: boolean
+      warning?: string
+    }
   | { type: 'start'; model_key: string }
   | { type: 'token'; text: string }
   | { type: 'reasoning'; text: string }
@@ -145,4 +163,6 @@ export interface ChatRequest {
   model_key?: string | null
   enable_thinking?: boolean
   auto_route?: boolean
+  /** Agreement to send this turn to a hosted provider. */
+  confirm_remote?: boolean
 }

@@ -11,7 +11,7 @@ import { Markdown } from '../lib/markdown'
 import { useElapsed } from '../hooks/useResources'
 import type { TurnState } from '../hooks/useChat'
 import { formatDuration, ReasoningPanel, ToolPills } from './Messages'
-import { AlertIcon, ChipIcon, StopIcon } from './Icons'
+import { AlertIcon, ChipIcon, CloudIcon, HomeIcon, StopIcon } from './Icons'
 
 interface Props {
   turn: TurnState
@@ -71,6 +71,23 @@ export function TurnStatus({ turn, onEscalate, onDismiss, onCancel }: Props) {
           <span>
             Switched to <span className="text-fg">{turn.modelLabel}</span> —{' '}
             {turn.routeReason}
+          </span>
+        </div>
+      )}
+
+      {turn.fallback && (
+        <div className="flex items-start gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-xs text-muted">
+          <HomeIcon className="mt-px size-3.5 shrink-0 text-faint" />
+          <span>{turn.fallback.reason}</span>
+        </div>
+      )}
+
+      {turn.remote && (
+        <div className="flex items-start gap-2 rounded-lg border border-warn/30 bg-warn/5 px-3 py-2 text-xs text-warn">
+          <CloudIcon className="mt-px size-3.5 shrink-0" />
+          <span>
+            This turn is running on {turn.provider ?? 'a hosted provider'} — the
+            prompt, history and any tool results are leaving this machine.
           </span>
         </div>
       )}

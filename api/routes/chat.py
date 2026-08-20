@@ -36,7 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from api.deps import get_runtime
-from api.runtime import Runtime, open_conversation
+from api.runtime import ModelChoice, Runtime, open_conversation
 from api.schemas import ChatRequest
 from api.turns import Turn, TurnQueueFull, TurnRequest, drain
 
@@ -62,12 +62,44 @@ def chat(body: ChatRequest, runtime: Runtime = Depends(get_runtime)):
     if not prompt:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Empty prompt.")
 
-    model_key = body.model_key or runtime.manager.active_key() or runtime.manager.default_key
-    try:
-        runtime.manager.get_spec(model_key)
-    except Exception as exc:  # ModelManagerError, but keep the 400 shape
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+    if body.model_key is not None:
+        try:
+            runtime.manager.get_spec(body.model_key)
+        except Exception as exc:  # ModelManagerError, but keep the 400 shape
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
 
+    # Decided here, not in the worker: a hosted model has to be agreed to
+    # first, and once the turn is running there is nobody to ask.
+    choice = runtime.decide_model(
+        prompt,
+        body.model_key,
+        auto_route=body.auto_route,
+        conversation_id=body.conversation_id,
+    )
+    spec = runtime.manager.get_spec(choice.key)
+
+    if spec.remote and choice.routed and not body.confirm_remote:
+        # Explicitly picking a cloud model is already a deliberate act; being
+        # moved onto one by the router is not, so that is what needs consent.
+        # Nothing has been stored or queued at this point, so re-sending with
+        # confirm_remote is the whole retry.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "kind": "remote_confirmation_required",
+                "model_key": choice.key,
+                "label": spec.label,
+                "provider": spec.provider,
+                "reason": choice.reason,
+                "message": (
+                    f"Auto-routing chose {spec.label}, which runs on "
+                    f"{spec.provider}'s servers. Your prompt, this "
+                    f"conversation and any tool results would be sent there."
+                ),
+            },
+        )
+
+    model_key = choice.key
     conversation_id = open_conversation(
         runtime, body.conversation_id, prompt, model_key
     )
@@ -94,7 +126,7 @@ def chat(body: ChatRequest, runtime: Runtime = Depends(get_runtime)):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from None
 
     return StreamingResponse(
-        _stream(runtime, turn, conversation_id, user_message_id),
+        _stream(runtime, turn, conversation_id, user_message_id, choice),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -108,7 +140,11 @@ def chat(body: ChatRequest, runtime: Runtime = Depends(get_runtime)):
 
 
 def _stream(
-    runtime: Runtime, turn: Turn, conversation_id: int, user_message_id: int
+    runtime: Runtime,
+    turn: Turn,
+    conversation_id: int,
+    user_message_id: int,
+    choice: ModelChoice,
 ) -> Iterator[str]:
     """Render one turn's events as SSE.
 
@@ -125,6 +161,29 @@ def _stream(
             "position": position,
         },
     )
+
+    # Both decided before queueing, so they are reported here rather than by
+    # the worker.
+    if choice.fell_back_from is not None:
+        yield _sse(
+            "fallback",
+            {
+                "from": choice.fell_back_from,
+                "to": choice.key,
+                "reason": choice.reason,
+            },
+        )
+    elif choice.routed:
+        spec = runtime.manager.get_spec(choice.key)
+        yield _sse(
+            "route",
+            {
+                "key": choice.key,
+                "label": spec.label,
+                "reason": choice.reason,
+                "remote": spec.remote,
+            },
+        )
 
     reported = position
     if position:
