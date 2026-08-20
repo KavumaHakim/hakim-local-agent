@@ -17,6 +17,8 @@ import { RemoteConsent } from './components/RemoteConsent'
 import { useChat } from './hooks/useChat'
 import { useConversations, useHotkey, useModels, useTools } from './hooks/useResources'
 import { COMMANDS, parseCommand, type CommandId } from './lib/commands'
+import { api } from './lib/api'
+import type { UploadResult } from './lib/types'
 
 export default function App() {
   const [draft, setDraft] = useState('')
@@ -26,6 +28,9 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [note, setNote] = useState<string | null>(null)
+  const [attachments, setAttachments] = useState<UploadResult[]>([])
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
 
   const models = useModels()
   const tools = useTools()
@@ -127,10 +132,28 @@ export default function App() {
       }
       setNote(null)
       setDraft('')
-      void chat.send(text)
+      const paths = attachments.map((file) => file.path)
+      setAttachments([])
+      void chat.send(text, undefined, false, paths)
     },
-    [chat, runCommand],
+    [chat, runCommand, attachments],
   )
+
+  /** Upload each chosen file and keep the ones that land. */
+  const attach = useCallback(async (files: FileList | File[]) => {
+    setUploading(true)
+    setUploadError(null)
+    try {
+      for (const file of Array.from(files)) {
+        const stored = await api.upload(file)
+        setAttachments((current) => [...current, stored])
+      }
+    } catch (failure) {
+      setUploadError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setUploading(false)
+    }
+  }, [])
 
   const selectedModel =
     models.models?.models.find((model) => model.key === modelKey) ?? null
@@ -243,6 +266,15 @@ export default function App() {
               onChange={setDraft}
               onSubmit={submit}
               disabled={chat.busy}
+              attachments={attachments}
+              onAttach={attach}
+              onRemoveAttachment={(path) =>
+                setAttachments((current) =>
+                  current.filter((file) => file.path !== path),
+                )
+              }
+              uploading={uploading}
+              uploadError={uploadError}
               placeholder={
                 chat.busy ? 'Waiting for the current turn…' : 'Message Hakim…'
               }

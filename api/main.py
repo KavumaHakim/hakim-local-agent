@@ -31,7 +31,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.routes import chat, conversations, meta, models
+from api.routes import chat, conversations, meta, models, uploads
 from api.runtime import Runtime
 
 # The built React app, when there is one. Absent during development.
@@ -110,6 +110,7 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
     app.include_router(conversations.router, prefix="/api")
     app.include_router(models.router, prefix="/api")
     app.include_router(meta.router, prefix="/api")
+    app.include_router(uploads.router, prefix="/api")
 
     _mount_web(app)
     return app

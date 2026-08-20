@@ -130,6 +130,17 @@ export interface ToolsResponse {
   workspace: string
 }
 
+/** An image stored in the workspace, ready to be named in a prompt. */
+export interface UploadResult {
+  /** Workspace-relative, the only form ocr_image accepts. */
+  path: string
+  name: string
+  size: number
+  /** False when OCR is off or its server is not running. */
+  ocr_ready: boolean
+  hint: string
+}
+
 export interface Health {
   ok: boolean
   busy: boolean
@@ -176,4 +187,6 @@ export interface ChatRequest {
   auto_route?: boolean
   /** Agreement to send this turn to a hosted provider. */
   confirm_remote?: boolean
+  /** Workspace-relative paths from POST /uploads. */
+  attachments?: string[]
 }

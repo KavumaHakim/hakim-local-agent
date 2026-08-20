@@ -22,7 +22,10 @@ class ChatRequest(BaseModel):
     the client owns its own UI state, and the server stays restartable.
     """
 
-    prompt: str = Field(min_length=1)
+    # No min_length: a turn may be an attachment with nothing typed. The route
+    # refuses a request that is empty *and* has no attachments, which is the
+    # condition that actually matters and one the schema cannot see.
+    prompt: str = ""
     conversation_id: int | None = None
     model_key: str | None = None
     enable_thinking: bool = False
@@ -32,6 +35,23 @@ class ChatRequest(BaseModel):
     # are refused with 409 and the details, before anything is stored or run -
     # the agent loop cannot pause mid-turn to ask.
     confirm_remote: bool = False
+    # Workspace-relative paths from POST /uploads. Named in the prompt so the
+    # model knows the file exists and can reach it with ocr_image.
+    attachments: list[str] = []
+
+
+class UploadOut(BaseModel):
+    """An image stored in the workspace, ready to be named in a prompt."""
+
+    # Workspace-relative, because that is the only form ocr_image accepts.
+    path: str
+    name: str
+    size: int
+    # False when OCR is switched off or its server is not running, which are
+    # different problems with different fixes - hence the hint rather than a
+    # bare boolean.
+    ocr_ready: bool
+    hint: str = ""
 
 
 class ChatAccepted(BaseModel):

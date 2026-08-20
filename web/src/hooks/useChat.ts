@@ -102,9 +102,15 @@ export function useChat(options: ChatOptions) {
   }, [])
 
   const send = useCallback(
-    async (prompt: string, overrideModel?: string, confirmRemote = false) => {
+    async (
+      prompt: string,
+      overrideModel?: string,
+      confirmRemote = false,
+      attachments: string[] = [],
+    ) => {
       const trimmed = prompt.trim()
-      if (!trimmed) return
+      // An attachment with no text is a valid turn.
+      if (!trimmed && attachments.length === 0) return
 
       // Shown immediately. The real row exists server-side the moment the
       // request is accepted; this is only so the message does not appear to
@@ -112,7 +118,7 @@ export function useChat(options: ChatOptions) {
       const optimistic: Message = {
         id: -Date.now(),
         role: 'user',
-        content: trimmed,
+        content: trimmed || '(image)',
         tools: [],
         elapsed: null,
         model_key: null,
@@ -127,6 +133,7 @@ export function useChat(options: ChatOptions) {
         enable_thinking: latest.current.enableThinking,
         auto_route: latest.current.autoRoute,
         confirm_remote: confirmRemote,
+        attachments,
       }
 
       setTurn({ ...IDLE, phase: 'queued' })

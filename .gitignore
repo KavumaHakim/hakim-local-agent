@@ -22,3 +22,8 @@ __pycache__/
 !.env.example
 *.key
 secrets.json
+
+# Images uploaded through the web UI. They land inside the workspace because
+# that is the only place the OCR tool can read from, which puts them here when
+# the workspace is the project itself.
+uploads/

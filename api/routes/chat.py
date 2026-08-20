@@ -46,6 +46,29 @@ router = APIRouter(tags=["chat"])
 HEARTBEAT_SECONDS = 15.0
 
 
+def _with_attachments(prompt: str, attachments: list[str]) -> str:
+    """Name any uploaded files in the prompt itself.
+
+    The model has no other way to learn a file exists. Folding it into the
+    prompt rather than passing it beside means the stored message is exactly
+    what the model was asked, so replaying the conversation later is faithful
+    and the attachment does not silently vanish from the history.
+
+    The paths are workspace-relative and the tools resolve them through the
+    jail, so naming one here grants no access the agent did not already have.
+    """
+    if not attachments:
+        return prompt
+
+    listed = "\n".join(f"- {path}" for path in attachments)
+    noun = "file" if len(attachments) == 1 else "files"
+    note = (
+        f"[Attached {noun}, in the workspace:\n{listed}\n"
+        f"Use the ocr_image tool to read {'it' if len(attachments) == 1 else 'them'}.]"
+    )
+    return f"{prompt}\n\n{note}" if prompt else note
+
+
 def _sse(event: str, payload: dict) -> str:
     """One server-sent event.
 
@@ -59,8 +82,10 @@ def _sse(event: str, payload: dict) -> str:
 def chat(body: ChatRequest, runtime: Runtime = Depends(get_runtime)):
     """Queue a turn and stream it."""
     prompt = body.prompt.strip()
-    if not prompt:
+    if not prompt and not body.attachments:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Empty prompt.")
+
+    prompt = _with_attachments(prompt, body.attachments)
 
     if body.model_key is not None:
         try:

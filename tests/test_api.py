@@ -678,6 +678,94 @@ class RemoteModelTests(ApiTestCase):
         self.assertEqual(model["provider"], "testcloud")
 
 
+class UploadTests(ApiTestCase):
+    """Uploads land in the workspace, because that is the only place the OCR
+    tool can read from."""
+
+    PNG = bytes.fromhex(
+        "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+        "01f15c4890000000a49444154789c6360000002000100ffff0300000600"
+        "0557bfabd40000000049454e44ae426082"
+    )
+
+    def upload(self, name: str, data: bytes):
+        return self.client.post(
+            "/api/uploads", files={"file": (name, data, "image/png")}
+        )
+
+    def test_an_image_is_stored_and_its_workspace_path_returned(self):
+        response = self.upload("note.png", self.PNG)
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+
+        self.assertTrue(body["path"].startswith("uploads/"))
+        self.assertTrue(body["path"].endswith(".png"))
+        self.assertEqual(body["size"], len(self.PNG))
+        # Really on disk, inside the workspace, where ocr_image resolves from.
+        stored = Path(self.runtime.config.workspace) / body["path"]
+        self.assertTrue(stored.is_file())
+        self.assertEqual(stored.read_bytes(), self.PNG)
+
+    def test_a_hostile_filename_cannot_escape_the_directory(self):
+        body = self.upload("../../../etc/passwd.png", self.PNG).json()
+        self.assertNotIn("..", body["path"])
+        resolved = (Path(self.runtime.config.workspace) / body["path"]).resolve()
+        self.assertIn(
+            Path(self.runtime.config.workspace).resolve(), resolved.parents
+        )
+
+    def test_two_uploads_of_one_name_do_not_collide(self):
+        first_path = self.upload("scan.png", self.PNG).json()["path"]
+        second_path = self.upload("scan.png", self.PNG).json()["path"]
+        self.assertNotEqual(first_path, second_path)
+
+    def test_a_non_image_is_refused(self):
+        response = self.client.post(
+            "/api/uploads", files={"file": ("notes.txt", b"hello", "text/plain")}
+        )
+        self.assertEqual(response.status_code, 415)
+
+    def test_an_oversized_file_is_refused_and_leaves_nothing_behind(self):
+        limit = self.runtime.config.ocr_max_image_bytes
+        response = self.upload("huge.png", b"\x89PNG" + b"x" * (limit + 10))
+        self.assertEqual(response.status_code, 413)
+
+        directory = Path(self.runtime.config.workspace) / "uploads"
+        self.assertEqual(list(directory.glob("*")) if directory.exists() else [], [])
+
+    def test_an_empty_file_is_refused(self):
+        self.assertEqual(self.upload("empty.png", b"").status_code, 400)
+
+    def test_it_says_when_ocr_is_off_rather_than_failing_later(self):
+        body = self.upload("note.png", self.PNG).json()
+        self.assertFalse(body["ocr_ready"])
+        self.assertIn("OCR", body["hint"])
+
+    def test_an_attachment_is_named_in_the_prompt(self):
+        """The model has no other way to know the file exists."""
+        self.runtime.responses = [{"role": "assistant", "content": "ok"}]
+        events = self.say("read this", attachments=["uploads/ab-note.png"])
+
+        conversation_id = first(events, "accepted")["conversation_id"]
+        stored = self.client.get(f"/api/conversations/{conversation_id}").json()
+        asked = stored["messages"][0]["content"]
+        self.assertIn("read this", asked)
+        self.assertIn("uploads/ab-note.png", asked)
+        self.assertIn("ocr_image", asked)
+
+    def test_an_attachment_alone_is_a_valid_turn(self):
+        self.runtime.responses = [{"role": "assistant", "content": "ok"}]
+        events = self.say("", attachments=["uploads/ab-note.png"])
+        self.assertIn("done", kinds(events))
+
+    def test_no_attachment_leaves_the_prompt_untouched(self):
+        self.runtime.responses = [{"role": "assistant", "content": "ok"}]
+        events = self.say("plain question")
+        conversation_id = first(events, "accepted")["conversation_id"]
+        stored = self.client.get(f"/api/conversations/{conversation_id}").json()
+        self.assertEqual(stored["messages"][0]["content"], "plain question")
+
+
 class MetaRouteTests(ApiTestCase):
     def test_tools_lists_the_enabled_ones_and_why_the_rest_are_not(self):
         body = self.client.get("/api/tools").json()

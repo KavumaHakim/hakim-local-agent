@@ -12,6 +12,7 @@ import type {
   Health,
   ModelsResponse,
   ToolsResponse,
+  UploadResult,
 } from './types'
 
 /** The structured body a 409 carries when a turn would leave the machine. */
@@ -104,6 +105,24 @@ export const api = {
     request<ModelsResponse>(`/models/${encodeURIComponent(key)}/unload`, {
       method: 'POST',
     }),
+
+  /**
+   * Upload an image for OCR.
+   *
+   * Deliberately not routed through `request`: that sets a JSON content type,
+   * and multipart needs the browser to set its own with the boundary. Setting
+   * it by hand produces a body the server cannot parse.
+   */
+  upload: async (file: File): Promise<UploadResult> => {
+    const form = new FormData()
+    form.append('file', file)
+    const response = await fetch('/api/uploads', { method: 'POST', body: form })
+    if (!response.ok) {
+      const { message, detail } = await readError(response)
+      throw new ApiError(response.status, message, detail)
+    }
+    return (await response.json()) as UploadResult
+  },
 
   conversations: (limit = 30) =>
     request<Conversation[]>(`/conversations?limit=${limit}`),

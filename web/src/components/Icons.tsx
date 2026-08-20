@@ -81,6 +81,18 @@ export const SparkIcon = svg(
   <path d="M12 3v4M12 17v4M3 12h4M17 12h4M6.3 6.3l2.8 2.8M14.9 14.9l2.8 2.8M17.7 6.3l-2.8 2.8M9.1 14.9l-2.8 2.8" />,
 )
 
+export const PaperclipIcon = svg(
+  <path d="M21 11.5 12.5 20a5 5 0 0 1-7-7l8-8a3.5 3.5 0 1 1 5 5l-8 8a2 2 0 1 1-3-3l7-7" />,
+)
+
+export const ImageIcon = svg(
+  <>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <circle cx="8.5" cy="9.5" r="1.5" />
+    <path d="m4 17 4.5-4.5a2 2 0 0 1 2.8 0L16 17M15 14l1.5-1.5a2 2 0 0 1 2.8 0L20 13.5" />
+  </>,
+)
+
 export const CopyIcon = svg(
   <>
     <rect x="9" y="9" width="11" height="11" rx="2" />
