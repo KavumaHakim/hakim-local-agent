@@ -1,0 +1,177 @@
+@import 'tailwindcss';
+
+/**
+ * Design tokens.
+ *
+ * Dark first, because that is what this app was and what it is used in, but
+ * the palette is defined as variables so light mode is a swap of values
+ * rather than a second set of classes on every element.
+ *
+ * The accent keeps the old #7c5cff. Everything else is rebuilt: the previous
+ * greys were flat, so panels, inputs and code blocks all sat on the same
+ * value and nothing read as layered.
+ */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0a0c11;
+  --surface: #12151c;
+  --raised: #171b24;
+  --sunken: #0d1016;
+  --line: #222836;
+  --line-soft: #1a1f2b;
+
+  --fg: #e7eaf3;
+  --muted: #8b93a7;
+  --faint: #5d6478;
+
+  --accent: #7c5cff;
+  --accent-soft: #a493ff;
+  --accent-dim: #2a2350;
+
+  --ok: #3ecf8e;
+  --warn: #e6a44a;
+  --danger: #f2565f;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --bg: #fbfbfd;
+    --surface: #ffffff;
+    --raised: #ffffff;
+    --sunken: #f2f3f8;
+    --line: #e3e6ef;
+    --line-soft: #eef0f6;
+
+    --fg: #131722;
+    --muted: #5c6478;
+    --faint: #8a91a3;
+
+    --accent: #6344e8;
+    --accent-soft: #7d63f0;
+    --accent-dim: #ece8ff;
+
+    --ok: #17935f;
+    --warn: #b4721b;
+    --danger: #d1333d;
+  }
+}
+
+/* `inline` lets the theme reference the variables above, so a media query
+   swapping them re-themes every utility at once. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-sunken: var(--sunken);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-dim: var(--accent-dim);
+
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', Consolas,
+    'Liberation Mono', monospace;
+
+  --animate-blink: blink 1.1s step-end infinite;
+  --animate-rise: rise 0.18s ease-out;
+  --animate-breathe: breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* The app manages its own scroll regions; the page itself never scrolls. */
+    overflow: hidden;
+  }
+
+  ::selection {
+    background: var(--accent);
+    color: white;
+  }
+
+  /* Thin, unobtrusive scrollbars: several panels scroll and the default
+     Windows bars are heavy enough to dominate a narrow sidebar. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: var(--line);
+    border-radius: 999px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--faint);
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}

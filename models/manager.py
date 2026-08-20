@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import socket
 import subprocess
 import threading
 import time
@@ -568,6 +569,23 @@ class ModelManager:
         return False
 
     def _healthy(self, port: int) -> bool:
+        """Whether a llama-server is answering on `port`.
+
+        The socket is checked before the HTTP request. An HTTP call to a port
+        with nothing behind it can sit for the whole timeout, and this runs
+        once per registered model every time state is reconciled - which made
+        /api/models an 18-second request with three dead ports in the registry.
+        A refused connection comes back in about a millisecond.
+
+        The HTTP timeout stays generous on purpose: a server that is mid-
+        generation can be slow to answer /health, and calling it dead would
+        make the manager try to restart a model that is working.
+        """
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.25)
+            if probe.connect_ex(("127.0.0.1", port)) != 0:
+                return False
+
         try:
             response = self._session.get(
                 f"http://127.0.0.1:{port}/health", timeout=2.0

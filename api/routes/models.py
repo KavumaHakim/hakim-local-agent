@@ -12,15 +12,24 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from api.deps import get_runtime
 from api.runtime import Runtime
 from api.schemas import ModelOut, ModelsOut
-from models.manager import ModelManagerError, available_ram_mb
+from models.manager import ModelManagerError, ModelState, available_ram_mb
 
 router = APIRouter(prefix="/models", tags=["models"])
 
 
 def _snapshot(runtime: Runtime) -> ModelsOut:
     manager = runtime.manager
+    # Reconciling state probes every registered port, so it happens once here
+    # and everything else is derived from the result. Calling statuses() and
+    # then active_key() would do the same work three times over.
+    entries = manager.statuses()
+    active = next(
+        (entry.spec.key for entry in entries if entry.state is ModelState.READY),
+        None,
+    )
+
     models = []
-    for entry in manager.statuses():
+    for entry in entries:
         spec = entry.spec
         models.append(
             ModelOut(
@@ -43,7 +52,7 @@ def _snapshot(runtime: Runtime) -> ModelsOut:
     return ModelsOut(
         models=models,
         default_key=manager.default_key,
-        active_key=manager.active_key(),
+        active_key=active,
         router_fast=manager.router_fast,
         router_strong=manager.router_strong,
         max_active=manager.max_active,
@@ -56,10 +65,9 @@ def _snapshot(runtime: Runtime) -> ModelsOut:
 def list_models(runtime: Runtime = Depends(get_runtime)):
     """Every registered model and its current state.
 
-    `refresh()` first so a server started outside the agent - or one that died
-    - is reflected rather than reported from a stale table.
+    The snapshot reconciles first, so a server started outside the agent - or
+    one that died - is reflected rather than reported from a stale table.
     """
-    runtime.manager.refresh()
     return _snapshot(runtime)
 
 
