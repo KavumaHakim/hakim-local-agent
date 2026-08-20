@@ -1,0 +1,14 @@
+# Model weights: gigabytes of binaries that must never enter a repo.
+weights/
+
+# Generated state.
+data/
+*.db
+
+# Python and tooling.
+.venv/
+__pycache__/
+*.pyc
+
+# Stray downloads.
+*.apk

@@ -1,0 +1,328 @@
+"""HTTP client for the Qwen3 llama.cpp server.
+
+This module is the only place that speaks HTTP. It knows nothing about tools,
+prompts or the agent loop - it just forwards tool definitions and returns the
+assistant message the server produced.
+
+Verified against llama-server build 10373 (this machine's binary):
+  - POST /v1/chat/completions   OpenAI-compatible, accepts `tools`
+  - GET  /health                readiness check
+  - --jinja is enabled by default, so the server applies Qwen3's own chat
+    template, parses the model's native tool-call syntax, and returns standard
+    OpenAI `tool_calls` objects. No custom protocol is needed here.
+  - With the default --reasoning-format deepseek, thinking is returned in
+    `message.reasoning_content` and kept out of `message.content`.
+  - --chat-template-kwargs exists, so per-request `chat_template_kwargs`
+    (used below for Qwen3's enable_thinking switch) is supported.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Callable, Iterable, Protocol
+
+import requests
+
+from config import Config
+
+# Called with each content fragment as it streams in.
+TokenCallback = Callable[[str], None]
+
+
+class QwenError(Exception):
+    """Base class for all Qwen client failures."""
+
+
+class QwenConnectionError(QwenError):
+    """The server could not be reached."""
+
+
+class QwenTimeoutError(QwenError):
+    """The server did not respond in time."""
+
+
+class QwenHTTPError(QwenError):
+    """The server returned a non-2xx status."""
+
+    def __init__(self, status_code: int, body: str) -> None:
+        super().__init__(f"llama.cpp server returned HTTP {status_code}: {body[:500]}")
+        self.status_code = status_code
+        self.body = body
+
+
+class QwenResponseError(QwenError):
+    """The server returned a response we could not understand."""
+
+
+Message = dict[str, Any]
+
+
+class ChatClient(Protocol):
+    """What the agent loop needs from a model client.
+
+    Declared so the loop can be tested against a fake without a live server.
+    """
+
+    def chat(
+        self,
+        messages: Iterable[Message],
+        *,
+        tools: list[dict[str, Any]] | None = ...,
+    ) -> Message: ...
+
+
+class QwenClient:
+    """Chat client for a llama.cpp server running Qwen3."""
+
+    def __init__(self, config: Config) -> None:
+        self._config = config
+        self._session = requests.Session()
+
+    @property
+    def base_url(self) -> str:
+        return self._config.qwen_url
+
+    def health(self) -> bool:
+        """Return True if the server is up and a model is loaded.
+
+        Never raises: this is used to print a friendly message at startup.
+        """
+        try:
+            response = self._session.get(
+                f"{self._config.qwen_url}/health",
+                timeout=self._config.connect_timeout,
+            )
+        except requests.RequestException:
+            return False
+        return response.status_code == 200
+
+    def chat(
+        self,
+        messages: Iterable[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float | None = None,
+    ) -> Message:
+        """Send a conversation and return the assistant message.
+
+        The return value is the raw OpenAI-shaped message dict, e.g.
+        ``{"role": "assistant", "content": "...", "tool_calls": [...]}``.
+        Interpreting it is the parser's job, not this client's.
+        """
+        payload = self._build_payload(messages, tools, temperature)
+        data = self._post("/v1/chat/completions", payload)
+        return self._extract_message(data)
+
+    def chat_stream(
+        self,
+        messages: Iterable[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        on_token: TokenCallback | None = None,
+    ) -> Message:
+        """Stream a reply, then return the same assembled message `chat` would.
+
+        Tokens are handed to `on_token` as they arrive. On this hardware a turn
+        takes minutes, so streaming is the difference between a usable
+        interface and a blank screen.
+
+        `reasoning_content` deltas are counted but never passed to `on_token`:
+        the caller may show that thinking is happening, never what it says.
+        """
+        payload = self._build_payload(messages, tools)
+        payload["stream"] = True
+
+        content: list[str] = []
+        # Tool call fragments arrive spread over chunks, keyed by index.
+        partial_calls: dict[int, dict[str, Any]] = {}
+        reasoning_chars = 0
+
+        for chunk in self._stream("/v1/chat/completions", payload):
+            choices = chunk.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            delta = choices[0].get("delta")
+            if not isinstance(delta, dict):
+                continue
+
+            piece = delta.get("content")
+            if isinstance(piece, str) and piece:
+                content.append(piece)
+                if on_token is not None:
+                    on_token(piece)
+
+            thought = delta.get("reasoning_content")
+            if isinstance(thought, str):
+                reasoning_chars += len(thought)
+
+            for fragment in delta.get("tool_calls") or []:
+                if isinstance(fragment, dict):
+                    _merge_tool_call(partial_calls, fragment)
+
+        message: Message = {"role": "assistant", "content": "".join(content)}
+        if partial_calls:
+            message["tool_calls"] = [
+                partial_calls[index] for index in sorted(partial_calls)
+            ]
+        if reasoning_chars:
+            # Length only - the text itself is deliberately dropped.
+            message["reasoning_chars"] = reasoning_chars
+        return message
+
+    # --- internals ---
+
+    def _build_payload(
+        self,
+        messages: Iterable[Message],
+        tools: list[dict[str, Any]] | None,
+        temperature: float | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self._config.qwen_model,
+            "messages": list(messages),
+            "temperature": (
+                self._config.temperature if temperature is None else temperature
+            ),
+            "top_p": self._config.top_p,
+            "stream": False,
+        }
+        if self._config.max_tokens > 0:
+            payload["max_tokens"] = self._config.max_tokens
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        if not self._config.enable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        return payload
+
+    def _stream(self, path: str, payload: dict[str, Any]):
+        """Yield decoded SSE chunks from a streaming completion."""
+        url = f"{self._config.qwen_url}{path}"
+        try:
+            response = self._session.post(
+                url,
+                json=payload,
+                timeout=(self._config.connect_timeout, self._config.request_timeout),
+                stream=True,
+            )
+        except requests.Timeout as exc:
+            raise QwenTimeoutError(
+                f"No response from {url} within "
+                f"{self._config.request_timeout:.0f}s."
+            ) from exc
+        except requests.ConnectionError as exc:
+            raise QwenConnectionError(
+                f"Could not reach the Qwen server at {self._config.qwen_url}. "
+                f"Is llama-server running on that port?"
+            ) from exc
+        except requests.RequestException as exc:
+            raise QwenError(f"Request to {url} failed: {exc}") from exc
+
+        with response:
+            if response.status_code >= 400:
+                raise QwenHTTPError(response.status_code, response.text)
+
+            try:
+                lines = response.iter_lines(decode_unicode=True)
+                for line in lines:
+                    if not line or not line.startswith("data:"):
+                        continue
+                    body = line[5:].strip()
+                    if body == "[DONE]":
+                        return
+                    try:
+                        chunk = json.loads(body)
+                    except ValueError:
+                        # A malformed keepalive is not worth failing the turn.
+                        continue
+                    if isinstance(chunk, dict):
+                        yield chunk
+            except requests.Timeout as exc:
+                raise QwenTimeoutError(
+                    f"Stream from {url} stalled for more than "
+                    f"{self._config.request_timeout:.0f}s."
+                ) from exc
+            except requests.RequestException as exc:
+                raise QwenError(f"Stream from {url} failed: {exc}") from exc
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        url = f"{self._config.qwen_url}{path}"
+        try:
+            response = self._session.post(
+                url,
+                json=payload,
+                timeout=(self._config.connect_timeout, self._config.request_timeout),
+            )
+        except requests.Timeout as exc:
+            raise QwenTimeoutError(
+                f"No response from {url} within "
+                f"{self._config.request_timeout:.0f}s. Local generation can be "
+                f"slow; raise AGENT_REQUEST_TIMEOUT if this is expected."
+            ) from exc
+        except requests.ConnectionError as exc:
+            raise QwenConnectionError(
+                f"Could not reach the Qwen server at {self._config.qwen_url}. "
+                f"Is llama-server running on that port?"
+            ) from exc
+        except requests.RequestException as exc:
+            raise QwenError(f"Request to {url} failed: {exc}") from exc
+
+        if response.status_code >= 400:
+            raise QwenHTTPError(response.status_code, response.text)
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise QwenResponseError(
+                f"Server response was not valid JSON: {response.text[:500]}"
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise QwenResponseError(f"Expected a JSON object, got {type(data).__name__}")
+        return data
+
+    @staticmethod
+    def _extract_message(data: dict[str, Any]) -> Message:
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise QwenResponseError(f"Response contained no choices: {data!r}")
+
+        first = choices[0]
+        if not isinstance(first, dict):
+            raise QwenResponseError(f"Malformed choice entry: {first!r}")
+
+        message = first.get("message")
+        if not isinstance(message, dict):
+            raise QwenResponseError(f"Choice contained no message: {first!r}")
+
+        return message
+
+
+def _merge_tool_call(store: dict[int, dict[str, Any]], fragment: dict[str, Any]) -> None:
+    """Fold one streamed tool-call fragment into the accumulator.
+
+    llama.cpp may send a tool call whole, or split its `arguments` string
+    across several chunks. Fragments are keyed by `index`, and argument text is
+    concatenated in arrival order.
+    """
+    index = fragment.get("index", 0)
+    if not isinstance(index, int):
+        index = 0
+
+    entry = store.setdefault(
+        index,
+        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+    )
+
+    if fragment.get("id"):
+        entry["id"] = fragment["id"]
+    if fragment.get("type"):
+        entry["type"] = fragment["type"]
+
+    function = fragment.get("function")
+    if isinstance(function, dict):
+        if function.get("name"):
+            entry["function"]["name"] = function["name"]
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            entry["function"]["arguments"] += arguments

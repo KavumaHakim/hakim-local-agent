@@ -1,0 +1,63 @@
+{
+  "_comment": [
+    "Model registry for the local agent. Edit this file to add or retune models.",
+    "Ports: 8081 is deliberately skipped - it is the GLM-OCR server.",
+    "min_free_mb is the free physical RAM the manager insists on before starting",
+    "a model. Measured basis: GLM-OCR's 906 MB file uses 683 MB resident, a ratio",
+    "of ~0.75, so small models get file*0.8 plus ~250 MB headroom. 'reasoning' is",
+    "deliberately far more conservative: at 4.8 GB it cannot stay resident on an",
+    "8 GB machine and pages from disk, so it needs real headroom, not a formula.",
+    "models_dir points at local-agent/weights. runner.bat reads its own path from ../config_model.txt, which was updated to match. Forward slashes are used deliberately: Windows accepts them and they cannot be mistaken for escape sequences."
+  ],
+  "server_exe": "C:\\Users\\SHAMI\\HAKIM\\AI\\LLAMA CP\\llama-server.exe",
+  "models_dir": "C:/Users/SHAMI/HAKIM/AI/local-agent/weights",
+  "default": "mistral",
+  "max_active": 1,
+  "idle_timeout_seconds": 300,
+  "router": {
+    "fast": "mistral",
+    "strong": "reasoning"
+  },
+  "models": [
+    {
+      "key": "mistral",
+      "label": "Ministral 3B",
+      "file": "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf",
+      "port": 8084,
+      "context": 4096,
+      "threads": 4,
+      "min_free_mb": 1900,
+      "description": "Primary model for everyday work. Mistral's native function-calling template. Native context is 262k but is capped at 4096 here, because the KV cache for anything larger will not fit."
+    },
+    {
+      "key": "fast",
+      "label": "Qwen3.5 2B (M)",
+      "file": "Qwen3.5-2B-M-TS-Q4_K_M.gguf",
+      "port": 8080,
+      "context": 4096,
+      "threads": 4,
+      "min_free_mb": 1150,
+      "description": "Quick answers, short tasks, simple tool calls."
+    },
+    {
+      "key": "tiny",
+      "label": "Qwen3.5 2B (XS)",
+      "file": "Qwen3.5-2B-XS-TS-Q3_K_S.gguf",
+      "port": 8083,
+      "context": 4096,
+      "threads": 4,
+      "min_free_mb": 900,
+      "description": "Smallest and quickest. Q3_K_S is a harsher quant than the others, so expect weaker instruction-following."
+    },
+    {
+      "key": "reasoning",
+      "label": "Qwen3 8B",
+      "file": "Qwen3-8B-Q4_K_M.gguf",
+      "port": 8082,
+      "context": 4096,
+      "threads": 4,
+      "min_free_mb": 6200,
+      "description": "Harder reasoning and longer tasks. Slow on this machine."
+    }
+  ]
+}

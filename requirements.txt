@@ -1,0 +1,7 @@
+# Minimal by design: no agent frameworks (no LangChain/LangGraph/AutoGen/CrewAI).
+
+# HTTP client for the llama.cpp servers.
+requests>=2.32,<3
+
+# Web interface (app.py). The CLI (main.py) does not need it.
+streamlit>=1.40
