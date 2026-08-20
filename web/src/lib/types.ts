@@ -10,6 +10,17 @@ export interface ToolCall {
   name: string
   ok: boolean
   summary: string
+  /**
+   * The arguments the model passed, as pretty JSON.
+   *
+   * Optional because turns recorded before tool detail existed have neither
+   * this nor `output`, and those rows are still rendered.
+   */
+  arguments?: string
+  /** The whole result payload the model saw, as pretty JSON. */
+  output?: string
+  /** True when either was shortened for display. */
+  clipped?: boolean
 }
 
 export interface Message {

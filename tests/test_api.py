@@ -277,6 +277,46 @@ class ChatStreamTests(ApiTestCase):
         stored = self.client.get(f"/api/conversations/{conversation_id}").json()
         self.assertEqual(stored["messages"][-1]["tools"][0]["name"], "calculate")
 
+    def test_a_tool_call_carries_what_was_sent_and_what_came_back(self):
+        """A one-line summary is not enough to check the agent's work."""
+        self.runtime.responses = [
+            tool_call_message(("calculate", {"expression": "2+2"})),
+            {"role": "assistant", "content": "4"},
+        ]
+        events = self.say("what is 2+2?")
+
+        tool = first(events, "tool")
+        self.assertIn("2+2", tool["arguments"])
+        self.assertIn("expression", tool["arguments"])
+        self.assertIn("4", tool["output"])
+        self.assertFalse(tool["clipped"])
+
+        # And it survives a reload, not just the live stream.
+        conversation_id = first(events, "accepted")["conversation_id"]
+        stored = self.client.get(f"/api/conversations/{conversation_id}").json()
+        recorded = stored["messages"][-1]["tools"][0]
+        self.assertIn("2+2", recorded["arguments"])
+        self.assertIn("4", recorded["output"])
+
+    def test_a_huge_tool_result_is_clipped_and_says_so(self):
+        """A file read may be 200,000 characters, and all of it would end up in
+        the message row and go to the browser on every reload."""
+        from api.runtime import TOOL_DISPLAY_LIMIT, tool_entry
+        from agent.loop import ToolEvent
+        from agent.parser import ToolCall as ParsedCall
+        from tools.base import ToolResult
+
+        event = ToolEvent(
+            call=ParsedCall(id="1", name="read_text_file", arguments={"path": "x"}),
+            result=ToolResult(
+                name="read_text_file",
+                payload={"success": True, "text": "x" * 50_000},
+            ),
+        )
+        entry = tool_entry(event)
+        self.assertTrue(entry["clipped"])
+        self.assertLessEqual(len(entry["output"]), TOOL_DISPLAY_LIMIT)
+
     def test_an_unknown_model_is_refused_before_anything_is_queued(self):
         response = self.client.post(
             "/api/chat", json={"prompt": "hi", "model_key": "nope"}

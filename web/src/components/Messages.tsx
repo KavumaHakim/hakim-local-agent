@@ -4,33 +4,92 @@
 
 import { Markdown } from '../lib/markdown'
 import type { Message, ToolCall } from '../lib/types'
-import { AlertIcon, BrainIcon, CheckIcon, SparkIcon, ToolIcon } from './Icons'
+import {
+  AlertIcon,
+  BrainIcon,
+  CheckIcon,
+  ChevronIcon,
+  SparkIcon,
+  ToolIcon,
+} from './Icons'
+import { CopyButton } from './CopyButton'
 
+/**
+ * The tool calls a turn made, each expandable to what was sent and what came
+ * back.
+ *
+ * The collapsed row used to be all there was, and a one-line summary is not
+ * enough to check the agent's work — which is the only reason to look. Expanded
+ * shows the arguments it passed and the whole result payload, which is exactly
+ * what the model itself saw.
+ */
 export function ToolPills({ tools }: { tools: ToolCall[] }) {
   if (!tools.length) return null
   return (
-    <div className="mb-2 flex flex-wrap gap-1.5">
+    <div className="mb-2 space-y-1">
       {tools.map((tool, index) => (
-        <span
-          key={`${tool.name}-${index}`}
-          title={tool.summary}
-          className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs ${
-            tool.ok
-              ? 'border-line bg-surface text-muted'
-              : 'border-danger/40 bg-danger/10 text-danger'
-          }`}
-        >
-          {tool.ok ? (
-            <CheckIcon className="size-3 shrink-0 text-ok" />
-          ) : (
-            <AlertIcon className="size-3 shrink-0" />
-          )}
-          <span className="font-mono">{tool.name}</span>
-          {tool.summary && (
-            <span className="truncate text-faint">{tool.summary}</span>
-          )}
-        </span>
+        <ToolCallRow key={`${tool.name}-${index}`} tool={tool} />
       ))}
+    </div>
+  )
+}
+
+function ToolCallRow({ tool }: { tool: ToolCall }) {
+  // Nothing to expand for a turn loaded before these were recorded.
+  const detailed = Boolean(tool.arguments || tool.output)
+
+  return (
+    <details
+      className={`group overflow-hidden rounded-lg border ${
+        tool.ok ? 'border-line bg-surface' : 'border-danger/40 bg-danger/5'
+      }`}
+    >
+      <summary
+        className={`flex cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 text-xs ${
+          detailed ? '' : 'cursor-default'
+        }`}
+      >
+        {tool.ok ? (
+          <CheckIcon className="size-3 shrink-0 text-ok" />
+        ) : (
+          <AlertIcon className="size-3 shrink-0 text-danger" />
+        )}
+        <span className="shrink-0 font-mono text-fg">{tool.name}</span>
+        <span className="min-w-0 flex-1 truncate text-faint">{tool.summary}</span>
+        {detailed && (
+          <ChevronIcon className="size-3 shrink-0 text-faint transition group-open:rotate-90" />
+        )}
+      </summary>
+
+      {detailed && (
+        <div className="space-y-2 border-t border-line px-2.5 py-2">
+          {tool.arguments && (
+            <CodePane title="Sent" text={tool.arguments} />
+          )}
+          {tool.output && <CodePane title="Returned" text={tool.output} />}
+          {tool.clipped && (
+            <p className="text-[11px] text-faint">
+              Shortened for display. The model received the whole thing.
+            </p>
+          )}
+        </div>
+      )}
+    </details>
+  )
+}
+
+function CodePane({ title, text }: { title: string; text: string }) {
+  return (
+    <div>
+      <div className="mb-1 flex items-center gap-2">
+        <span className="text-[11px] font-medium tracking-wide text-faint uppercase">
+          {title}
+        </span>
+        <CopyButton text={text} className="ml-auto" />
+      </div>
+      <pre className="max-h-64 overflow-auto rounded-md bg-sunken p-2 text-[11px] leading-relaxed">
+        <code className="font-mono whitespace-pre">{text}</code>
+      </pre>
     </div>
   )
 }
@@ -64,6 +123,9 @@ export function ReasoningPanel({
         <span className="ml-auto text-faint transition group-open:rotate-90">›</span>
       </summary>
       <div className="max-h-72 overflow-y-auto border-t border-line px-3 py-2">
+        <div className="mb-1 flex">
+          <CopyButton text={text} className="ml-auto" />
+        </div>
         <p className="font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-muted">
           {text}
         </p>
@@ -81,7 +143,13 @@ export function ReasoningPanel({
 export function MessageView({ message }: { message: Message }) {
   if (message.role === 'user') {
     return (
-      <div className="flex justify-end animate-rise">
+      <div className="group flex animate-rise justify-end gap-1">
+        {/* Kept out of the bubble: white-on-accent would need its own colours,
+            and a control that only appears on hover should not reflow the
+            bubble when it does. */}
+        <div className="self-end opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+          <CopyButton text={message.content} label="" />
+        </div>
         <div className="max-w-[85%] rounded-2xl rounded-br-md bg-accent px-4 py-2.5 text-white shadow-sm">
           <p className="whitespace-pre-wrap break-words leading-relaxed">
             {message.content}
@@ -92,18 +160,19 @@ export function MessageView({ message }: { message: Message }) {
   }
 
   return (
-    <div className="animate-rise">
+    <div className="group animate-rise">
       {message.reasoning && <ReasoningPanel text={message.reasoning} />}
       <ToolPills tools={message.tools} />
       <div className="text-[15px] text-fg">
         <Markdown text={message.content} />
       </div>
-      {(message.elapsed || message.model_key) && (
-        <div className="mt-1.5 flex items-center gap-2 text-xs text-faint">
-          {message.model_key && <span className="font-mono">{message.model_key}</span>}
-          {message.elapsed != null && <span>{formatDuration(message.elapsed)}</span>}
+      <div className="mt-1.5 flex items-center gap-2 text-xs text-faint">
+        {message.model_key && <span className="font-mono">{message.model_key}</span>}
+        {message.elapsed != null && <span>{formatDuration(message.elapsed)}</span>}
+        <div className="opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+          <CopyButton text={message.content} />
         </div>
-      )}
+      </div>
     </div>
   )
 }

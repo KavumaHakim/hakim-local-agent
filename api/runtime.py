@@ -16,6 +16,7 @@ byte-identical to last time.
 from __future__ import annotations
 
 import dataclasses
+import json
 import time
 from typing import Any
 
@@ -71,6 +72,45 @@ TOOL_FLAGS: tuple[ToolFlag, ...] = (
 )
 
 FLAGS_BY_ID = {flag.id: flag for flag in TOOL_FLAGS}
+
+# How much of a tool call to keep for display.
+#
+# The model's own limits are much larger - a Python snippet may be 100,000
+# characters and a file read 200,000 - and all of it would otherwise be
+# serialised into the message row and sent to the browser on every reload. This
+# is what gets shown and stored; it is not what the model saw, so anything cut
+# says so rather than trailing off and looking complete.
+TOOL_DISPLAY_LIMIT = 8_000
+
+
+def _clip(text: str, limit: int = TOOL_DISPLAY_LIMIT) -> tuple[str, bool]:
+    """Cut `text` to `limit`, reporting whether anything was removed."""
+    if len(text) <= limit:
+        return text, False
+    return text[:limit], True
+
+
+def tool_entry(event: ToolEvent) -> dict[str, Any]:
+    """What the UI is told about one tool call.
+
+    Carries the arguments and the whole result payload, not just the one-line
+    summary: "it ran read_text_file" is not enough to check its work, which is
+    the entire reason for looking.
+    """
+    arguments, arguments_clipped = _clip(
+        json.dumps(event.call.arguments, ensure_ascii=False, indent=2, default=str)
+    )
+    output, output_clipped = _clip(
+        json.dumps(event.result.payload, ensure_ascii=False, indent=2, default=str)
+    )
+    return {
+        "name": event.call.name,
+        "ok": event.result.ok,
+        "summary": event.result.summary(60),
+        "arguments": arguments,
+        "output": output,
+        "clipped": arguments_clipped or output_clipped,
+    }
 
 
 @dataclasses.dataclass(frozen=True)
@@ -303,11 +343,7 @@ class Runtime:
                 turn.emit("reasoning", text=text)
 
             def on_tool(event: ToolEvent) -> None:
-                entry = {
-                    "name": event.call.name,
-                    "ok": event.result.ok,
-                    "summary": event.result.summary(60),
-                }
+                entry = tool_entry(event)
                 calls.append(entry)
                 # A tool round produces no prose, so the client clears whatever
                 # it has streamed on seeing this - otherwise two rounds of text
