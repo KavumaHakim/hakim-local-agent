@@ -1,7 +1,12 @@
 # Hakim AI System
 
-A local AI agent built on llama.cpp. Runs entirely on your machine — no API keys,
-no network calls, nothing leaves the box.
+A local AI agent built on llama.cpp. Everything runs on your machine by
+default: no API keys, no network calls, nothing leaves the box.
+
+Hosted models are the one exception, and an opt-in one. Selecting Gemini or
+Cerebras trades that guarantee for speed — a turn that costs minutes here costs
+seconds there — and the UI says so wherever it is true rather than claiming
+otherwise. See [section 7](#7-models-and-switching).
 
 Two front ends over one engine: a React web app talking to a FastAPI layer, and
 a terminal CLI. Both use the same agent, the same tools and the same model
@@ -34,11 +39,15 @@ manager — the API adds transport, not a second implementation.
 
 ## 1. What it does
 
-- Chats with a local Qwen model served by `llama-server`
+- Chats with a local model served by `llama-server`
 - Calls tools when they help: exact arithmetic, reading files in a workspace
-- Manages three models, holding only one in RAM at a time
+- Manages four local models, holding only one in RAM at a time
 - Optionally picks the model itself based on how hard the prompt looks
-- Streams tokens as they generate
+- Streams tokens, and the model's reasoning, as they generate
+- Shows what every tool call sent and received, so you can check its work
+- Reads images you drop in, via OCR
+- Can send a turn to a hosted model instead, when speed matters more than
+  keeping it local — and asks first when the router chooses that itself
 - Saves every conversation to a local SQLite file
 
 Deliberately **not** used: LangChain, LangGraph, AutoGen, CrewAI. The agent loop
@@ -192,14 +201,16 @@ local-agent/
 │
 ├── weights/             the GGUF model files (~9.5 GB, git-ignored)
 ├── data/                generated state: the SQLite database
+├── uploads/             images attached in the UI (git-ignored)
 ├── samples/             example images for the OCR tool
+├── .env                 API keys for hosted models (git-ignored)
 │
 ├── api/                 the HTTP layer the front end talks to
 │   ├── main.py          app, lifespan, static serving
 │   ├── runtime.py       process-wide objects; runs one turn
 │   ├── turns.py         the queue: one turn at a time, with positions
 │   ├── schemas.py       request and response bodies
-│   └── routes/          chat (SSE), conversations, models, meta
+│   └── routes/          chat (SSE), conversations, models, meta, uploads
 │
 ├── web/                 React + TypeScript + Vite + Tailwind
 │   ├── src/lib/         api client, SSE reader, markdown, commands
@@ -214,7 +225,9 @@ local-agent/
 │   └── router.py        picks a model from the prompt
 │
 ├── models/
-│   ├── qwen.py          HTTP client (the only module that speaks HTTP)
+│   ├── qwen.py          llama-server client (the only module that speaks HTTP)
+│   ├── remote.py        hosted providers (the only module that leaves the box)
+│   ├── connectivity.py  cached "is there internet"
 │   └── manager.py       starts/stops/switches llama-server processes
 │
 ├── tools/
@@ -367,6 +380,41 @@ this". The figures are derived from measurement — GLM-OCR's 906 MB file holds
 683 MB resident, a ratio near 0.75 — except `reasoning`, which is left
 deliberately high because a 4.8 GB model on an 8 GB machine genuinely thrashes.
 
+
+### Hosted models
+
+Two are registered alongside the local ones: **Gemini** and **GPT-OSS 120B on
+Cerebras**. Both speak the OpenAI chat-completions shape, so one client covers
+them and the agent loop is identical — same tools, same history, same events.
+
+They are for speed. Measured on the same prompt, same tool, through the whole
+stack: **127.1 s** on local Ministral, **3.7 s** on Gemini 3.5 Flash.
+
+What is different about them:
+
+- **They leave the machine.** The prompt, the conversation history and every
+  tool result go to the provider — which, with filesystem reading on, includes
+  the contents of files the agent reads.
+- **They hold no RAM,** so they are deliberately outside the one-at-a-time
+  rotation. Selecting one leaves your local model resident, and switching back
+  costs nothing instead of another cold load.
+- **Nothing to load.** No file, no port, no RAM threshold, so no Load button.
+  They are usable when a key exists *and* there is internet, and the sidebar
+  distinguishes those two failures because they have different fixes.
+- **The auto-router asks first.** Choosing one yourself is already deliberate;
+  being moved onto one is not. See [section 8](#8-auto-routing).
+- **No internet falls back to local** and says why, checked again at send time
+  since the network can drop between loading the page and pressing enter.
+
+The `model` field in `models.json` is the provider's own id and is the thing
+most likely to go stale. Confirm it against the key rather than trusting it:
+
+```bash
+.venv\Scripts\python -c "from config import load_env_file; load_env_file(); from models.manager import ModelManager; from models.remote import RemoteClient; print(RemoteClient(ModelManager().get_spec('gemini')).list_models())"
+```
+
+That is not pedantry — the id shipped here was wrong until it was checked, and
+a wrong one fails as a 404 that reads like an outage.
 
 ### Why it is now behind an API, having argued it should not be
 
@@ -709,8 +757,13 @@ React 19, TypeScript, Vite 8 and Tailwind 4, in [`web/`](web/). About 70 kB
 gzipped, because the dependency list stops at those four.
 
 - User turns are right-aligned accent bubbles; replies sit flat and full-width
-- Tool activity appears as pills, and a tool round clears the streamed text
-  rather than gluing two rounds together
+- **Every tool call expands** to the arguments it sent and the whole payload it
+  got back - the same thing the model saw. A 60-character summary is enough to
+  know `read_text_file` ran and useless for checking it read the right file
+- Copy buttons on prompts, answers, the reasoning trace, and each half of a
+  tool call
+- **Attach an image** with the paperclip or by dropping it on the composer, and
+  the agent reads it with OCR
 - **Each stage of a turn is named** — queued with its position, model loading,
   generating — with a live elapsed timer. One spinner for all three says
   nothing on a machine where each takes minutes, and telling slow progress
@@ -731,6 +784,39 @@ It builds React elements, never HTML, so there is no `dangerouslySetInnerHTML`
 anywhere in the app and no sanitiser to get wrong. A model that emits
 `<script>` emits eight harmless characters. Links are restricted to `http(s)`,
 so a `javascript:` URL renders as text.
+
+### Attachments and OCR
+
+The OCR tool takes a path *inside the workspace* and resolves it through the
+same jail as the filesystem tools. A browser upload is bytes, so `POST
+/api/uploads` is the bridge: bytes in, a workspace-relative path out, which is
+exactly what `ocr_image` wants.
+
+Uploads therefore land in `config.workspace`, not beside the database — if
+`AGENT_WORKSPACE` points elsewhere they follow it, because anywhere else and
+the agent could not read its own attachment.
+
+The path is then **named in the prompt itself**, not passed beside it. The
+model has no other way to learn the file exists, and folding it in means the
+stored message is exactly what the model was asked, so replaying the
+conversation later stays faithful.
+
+Two things must be true before it works, and the composer distinguishes them
+because the fixes differ: the **OCR tool** must be switched on, and the
+**GLM-OCR server** must be running — it is separate from the chat models, is
+not in the manager's rotation, and needs both its model and its `mmproj` file:
+
+```bash
+"C:\Users\SHAMI\HAKIM\AI\LLAMA CP\llama-server.exe" -m weights\GLM-OCR-Q8_0.gguf --mmproj weights\mmproj-GLM-OCR-Q8_0.gguf -c 4096 -t 4 -np 1 --port 8081
+```
+
+Confirm it came up with vision, which is the check that actually matters:
+`GET http://127.0.0.1:8081/props` should report `"modalities": {"vision": true`.
+
+Nothing about an upload is trusted: the filename is rebuilt rather than
+sanitised, the extension must be one the OCR tool accepts, and the size cap is
+enforced *while* reading, so an oversized file is never held in memory and a
+refused upload leaves nothing on disk.
 
 ### Reasoning
 
@@ -779,6 +865,26 @@ The CLI has its own smaller set plus `/quit`.
 ## 13. Configuration
 
 Everything is environment-driven with local defaults. See [`config.py`](config.py).
+
+### API keys
+
+Hosted models need one. They go in `.env` beside `models.json`, which is
+git-ignored, and are read at startup by a small loader in `config.py` — no
+dependency, and real environment variables win over the file so you can
+override one for a single run.
+
+```
+GEMINI_API_KEY=...
+CEREBRAS_API_KEY=...
+```
+
+Restart the API after editing it. The key is never stored on a model spec,
+never sent to the browser, and is scrubbed out of provider error bodies before
+they can reach a log — some providers echo the request back in an error.
+
+Which variable a model wants is `api_key_env` in [`models.json`](models.json).
+A missing key is reported as exactly that, naming the variable, rather than as
+a connection failure.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -830,7 +936,8 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**430 tests, no model server needed.** They run in about 30 seconds.
+**485 tests, no model server needed, and none of them touch the network.**
+They run in about 35 seconds.
 
 | File | Covers |
 |---|---|
@@ -846,7 +953,8 @@ cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && .venv\Scripts\python -m unittest dis
 | `test_http_tool.py` | Host/scheme allowlist, redirect refusal, method gating |
 | `test_port_reclaim.py` | Reclaiming a port from a llama-server we did not start |
 | `test_turns.py` | The queue: serialisation, positions, bounded backlog, a runner that raises |
-| `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches |
+| `test_remote.py` | Hosted models: registry shape, key handling, connectivity cache, error hints |
+| `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches, remote consent, uploads |
 
 The API tests use the same manager harness as the model tests and a scripted
 chat client, so none of them depend on whether something happens to be
@@ -883,6 +991,10 @@ on its allowlist.
   model rather than a crash
 - Front end: no `dangerouslySetInnerHTML` anywhere, so model output cannot
   become markup; links are restricted to `http(s)`
+- Uploads: extension allowlist, size enforced while reading, filenames rebuilt
+  rather than sanitised, and written only inside the workspace
+- API keys: held in a git-ignored `.env`, never stored on a model spec, never
+  sent to the browser, and scrubbed from provider error bodies
 
 ### The API changes this, and it is worth being exact about how
 
@@ -937,10 +1049,19 @@ Being straight about this, because the difference matters.
   `model_key=mistral`, `elapsed=127.1`, `tools=['calculate']`.
 - **The manager adopts a server it did not start.** The llama-server already
   running on 8084 was reported `ready, adopted` rather than fought over.
+- **Gemini 3.5 Flash answers through the whole stack in 3.7 s** — browser, API,
+  queue, agent loop, calculator tool — against 127.1 s for the same turn on
+  local Ministral.
+- **Upload plus OCR works end to end.** `samples/note.png` uploaded through the
+  API, the model called `ocr_image` with the returned workspace path, GLM-OCR
+  transcribed it, and the answer carried every field: HK-4127-B, Naggalama
+  Depot, 36 crates, T. Balunywa. 223.2 s on the 2B.
+- **Provider errors are accurate.** A Cerebras 402 and a Gemini 429 were both
+  reported against the right provider with the right hint.
 
 ### Verified without the model
 
-- 430 tests
+- 485 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3
@@ -950,6 +1071,13 @@ Being straight about this, because the difference matters.
 - Terminal tool: ran `git` for real in a scratch repository and confirmed that
   `&&` and `;` chaining does not execute a second command
 
+### Known account limits, not bugs
+
+- **Cerebras returns HTTP 402.** The key authenticates and lists models
+  (`gpt-oss-120b`, `gemma-4-31b`), but the account has no inference quota.
+- **Gemini's free tier runs out quickly.** A handful of turns produced a 429.
+  Both are reported with a hint rather than as a failure of this code.
+
 ### Not verified
 
 - **Reasoning has never been seen from a live thinking model.** The plumbing is
@@ -957,9 +1085,12 @@ Being straight about this, because the difference matters.
   stored, and it is not replayed into the next prompt — but no Qwen3 model has
   been run with thinking on to watch a real trace arrive. That needs the 8B
   loaded, which evicts whatever else is resident.
-- **Auto-routing has never actually switched a model live.**
+- **Auto-routing has never actually switched a model live**, and with it the
+  hosted-model consent dialog has only been exercised by tests — verifying
+  Gemini meant selecting it directly, which by design skips the prompt.
 - **The queue has never been exercised by two concurrent real turns.** Its
   behaviour is covered by tests, including that only one runs at a time.
+- **The offline fallback has only been tested with a stubbed network.**
 
 ---
 
