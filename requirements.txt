@@ -3,13 +3,10 @@
 # HTTP client for the llama.cpp servers.
 requests>=2.32,<3
 
-# The API the React front end talks to (api/). FastAPI 0.115 pinned
-# starlette<0.46, which conflicted with the 1.3.1 Streamlit had already
-# installed; 0.121+ accepts it, so the venv is consistent again.
+# The API the React front end talks to (api/). The CLI (main.py) needs
+# neither, and runs with requests alone.
 fastapi>=0.121
 uvicorn[standard]>=0.34
 
-# Transitional: the Streamlit front end (app.py) stays until the React UI
-# reaches parity, then this line and the app go together. The CLI (main.py)
-# has never needed it.
-streamlit>=1.40
+# The front end is not a Python dependency: it lives in web/ and is built with
+# npm. See the README for the two commands that run it.

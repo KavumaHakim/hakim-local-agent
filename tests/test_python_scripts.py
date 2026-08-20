@@ -149,7 +149,7 @@ class SelfProtectionTests(unittest.TestCase):
     def test_refused_when_workspace_is_the_project(self):
         with self.assertRaises(PythonToolError) as ctx:
             run_python_file(
-                "app.py",
+                "main.py",
                 workspace=WorkspaceFiles(PROJECT_ROOT),
                 timeout=5,
                 max_output_chars=100,
@@ -160,11 +160,11 @@ class SelfProtectionTests(unittest.TestCase):
     def test_restricted_mode_is_not_blocked_by_the_workspace(self):
         # The screen and stripped child still apply, so restricted mode in the
         # project directory is the same risk as an inline snippet, which is
-        # already permitted. app.py is refused - but for importing, not for
+        # already permitted. main.py is refused - but for importing, not for
         # where it lives.
         with self.assertRaises(PythonToolError) as ctx:
             run_python_file(
-                "app.py",
+                "main.py",
                 workspace=WorkspaceFiles(PROJECT_ROOT),
                 timeout=5,
                 max_output_chars=100,
