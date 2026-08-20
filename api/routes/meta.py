@@ -24,6 +24,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.deps import get_runtime
 from api.runtime import FLAGS_BY_ID, TOOL_FLAGS, Runtime
+from models.manager import ModelManagerError, ModelState
+
 from api.schemas import (
     DisabledToolOut,
     HealthOut,
@@ -34,6 +36,17 @@ from api.schemas import (
 )
 
 router = APIRouter(tags=["meta"])
+
+# The registry key of the vision backend the ocr switch starts and stops.
+OCR_MODEL_KEY = "ocr"
+
+
+def _ocr_running(runtime: Runtime) -> bool:
+    """Whether the GLM-OCR server is up, without raising if it is not listed."""
+    try:
+        return runtime.manager.status(OCR_MODEL_KEY).state is ModelState.READY
+    except (ModelManagerError, KeyError):
+        return False
 
 
 def _tools_snapshot(runtime: Runtime) -> ToolsOut:
@@ -69,11 +82,18 @@ def _tools_snapshot(runtime: Runtime) -> ToolsOut:
         if not risk and flag.depends_on:
             risk = reasons.get(flag.depends_on.replace("_", " "), "")
 
+        # For OCR, "on" means the tool is enabled *and* its server answers.
+        # Reporting the flag alone would show a switch that is on while every
+        # attempt to use it fails.
+        enabled = bool(getattr(config, flag.field))
+        if flag.id == OCR_MODEL_KEY:
+            enabled = enabled and _ocr_running(runtime)
+
         switches.append(
             SwitchOut(
                 id=flag.id,
                 label=flag.label,
-                enabled=bool(getattr(config, flag.field)),
+                enabled=enabled,
                 from_env=flag.field not in overrides
                 and bool(getattr(runtime.config, flag.field)),
                 depends_on=flag.depends_on,
@@ -120,6 +140,19 @@ def set_tool(
             "A turn is running. Tool changes apply from the next turn, so this "
             "would not affect it anyway.",
         )
+
+    # OCR is the one switch that owns a process as well as a flag. The tool is
+    # useless without the GLM-OCR server and the server is dead weight without
+    # the tool, so one toggle does both rather than leaving someone to discover
+    # the second half from an error message.
+    if flag_id == "ocr":
+        try:
+            if body.enabled:
+                runtime.ensure_model(OCR_MODEL_KEY)
+            else:
+                runtime.manager.stop(OCR_MODEL_KEY)
+        except ModelManagerError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
 
     flag = FLAGS_BY_ID[flag_id]
     if body.enabled and flag.depends_on:

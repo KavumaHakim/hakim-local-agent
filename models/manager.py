@@ -65,6 +65,19 @@ class ModelSpec:
     min_free_mb: int
     description: str = ""
 
+    # --- what this model is for ---
+    #
+    # "chat" drives the agent loop and joins the one-at-a-time rotation.
+    # "ocr" is a llama-server too, but a vision backend that has to run
+    # *alongside* a chat model rather than instead of one - and GLM-OCR cannot
+    # call tools at all, so it could never drive the loop. It therefore sits
+    # outside the rotation in both directions: it never evicts a chat model and
+    # is never evicted by one.
+    role: str = "chat"
+    # Vision projector, for a model that needs one. GLM-OCR's language half has
+    # no vision tensors, so without this it loads and then cannot see.
+    mmproj: Path | None = None
+
     # --- remote models ---
     #
     # "local" means a llama-server this manager starts and owns. Anything else
@@ -104,10 +117,18 @@ class ModelSpec:
         that a key exists. Neither says anything about whether it will work -
         a remote model also needs the internet, which is checked separately
         because it changes minute to minute.
+
+        A model with an mmproj needs both files. Checking only the language
+        half is the trap here: it loads happily and then reports no vision,
+        which looks like a broken tool rather than a missing file.
         """
         if self.remote:
             return self.has_key
-        return self.path.is_file()
+        if not self.path.is_file():
+            return False
+        if self.mmproj is not None and not self.mmproj.is_file():
+            return False
+        return True
 
 
 @dataclass
@@ -171,6 +192,7 @@ def load_registry(path: Path | None = None) -> dict[str, Any]:
             key = entry["key"]
             provider = entry.get("provider", "local")
             if provider == "local":
+                mmproj = entry.get("mmproj")
                 specs[key] = ModelSpec(
                     key=key,
                     label=entry.get("label", key),
@@ -180,6 +202,8 @@ def load_registry(path: Path | None = None) -> dict[str, Any]:
                     threads=int(entry.get("threads", 4)),
                     min_free_mb=int(entry.get("min_free_mb", 0)),
                     description=entry.get("description", ""),
+                    role=entry.get("role", "chat"),
+                    mmproj=(models_dir / mmproj).resolve() if mmproj else None,
                 )
             else:
                 # A hosted model has no file, no port and no RAM threshold, so
@@ -299,7 +323,7 @@ class ModelManager:
         """
         self.refresh()
         for key, status in self._statuses.items():
-            if status.spec.remote:
+            if status.spec.remote or status.spec.role != "chat":
                 continue
             if status.state is ModelState.READY:
                 return key
@@ -398,7 +422,9 @@ class ModelManager:
                     f"{spec.label}: weights not found at {spec.path}."
                 )
 
-            if self._max_active <= 1:
+            # Only chat models compete for the single slot. An OCR backend is
+            # meant to run alongside one, not instead of it.
+            if self._max_active <= 1 and spec.role == "chat":
                 self._stop_others(key)
 
             warning = self._check_ram(spec)
@@ -471,6 +497,10 @@ class ModelManager:
     def _stop_others(self, keep: str) -> None:
         for key, status in self._statuses.items():
             if key == keep:
+                continue
+            # Remote models hold no RAM and OCR is deliberately outside the
+            # rotation, so neither is ever stopped to make room.
+            if status.spec.remote or status.spec.role != "chat":
                 continue
             if key in self._processes:
                 self.stop(key)
@@ -555,6 +585,10 @@ class ModelManager:
             "--host", "127.0.0.1",
             "--port", str(spec.port),
         ]
+        if spec.mmproj is not None:
+            # Without this the language half loads and reports no vision, which
+            # reads as a broken tool rather than a missing argument.
+            command += ["--mmproj", str(spec.mmproj)]
 
         try:
             process = self._spawn(command)

@@ -27,7 +27,9 @@ def _snapshot(runtime: Runtime) -> ModelsOut:
         (
             entry.spec.key
             for entry in entries
-            if entry.state is ModelState.READY and not entry.spec.remote
+            if entry.state is ModelState.READY
+            and not entry.spec.remote
+            and entry.spec.role == "chat"
         ),
         None,
     )
@@ -52,6 +54,7 @@ def _snapshot(runtime: Runtime) -> ModelsOut:
                 error=entry.error,
                 warning=entry.warning,
                 adopted=entry.adopted,
+                role=spec.role,
                 provider=spec.provider,
                 remote=spec.remote,
                 has_key=spec.has_key if spec.remote else True,

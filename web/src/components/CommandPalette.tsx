@@ -54,7 +54,7 @@ export function CommandPalette({
       run: () => onCommand(command.id),
     }))
 
-    for (const model of models) {
+    for (const model of models.filter((entry) => entry.role === 'chat')) {
       entries.push({
         key: `model:${model.key}`,
         group: 'Models',

@@ -76,6 +76,8 @@ export interface Model {
   warning: string
   /** True when the server was already running and we merely attached. */
   adopted: boolean
+  /** "chat" drives the agent loop; "ocr" is a vision backend, never a choice. */
+  role: string
   /** "local" for a llama-server here, otherwise the hosted provider's name. */
   provider: string
   remote: boolean

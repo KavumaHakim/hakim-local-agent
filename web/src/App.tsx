@@ -95,6 +95,7 @@ export default function App() {
         case 'models':
           setNote(
             models.models?.models
+              .filter((model) => model.role === 'chat')
               .map(
                 (model) =>
                   `${model.key} — ${model.label}${model.state === 'ready' ? ' (loaded)' : ''}${!model.available ? ' (file missing)' : ''}`,

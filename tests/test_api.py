@@ -29,7 +29,7 @@ def write_registry(tmp: Path) -> Path:
     """A two-model registry with a router, written into a temp directory."""
     exe = tmp / "llama-server.exe"
     exe.write_text("x", encoding="utf-8")
-    for name in ("fast.gguf", "big.gguf"):
+    for name in ("fast.gguf", "big.gguf", "ocr.gguf", "mmproj.gguf"):
         (tmp / name).write_bytes(b"gguf")
 
     registry = {
@@ -47,6 +47,8 @@ def write_registry(tmp: Path) -> Path:
             {"key": "cloud", "label": "Cloud 120B", "provider": "testcloud",
              "model": "cloud-120b", "api_key_env": "TEST_CLOUD_KEY",
              "base_url": "https://cloud.invalid/v1"},
+            {"key": "ocr", "label": "OCR", "role": "ocr", "file": "ocr.gguf",
+             "mmproj": "mmproj.gguf", "port": 8081, "min_free_mb": 0},
         ],
     }
     path = tmp / "models.json"
@@ -559,6 +561,28 @@ class ToolSwitchTests(ApiTestCase):
         after = self.switches()["terminal"]
         self.assertTrue(after["enabled"])
         self.assertEqual(after["risk"], before)
+
+    def test_the_ocr_switch_starts_and_stops_its_server(self):
+        """One toggle, because the tool is useless without the server and the
+        server is dead weight without the tool."""
+        from models.manager import ModelState
+
+        self.client.post("/api/tools/ocr", json={"enabled": True})
+        self.assertIs(self.manager.status("ocr").state, ModelState.READY)
+        self.assertIn("ocr_image", {t["name"] for t in self.client.get("/api/tools").json()["tools"]})
+
+        self.client.post("/api/tools/ocr", json={"enabled": False})
+        self.assertIs(self.manager.status("ocr").state, ModelState.STOPPED)
+
+    def test_ocr_reads_as_off_while_its_server_is_down(self):
+        """The flag alone would show a switch that is on while every use fails."""
+        self.client.post("/api/tools/ocr", json={"enabled": True})
+        self.assertTrue(self.switches()["ocr"]["enabled"])
+
+        # The server dies underneath us, as a llama-server can.
+        self.manager.healthy_ports.discard(8081)
+        self.manager._processes.pop("ocr", None)
+        self.assertFalse(self.switches()["ocr"]["enabled"])
 
     def test_an_unknown_switch_is_a_404(self):
         response = self.client.post("/api/tools/nonsense", json={"enabled": True})

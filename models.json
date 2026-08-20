@@ -8,6 +8,7 @@
     "deliberately far more conservative: at 4.8 GB it cannot stay resident on an",
     "8 GB machine and pages from disk, so it needs real headroom, not a formula.",
     "models_dir points at local-agent/weights. runner.bat reads its own path from ../config_model.txt, which was updated to match. Forward slashes are used deliberately: Windows accepts them and they cannot be mistaken for escape sequences.",
+    "OCR context sizing, measured from the GGUF metadata rather than guessed: GLM-OCR is 17 layers x 8 KV heads x 96 head-dim, which is 52224 bytes of KV cache PER TOKEN. So the context is the expensive part, not the weights - 4096 costs 204 MB, 8192 costs 408 MB, 16384 costs 816 MB, against roughly 480 MB of resident weights. 4096 was too tight: an image is worth thousands of tokens before the transcription starts, so a dense page could overflow and come back truncated rather than failing loudly. 8192 is the compromise on an 8 GB machine. If a page still overflows, either raise this to 16384 and accept ~816 MB, or add '--cache-type-k q8_0 --cache-type-v q8_0' to the launch command, which roughly halves the cache at some quality cost. The model itself was trained for 131072, so the ceiling here is RAM, not the model.",
     "Entries with a 'provider' other than 'local' are hosted APIs: no file, no port, no RAM threshold, nothing to load, and they do not join the one-at-a-time rotation because they use no RAM. 'model' is the provider's own id and is the thing most likely to go stale - confirm it against GET /v1/models for the key rather than trusting it. Keys are named here, never stored here: put the values in .env, which is git-ignored."
   ],
   "server_exe": "C:\\Users\\SHAMI\\HAKIM\\AI\\LLAMA CP\\llama-server.exe",
@@ -59,6 +60,18 @@
       "threads": 4,
       "min_free_mb": 6200,
       "description": "Harder reasoning and longer tasks. Slow on this machine."
+    },
+    {
+      "key": "ocr",
+      "label": "GLM-OCR",
+      "role": "ocr",
+      "file": "GLM-OCR-Q8_0.gguf",
+      "mmproj": "mmproj-GLM-OCR-Q8_0.gguf",
+      "port": 8081,
+      "context": 8192,
+      "threads": 4,
+      "min_free_mb": 1150,
+      "description": "Vision backend for the ocr_image tool, not a chat model - GLM-OCR cannot call tools at all. Runs alongside a chat model rather than instead of one, so it is outside the one-at-a-time rotation. Needs both its own file and the mmproj projector. Context is 8192 because an image is worth thousands of tokens before the transcription even starts."
     },
     {
       "key": "gemini",

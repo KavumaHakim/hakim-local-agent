@@ -53,6 +53,11 @@ interface Props {
 
 export function Sidebar(props: Props) {
   const { models, tools } = props
+  // OCR is a vision backend that runs alongside a chat model, so it is never
+  // something to pick here - it is a switch under Tools.
+  const chatModels = (models?.models ?? []).filter(
+    (model) => model.role === 'chat',
+  )
   const selected =
     models?.models.find((model) => model.key === props.selectedKey) ?? null
   const ready = selected?.state === 'ready'
@@ -89,11 +94,11 @@ export function Sidebar(props: Props) {
             onChange={(event) => props.onSelectModel(event.target.value)}
             className="w-full rounded-lg border border-line bg-sunken px-2.5 py-2 text-sm outline-none focus:border-accent/60"
           >
-            {models?.models.map((model) => (
+            {chatModels.map((model) => (
               <option key={model.key} value={model.key}>
                 {model.remote ? '☁ ' : ''}
                 {model.label}
-                {unusableReason(model, models.online)}
+                {unusableReason(model, models?.online ?? false)}
                 {model.state === 'ready' && !model.remote ? '  ●' : ''}
               </option>
             ))}
@@ -347,6 +352,17 @@ function ToolSwitchRow({
         </button>
         <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
           {entry.label}
+          {/* OCR is the one switch that also starts a process, so it says so:
+              flipping it is a ~10 s load and ~680 MB, not an instant flag. */}
+          {entry.id === 'ocr' && (
+            <span className="ml-1.5 text-[10px] text-faint">
+              {pending === 'ocr'
+                ? 'starting server…'
+                : entry.enabled
+                  ? 'server running'
+                  : 'starts a server'}
+            </span>
+          )}
         </span>
         {entry.from_env && (
           <span

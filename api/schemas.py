@@ -116,6 +116,9 @@ class ModelOut(BaseModel):
     error: str = ""
     warning: str = ""
     adopted: bool = False
+    # "chat" drives the agent loop; "ocr" is a vision backend that runs
+    # alongside one and never appears in the chat model picker.
+    role: str = "chat"
     # "local" for a llama-server on this machine, otherwise the hosted provider.
     provider: str = "local"
     remote: bool = False

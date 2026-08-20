@@ -145,6 +145,77 @@ class LifecycleTests(RegistryTests):
         self.assertEqual(self.manager.active_key(), "local")
 
 
+class OcrRoleTests(unittest.TestCase):
+    """The OCR backend is a llama-server outside the chat rotation."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        tmp = Path(self._tmp.name)
+
+        exe = tmp / "llama-server.exe"
+        exe.write_text("x", encoding="utf-8")
+        for name in ("chat.gguf", "ocr.gguf", "mmproj.gguf"):
+            (tmp / name).write_bytes(b"gguf")
+
+        registry = {
+            "server_exe": str(exe),
+            "models_dir": str(tmp),
+            "default": "chat",
+            "max_active": 1,
+            "idle_timeout_seconds": 0,
+            "models": [
+                {"key": "chat", "label": "Chat 2B", "file": "chat.gguf",
+                 "port": 8080, "min_free_mb": 0},
+                {"key": "other", "label": "Other 2B", "file": "chat.gguf",
+                 "port": 8082, "min_free_mb": 0},
+                {"key": "ocr", "label": "GLM-OCR", "role": "ocr",
+                 "file": "ocr.gguf", "mmproj": "mmproj.gguf",
+                 "port": 8081, "min_free_mb": 0},
+            ],
+        }
+        path = tmp / "models.json"
+        path.write_text(json.dumps(registry), encoding="utf-8")
+        self.tmp = tmp
+        self.manager = ManagerHarness(path)
+
+    def test_the_mmproj_is_passed_to_llama_server(self):
+        """Without it the language half loads and reports no vision."""
+        self.manager.ensure("ocr")
+        command = self.manager.spawned[-1]
+        self.assertIn("--mmproj", command)
+        self.assertTrue(command[command.index("--mmproj") + 1].endswith("mmproj.gguf"))
+
+    def test_a_missing_projector_makes_it_unavailable(self):
+        (self.tmp / "mmproj.gguf").unlink()
+        self.assertFalse(self.manager.get_spec("ocr").available)
+
+    def test_starting_ocr_does_not_evict_the_chat_model(self):
+        """It runs alongside one, not instead of it."""
+        self.manager.ensure("chat")
+        self.manager.ensure("ocr")
+        self.assertIs(self.manager.status("chat").state, ModelState.READY)
+        self.assertIs(self.manager.status("ocr").state, ModelState.READY)
+
+    def test_switching_chat_models_does_not_stop_ocr(self):
+        self.manager.ensure("ocr")
+        self.manager.ensure("chat")
+        self.manager.ensure("other")
+        self.assertIs(self.manager.status("chat").state, ModelState.STOPPED)
+        self.assertIs(self.manager.status("ocr").state, ModelState.READY)
+
+    def test_ocr_is_never_the_active_chat_model(self):
+        self.manager.ensure("ocr")
+        self.assertIsNone(self.manager.active_key())
+        self.manager.ensure("chat")
+        self.assertEqual(self.manager.active_key(), "chat")
+
+    def test_it_can_be_stopped_like_any_other_process(self):
+        self.manager.ensure("ocr")
+        self.assertTrue(self.manager.stop("ocr"))
+        self.assertIs(self.manager.status("ocr").state, ModelState.STOPPED)
+
+
 class ConnectivityTests(unittest.TestCase):
     class Probing(Connectivity):
         def __init__(self, result=True, **kwargs):
