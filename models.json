@@ -62,9 +62,9 @@
     },
     {
       "key": "gemini",
-      "label": "Gemini",
+      "label": "Gemini 3.5 Flash",
       "provider": "gemini",
-      "model": "gemini-2.5-flash",
+      "model": "gemini-3.5-flash",
       "api_key_env": "GEMINI_API_KEY",
       "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
       "context": 1048576,

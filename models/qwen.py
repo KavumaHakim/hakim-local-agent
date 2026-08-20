@@ -311,6 +311,21 @@ def _merge_tool_call(store: dict[int, dict[str, Any]], fragment: dict[str, Any])
     llama.cpp may send a tool call whole, or split its `arguments` string
     across several chunks. Fragments are keyed by `index`, and argument text is
     concatenated in arrival order.
+
+    **Fields this function does not recognise are carried through untouched.**
+    Rebuilding a tool call from only the parts we know about silently discards
+    whatever else the provider attached, and at least one provider requires
+    getting it back: Gemini 3 puts a `thought_signature` in
+    `extra_content.google` on the call, and replaying the assistant message
+    without it is rejected with
+
+        400 ... Function call is missing a thought_signature in functionCall
+        parts. This is required for tools to work correctly
+
+    which only ever appears on the *second* round, once tool results are sent
+    back - so it looks like a tool bug rather than a lossy merge. The
+    non-streaming path never had this problem because it returns the
+    provider's message as it arrived.
     """
     index = fragment.get("index", 0)
     if not isinstance(index, int):
@@ -325,6 +340,14 @@ def _merge_tool_call(store: dict[int, dict[str, Any]], fragment: dict[str, Any])
         entry["id"] = fragment["id"]
     if fragment.get("type"):
         entry["type"] = fragment["type"]
+
+    # Anything else the provider sent, preserved as-is. `index` is the
+    # accumulator's own key and is not part of a finished tool call.
+    for name, value in fragment.items():
+        if name in ("index", "id", "type", "function"):
+            continue
+        if value is not None:
+            entry[name] = value
 
     function = fragment.get("function")
     if isinstance(function, dict):

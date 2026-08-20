@@ -193,6 +193,50 @@ class ToolCallAssemblyTests(unittest.TestCase):
         self.assertEqual(client.chat_stream([])["content"], "ok")
 
 
+class ProviderFieldPreservationTests(unittest.TestCase):
+    """Fields we do not recognise must survive the merge.
+
+    Gemini 3 attaches a thought_signature to each tool call and rejects the
+    next round if it does not come back. Rebuilding a tool call from only the
+    known fields dropped it, and the failure surfaced one round later as
+    "Function call is missing a thought_signature" - which reads like a tool
+    bug, not a lossy merge.
+    """
+
+    def test_unknown_fields_are_carried_through(self):
+        store: dict[int, dict] = {}
+        signature = {"google": {"thought_signature": "EswCCskCARFNMg9"}}
+        _merge_tool_call(
+            store,
+            {
+                "index": 0,
+                "id": "call_1",
+                "type": "function",
+                "extra_content": signature,
+                "function": {"name": "calculate", "arguments": '{"expression":"1+1"}'},
+            },
+        )
+        self.assertEqual(store[0]["extra_content"], signature)
+        self.assertEqual(store[0]["function"]["name"], "calculate")
+
+    def test_index_is_not_carried_into_the_finished_call(self):
+        """It keys the accumulator; it is not part of a tool call."""
+        store: dict[int, dict] = {}
+        _merge_tool_call(store, {"index": 2, "id": "c", "function": {"name": "n"}})
+        self.assertNotIn("index", store[2])
+
+    def test_a_later_fragment_does_not_erase_an_earlier_extra(self):
+        store: dict[int, dict] = {}
+        _merge_tool_call(
+            store, {"index": 0, "extra_content": {"google": {"thought_signature": "s"}}}
+        )
+        _merge_tool_call(
+            store, {"index": 0, "function": {"arguments": '{"a":1}'}}
+        )
+        self.assertIn("extra_content", store[0])
+        self.assertEqual(store[0]["function"]["arguments"], '{"a":1}')
+
+
 class AgentStreamingTests(unittest.TestCase):
     def test_agent_uses_chat_stream_when_given_a_callback(self):
         from agent.loop import Agent

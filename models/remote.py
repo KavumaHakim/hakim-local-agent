@@ -36,7 +36,6 @@ from models.qwen import (
     Message,
     QwenConnectionError,
     QwenError,
-    QwenHTTPError,
     QwenResponseError,
     QwenTimeoutError,
     TokenCallback,
@@ -59,6 +58,30 @@ class MissingKeyError(RemoteError):
 
 class RemoteResponseError(RemoteError):
     """The provider returned something unreadable."""
+
+
+class RemoteHTTPError(RemoteError):
+    """A hosted provider returned a non-2xx status.
+
+    Its own class rather than QwenHTTPError, whose message is hardcoded to
+    "llama.cpp server returned HTTP ...". A Cerebras 402 reported as a
+    llama.cpp failure sends you to look at a local process that is working
+    fine - and a wrong hint costs more than no hint.
+    """
+
+    def __init__(self, label: str, status_code: int, body: str) -> None:
+        hint = ""
+        if status_code in (401, 403):
+            hint = " The API key was rejected."
+        elif status_code == 402:
+            hint = " The account has no credit or quota for this model."
+        elif status_code == 404:
+            hint = " Check the model id in models.json against list_models()."
+        elif status_code == 429:
+            hint = " Rate limited; try again shortly or use a local model."
+        super().__init__(f"{label} returned HTTP {status_code}.{hint} {body[:300]}")
+        self.status_code = status_code
+        self.body = body
 
 
 class RemoteClient:
@@ -127,9 +150,8 @@ class RemoteClient:
             f"{self.base_url}/models", headers=self._headers(), timeout=(5, 20)
         )
         if response.status_code != 200:
-            raise RemoteError(
-                f"{self._spec.label}: listing models returned HTTP "
-                f"{response.status_code}."
+            raise RemoteHTTPError(
+                self._spec.label, response.status_code, self._scrub(response.text)
             )
         try:
             payload = response.json()
@@ -239,7 +261,9 @@ class RemoteClient:
             ) from None
 
         if response.status_code != 200:
-            raise QwenHTTPError(response.status_code, self._scrub(response.text))
+            raise RemoteHTTPError(
+                self._spec.label, response.status_code, self._scrub(response.text)
+            )
         try:
             return response.json()
         except ValueError as exc:
@@ -263,7 +287,9 @@ class RemoteClient:
 
         with response:
             if response.status_code != 200:
-                raise QwenHTTPError(response.status_code, self._scrub(response.text))
+                raise RemoteHTTPError(
+                    self._spec.label, response.status_code, self._scrub(response.text)
+                )
 
             for raw in response.iter_lines(decode_unicode=True):
                 if not raw or not raw.startswith("data:"):

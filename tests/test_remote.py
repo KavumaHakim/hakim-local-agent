@@ -15,7 +15,7 @@ from pathlib import Path
 
 from models.connectivity import Connectivity
 from models.manager import ModelManagerError, ModelState
-from models.remote import MissingKeyError, RemoteClient
+from models.remote import MissingKeyError, RemoteClient, RemoteHTTPError
 from tests.test_manager import ManagerHarness
 
 KEY_VAR = "TEST_REMOTE_KEY"
@@ -229,6 +229,28 @@ class ClientTests(unittest.TestCase):
         scrubbed = client._scrub('{"error": "bad key super-secret-value"}')
         self.assertNotIn("super-secret-value", scrubbed)
         self.assertIn("***", scrubbed)
+
+    def test_provider_errors_name_the_provider_not_llama_cpp(self):
+        """A Cerebras 402 once read 'llama.cpp server returned HTTP 402',
+        which sends you to inspect a local process that is working fine."""
+        error = RemoteHTTPError("Cloud 120B", 402, '{"message": "billing"}')
+        self.assertIn("Cloud 120B", str(error))
+        self.assertNotIn("llama.cpp", str(error))
+        self.assertIn("credit or quota", str(error))
+
+    def test_each_status_gets_the_hint_that_matches_it(self):
+        cases = {
+            401: "key was rejected",
+            402: "credit or quota",
+            404: "model id",
+            429: "Rate limited",
+        }
+        for status, expected in cases.items():
+            with self.subTest(status=status):
+                self.assertIn(expected, str(RemoteHTTPError("X", status, "")))
+
+    def test_an_unmapped_status_still_reports_the_number(self):
+        self.assertIn("503", str(RemoteHTTPError("X", 503, "")))
 
     def test_the_authorization_header_is_built_from_the_environment(self):
         os.environ[KEY_VAR] = "secret"
