@@ -1,15 +1,27 @@
 /**
- * The message box, with inline slash-command completion.
+ * The message box.
  *
- * Streamlit could not do this: `st.chat_input` takes no children, so the old
- * build injected a dropdown through a same-origin iframe reaching into the
- * page's DOM. Here it is just a component.
+ * The redesign moves the model picker, the tool count and the thinking toggle
+ * *into* the composer, as a control row under the textarea. They belong to the
+ * turn you are about to send, not to a settings panel — and putting them here
+ * is what let the sidebar collapse to one subject at a time.
+ *
+ * Attachments sit inside the box, above the text, so an image and the question
+ * about it read as one message.
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { matchCommands, type CommandSpec } from '../lib/commands'
-import { CommandIcon, ImageIcon, PaperclipIcon, SendIcon } from './Icons'
-import type { UploadResult } from '../lib/types'
+import type { Model, UploadResult } from '../lib/types'
+import {
+  ChevronIcon,
+  CloudIcon,
+  ImageIcon,
+  PaperclipIcon,
+  SendIcon,
+  SparkIcon,
+  ToolIcon,
+} from './Icons'
 
 interface Props {
   value: string
@@ -17,11 +29,19 @@ interface Props {
   onSubmit: (value: string) => void
   disabled: boolean
   placeholder: string
+
   attachments: UploadResult[]
   onAttach: (files: FileList | File[]) => void
   onRemoveAttachment: (path: string) => void
   uploading: boolean
   uploadError: string | null
+
+  model: Model | null
+  onOpenModels: () => void
+  toolCount: number
+  onOpenTools: () => void
+  thinking: boolean
+  onToggleThinking: () => void
 }
 
 export function Composer({
@@ -35,6 +55,12 @@ export function Composer({
   onRemoveAttachment,
   uploading,
   uploadError,
+  model,
+  onOpenModels,
+  toolCount,
+  onOpenTools,
+  thinking,
+  onToggleThinking,
 }: Props) {
   const box = useRef<HTMLTextAreaElement>(null)
   const picker = useRef<HTMLInputElement>(null)
@@ -43,13 +69,13 @@ export function Composer({
 
   const suggestions = matchCommands(value)
   const showing = suggestions.length > 0 && !value.includes('\n')
+  const sendable = Boolean(value.trim()) || attachments.length > 0
 
-  // Grow with the text, up to a limit, then scroll inside.
   useLayoutEffect(() => {
     const element = box.current
     if (!element) return
     element.style.height = 'auto'
-    element.style.height = `${Math.min(element.scrollHeight, 240)}px`
+    element.style.height = `${Math.min(element.scrollHeight, 180)}px`
   }, [value])
 
   useEffect(() => setHighlighted(0), [value])
@@ -60,12 +86,8 @@ export function Composer({
   }
 
   function submit() {
-    if (disabled || uploading) return
-    const text = value.trim()
-    // An attachment on its own is a turn: dropping an image and pressing send
-    // is a reasonable way to ask "what does this say".
-    if (!text && attachments.length === 0) return
-    onSubmit(text)
+    if (disabled || uploading || !sendable) return
+    onSubmit(value.trim())
   }
 
   function onKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -98,76 +120,30 @@ export function Composer({
   return (
     <div className="relative">
       {showing && (
-        <div className="absolute bottom-full left-0 z-20 mb-2 w-full overflow-hidden rounded-xl border border-line bg-raised shadow-xl">
+        <div className="absolute bottom-full left-0 z-20 mb-2 w-full overflow-hidden rounded-lg bg-surface shadow-[var(--shadow-lg)]">
           {suggestions.map((command, index) => (
             <button
               key={command.id}
               type="button"
               onMouseEnter={() => setHighlighted(index)}
               onClick={() => accept(command)}
-              className={`flex w-full items-baseline gap-3 px-3 py-2 text-left text-sm transition ${
-                index === highlighted ? 'bg-accent-dim text-fg' : 'text-muted'
+              className={`flex w-full items-baseline gap-2.5 px-[9px] py-[7px] text-left transition ${
+                index === highlighted ? 'bg-accent-tint' : ''
               }`}
             >
-              <span className="font-mono text-accent">{command.slash}</span>
+              <span className="font-mono text-[13px] text-accent">
+                {command.slash}
+              </span>
               {command.argument && (
-                <span className="font-mono text-xs text-faint">
+                <span className="font-mono text-[11px] text-faint">
                   {command.argument}
                 </span>
               )}
-              <span className="ml-auto truncate text-xs text-faint">
+              <span className="ml-auto truncate text-[12.5px] text-muted">
                 {command.title}
               </span>
             </button>
           ))}
-        </div>
-      )}
-
-      {(attachments.length > 0 || uploading || uploadError) && (
-        <div className="mb-2 space-y-1.5">
-          {attachments.map((file) => (
-            <div
-              key={file.path}
-              className="flex items-center gap-2 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs"
-            >
-              <ImageIcon className="size-3.5 shrink-0 text-accent" />
-              <span className="min-w-0 flex-1 truncate">{file.name}</span>
-              <span className="shrink-0 text-faint">
-                {Math.max(1, Math.round(file.size / 1024)).toLocaleString()} KB
-              </span>
-              {/* The upload succeeded; whether anything can read it is a
-                  separate question, and one worth answering before send. */}
-              {!file.ocr_ready && (
-                <span
-                  title={file.hint}
-                  className="shrink-0 rounded border border-warn/40 px-1 text-[10px] text-warn"
-                >
-                  OCR not ready
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={() => onRemoveAttachment(file.path)}
-                title="Remove"
-                className="shrink-0 text-faint transition hover:text-danger"
-              >
-                ✕
-              </button>
-            </div>
-          ))}
-
-          {attachments.some((file) => !file.ocr_ready) && (
-            <p className="px-1 text-[11px] leading-relaxed text-warn">
-              {attachments.find((file) => !file.ocr_ready)?.hint}
-            </p>
-          )}
-
-          {uploading && (
-            <p className="px-1 text-[11px] text-faint">Uploading…</p>
-          )}
-          {uploadError && (
-            <p className="px-1 text-[11px] text-danger">{uploadError}</p>
-          )}
         </div>
       )}
 
@@ -182,63 +158,162 @@ export function Composer({
           setDragging(false)
           if (event.dataTransfer.files.length) onAttach(event.dataTransfer.files)
         }}
-        className={`flex items-end gap-2 rounded-2xl border bg-surface p-2 transition ${
+        className={`flex flex-col rounded-lg border bg-surface transition ${
           dragging
-            ? 'border-accent bg-accent-dim/30'
-            : 'border-line focus-within:border-accent/60'
+            ? 'border-accent bg-accent-tint/30'
+            : 'border-line focus-within:border-accent-line'
         }`}
       >
-        <input
-          ref={picker}
-          type="file"
-          accept="image/*"
-          multiple
-          hidden
-          onChange={(event) => {
-            if (event.target.files?.length) onAttach(event.target.files)
-            // Cleared so choosing the same file twice still fires a change.
-            event.target.value = ''
-          }}
-        />
-        <button
-          type="button"
-          onClick={() => picker.current?.click()}
-          disabled={disabled || uploading}
-          title="Attach an image to read with OCR"
-          className="flex size-9 shrink-0 items-center justify-center rounded-xl border border-line text-faint transition hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
-        >
-          <PaperclipIcon className="size-4" />
-        </button>
+        {attachments.map((file) => (
+          <div
+            key={file.path}
+            className="mx-2 mt-2 flex items-center gap-2 rounded-md bg-tint px-[9px] py-[5px] text-xs"
+          >
+            <ImageIcon className="size-[13px] shrink-0 text-accent" />
+            <span className="min-w-0 flex-1 truncate">{file.name}</span>
+            <span className="shrink-0 text-faint">
+              {Math.max(1, Math.round(file.size / 1024)).toLocaleString()} KB
+            </span>
+            {!file.ocr_ready && (
+              <span
+                title={file.hint}
+                className="shrink-0 rounded-sm border border-warn px-[5px] text-[10px] text-warn"
+              >
+                OCR off
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => onRemoveAttachment(file.path)}
+              title="Remove"
+              className="shrink-0 text-faint transition hover:text-danger"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+
+        {(uploading || uploadError) && (
+          <p
+            className={`mx-2 mt-2 text-[11px] ${uploadError ? 'text-danger' : 'text-faint'}`}
+          >
+            {uploadError ?? 'Uploading…'}
+          </p>
+        )}
+
         <textarea
           ref={box}
-          rows={1}
+          rows={2}
           value={value}
           disabled={disabled}
           placeholder={placeholder}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={onKeyDown}
-          className="max-h-60 min-h-[2.25rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-[15px] leading-relaxed outline-none placeholder:text-faint disabled:opacity-50"
+          className="mx-1 mt-1 max-h-[180px] min-h-[52px] resize-none bg-transparent px-3 py-2.5 text-[15px] leading-[1.55] outline-none placeholder:text-faint disabled:opacity-50"
         />
-        <button
-          type="button"
-          onClick={submit}
-          disabled={disabled || uploading || (!value.trim() && attachments.length === 0)}
-          title="Send  (Enter)"
-          className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-accent text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-30"
-        >
-          <SendIcon className="size-4" />
-        </button>
+
+        <div className="flex items-center gap-1.5 px-2 pt-1.5 pb-2">
+          <Pill onClick={onOpenModels} title="Choose the model">
+            <span
+              className={`size-[5px] shrink-0 rounded-full ${
+                model?.state === 'ready' || model?.remote
+                  ? 'bg-ok'
+                  : 'bg-neutral-600'
+              }`}
+              style={
+                model?.state === 'ready' || model?.remote
+                  ? undefined
+                  : { background: 'var(--neutral-600)' }
+              }
+            />
+            {model?.remote && <CloudIcon className="size-3 text-warn" />}
+            <span className="max-w-[120px] truncate">
+              {model?.label ?? 'No model'}
+            </span>
+            <ChevronIcon className="size-3 rotate-90 opacity-40" />
+          </Pill>
+
+          <Pill onClick={onOpenTools} title="Tools offered to the model">
+            <ToolIcon className="size-[13px] opacity-60" />
+            {toolCount} tools
+            <ChevronIcon className="size-3 rotate-90 opacity-40" />
+          </Pill>
+
+          <Pill
+            onClick={onToggleThinking}
+            title="Reason before answering. Slower."
+            active={thinking}
+          >
+            <SparkIcon className="size-[13px]" />
+            Thinking
+          </Pill>
+
+          <input
+            ref={picker}
+            type="file"
+            accept="image/*"
+            multiple
+            hidden
+            onChange={(event) => {
+              if (event.target.files?.length) onAttach(event.target.files)
+              event.target.value = ''
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => picker.current?.click()}
+            disabled={disabled || uploading}
+            title="Attach an image to read with OCR"
+            className="grid size-7 shrink-0 place-items-center rounded-md border border-line text-fg opacity-65 transition hover:border-accent-line hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            <PaperclipIcon className="size-3.5" />
+          </button>
+
+          {/* Outlined, not filled: the system uses the accent as a line, and
+              a solid accent button would be the flood it avoids. */}
+          <button
+            type="button"
+            onClick={submit}
+            disabled={disabled || uploading || !sendable}
+            title="Send  (Enter)"
+            className="ml-auto grid size-8 shrink-0 place-items-center rounded-[9px] border border-accent text-accent transition hover:bg-accent-tint disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            <SendIcon className="size-[15px]" />
+          </button>
+        </div>
       </div>
 
-      <div className="mt-1.5 flex items-center justify-between px-1 text-[11px] text-faint">
-        <span>
-          <span className="font-mono">/</span> for commands · Enter to send ·
-          drop an image to read it
-        </span>
-        <span className="hidden items-center gap-1 sm:flex">
-          <CommandIcon className="size-3" />K
-        </span>
-      </div>
+      <p className="mt-[7px] px-0.5 text-[11px] text-faint">
+        Enter to send · Shift+Enter for a newline · drop an image to read it
+        {model && !model.remote && ' · this turn stays on your machine'}
+      </p>
     </div>
+  )
+}
+
+function Pill({
+  onClick,
+  title,
+  active = false,
+  children,
+}: {
+  onClick: () => void
+  title: string
+  active?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={`flex h-7 shrink-0 items-center gap-1.5 rounded-md border px-[9px] text-xs transition ${
+        active
+          ? 'border-accent-line bg-accent-tint text-accent-soft'
+          : 'border-line text-fg hover:border-accent-line'
+      }`}
+    >
+      {children}
+    </button>
   )
 }

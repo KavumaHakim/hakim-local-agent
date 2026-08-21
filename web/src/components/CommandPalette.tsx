@@ -179,7 +179,7 @@ export function CommandPalette({
                   onMouseEnter={() => setIndex(position)}
                   onClick={() => choose(action)}
                   className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition ${
-                    position === index ? 'bg-accent-dim text-fg' : 'text-muted'
+                    position === index ? 'bg-accent-tint text-fg' : 'text-muted'
                   }`}
                 >
                   {action.group === 'Models' ? (

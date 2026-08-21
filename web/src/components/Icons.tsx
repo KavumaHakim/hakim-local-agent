@@ -117,6 +117,44 @@ export const BrainIcon = svg(
   </>,
 )
 
+export const ClockIcon = svg(
+  <>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M12 7.5V12l3 1.8" />
+  </>,
+)
+
+export const MoonIcon = svg(
+  <path d="M20.5 14.2A8.8 8.8 0 019.8 3.5a8.8 8.8 0 1010.7 10.7z" />,
+)
+
+export const SunIcon = svg(
+  <>
+    <circle cx="12" cy="12" r="4.2" />
+    <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.5 1.5M16.9 16.9l1.5 1.5M18.4 5.6l-1.5 1.5M7.1 16.9l-1.5 1.5" />
+  </>,
+)
+
+export const SettingsIcon = svg(
+  <>
+    <circle cx="12" cy="12" r="3" />
+    <path d="M12 4v2M12 18v2M4 12h2M18 12h2M6.3 6.3l1.4 1.4M16.3 16.3l1.4 1.4M17.7 6.3l-1.4 1.4M7.7 16.3l-1.4 1.4" />
+  </>,
+)
+
+export const RetryIcon = svg(<path d="M19 12a7 7 0 11-2.6-5.4M19 4v4h-4" />)
+
+export const SearchIcon = svg(
+  <>
+    <circle cx="11" cy="11" r="6.5" />
+    <path d="M16 16l4 4" />
+  </>,
+)
+
+export const CollapseIcon = svg(<path d="M14 7l-5 5 5 5" />)
+
+export const ExpandIcon = svg(<path d="M10 7l5 5-5 5" />)
+
 export const FolderIcon = svg(
   <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />,
 )

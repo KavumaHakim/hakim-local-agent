@@ -72,7 +72,7 @@ export function RemoteConsent({
             <button
               type="button"
               onClick={onApprove}
-              className="w-full rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:opacity-90"
+              className="w-full rounded-md border border-accent px-3 py-2 text-sm text-accent transition hover:bg-accent-tint"
             >
               Send to {request.label}
             </button>

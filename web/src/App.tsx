@@ -1,24 +1,33 @@
 /**
  * The application shell.
  *
- * Holds the settings the composer sends with each turn (model, thinking,
- * auto-routing) and routes the slash commands to the REST endpoints. The
- * server has no notion of a command or a session; this is where both live.
+ * Layout is the rail, one contextual pane, and the conversation. The rail
+ * chooses what the pane shows; clicking the active rail button collapses it.
+ * Everything that belongs to the *next turn* — model, tools, thinking — lives
+ * in the composer instead, because that is the thing it acts on.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CommandPalette } from './components/CommandPalette'
 import { Composer } from './components/Composer'
 import { EmptyState, MessageView } from './components/Messages'
-import { Sidebar } from './components/Sidebar'
-import { TurnStatus } from './components/TurnStatus'
-import { CloudIcon, SidebarIcon } from './components/Icons'
+import { Pane } from './components/Pane'
+import { Rail, type PaneId } from './components/Rail'
 import { RemoteConsent } from './components/RemoteConsent'
+import { TurnStatus } from './components/TurnStatus'
+import { CommandIcon, ExpandIcon } from './components/Icons'
 import { useChat } from './hooks/useChat'
-import { useConversations, useHotkey, useModels, useTools } from './hooks/useResources'
+import {
+  useConversations,
+  useHotkey,
+  useModels,
+  useTools,
+} from './hooks/useResources'
 import { COMMANDS, parseCommand, type CommandId } from './lib/commands'
 import { api } from './lib/api'
 import type { UploadResult } from './lib/types'
+
+type Theme = 'dark' | 'light'
 
 export default function App() {
   const [draft, setDraft] = useState('')
@@ -26,11 +35,17 @@ export default function App() {
   const [autoRoute, setAutoRoute] = useState(false)
   const [thinking, setThinking] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
-  const [sidebarOpen, setSidebarOpen] = useState(true)
   const [note, setNote] = useState<string | null>(null)
   const [attachments, setAttachments] = useState<UploadResult[]>([])
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
+
+  const [pane, setPane] = useState<PaneId>('history')
+  const [paneOpen, setPaneOpen] = useState(true)
+  const [theme, setTheme] = useState<Theme>(
+    () =>
+      (document.documentElement.dataset.theme as Theme | undefined) ?? 'dark',
+  )
 
   const models = useModels()
   const tools = useTools()
@@ -40,16 +55,18 @@ export default function App() {
     modelKey,
     enableThinking: thinking,
     autoRoute,
-    // A new conversation has to appear in the sidebar without a manual reload.
     onConversationChanged: () => void conversations.refresh(),
   })
 
-  // Default to whatever the server considers active, or its default.
   useEffect(() => {
     if (modelKey === null && models.models) {
       setModelKey(models.models.active_key ?? models.models.default_key)
     }
   }, [models.models, modelKey])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+  }, [theme])
 
   useHotkey('k', () => setPaletteOpen((open) => !open), { meta: true })
 
@@ -62,6 +79,18 @@ export default function App() {
     void chat.openConversation(null)
     setNote(null)
   }, [chat])
+
+  /** Rail click: open that pane, or collapse it if it is already showing. */
+  const selectPane = useCallback(
+    (next: PaneId) => {
+      if (paneOpen && pane === next) setPaneOpen(false)
+      else {
+        setPane(next)
+        setPaneOpen(true)
+      }
+    },
+    [pane, paneOpen],
+  )
 
   const runCommand = useCallback(
     (id: CommandId, argument = '') => {
@@ -87,28 +116,15 @@ export default function App() {
           })
           break
         case 'thinking':
-          setThinking((value) => {
-            setNote(`Extended thinking ${!value ? 'on' : 'off'}.`)
-            return !value
-          })
+          setThinking((value) => !value)
           break
         case 'models':
-          setNote(
-            models.models?.models
-              .filter((model) => model.role === 'chat')
-              .map(
-                (model) =>
-                  `${model.key} — ${model.label}${model.state === 'ready' ? ' (loaded)' : ''}${!model.available ? ' (file missing)' : ''}`,
-              )
-              .join('\n') ?? 'No models.',
-          )
+          setPane('settings')
+          setPaneOpen(true)
           break
         case 'tools':
-          setNote(
-            tools.data
-              ? `Enabled: ${tools.data.tools.map((tool) => tool.name).join(', ')}\nOff: ${tools.data.disabled.map((item) => item.category).join(', ')}`
-              : 'Tools not loaded yet.',
-          )
+          setPane('tools')
+          setPaneOpen(true)
           break
         case 'help':
           setNote(
@@ -120,7 +136,7 @@ export default function App() {
           break
       }
     },
-    [models, modelKey, tools, newConversation],
+    [models, modelKey, newConversation],
   )
 
   const submit = useCallback(
@@ -140,7 +156,6 @@ export default function App() {
     [chat, runCommand, attachments],
   )
 
-  /** Upload each chosen file and keep the ones that land. */
   const attach = useCallback(async (files: FileList | File[]) => {
     setUploading(true)
     setUploadError(null)
@@ -156,21 +171,43 @@ export default function App() {
     }
   }, [])
 
+  /** Re-ask the last question, which is the one before the last answer. */
+  const retryLast = useCallback(() => {
+    const lastUser = [...chat.messages]
+      .reverse()
+      .find((message) => message.role === 'user')
+    if (lastUser) void chat.send(lastUser.content)
+  }, [chat])
+
   const selectedModel =
     models.models?.models.find((model) => model.key === modelKey) ?? null
   const empty = chat.messages.length === 0 && chat.turn.phase === 'idle'
+  const title =
+    conversations.conversations.find(
+      (conversation) => conversation.id === chat.conversationId,
+    )?.title ?? 'New conversation'
+  const lastIndex = chat.messages.length - 1
 
   return (
     <div className="flex h-full">
-      {sidebarOpen && (
-        <Sidebar
-          models={models.models}
-          modelsBusyKey={models.busyKey}
-          modelsError={models.error}
-          selectedKey={modelKey}
-          onSelectModel={setModelKey}
-          onLoadModel={(key) => void models.load(key)}
-          onUnloadModel={(key) => void models.unload(key)}
+      <Rail
+        active={pane}
+        open={paneOpen}
+        onSelect={selectPane}
+        onNewConversation={newConversation}
+        theme={theme}
+        onToggleTheme={() =>
+          setTheme((current) => (current === 'dark' ? 'light' : 'dark'))
+        }
+        toolsWarning={Boolean(
+          tools.data?.switches.some((entry) => entry.enabled && entry.risk),
+        )}
+      />
+
+      {paneOpen && (
+        <Pane
+          pane={pane}
+          onClose={() => setPaneOpen(false)}
           conversations={conversations.conversations}
           activeConversationId={chat.conversationId}
           onOpenConversation={(id) => void chat.openConversation(id)}
@@ -178,7 +215,7 @@ export default function App() {
             await conversations.remove(id)
             if (id === chat.conversationId) newConversation()
           }}
-          onNewConversation={newConversation}
+          models={models.models}
           tools={tools.data}
           toolPending={tools.pending}
           toolError={tools.error}
@@ -191,40 +228,55 @@ export default function App() {
       )}
 
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-3 border-b border-line px-4 py-2.5">
-          <button
-            type="button"
-            onClick={() => setSidebarOpen((open) => !open)}
-            title="Toggle sidebar"
-            className="rounded-lg p-1.5 text-faint transition hover:text-fg"
-          >
-            <SidebarIcon className="size-4" />
-          </button>
-          <p className="flex min-w-0 items-center gap-1.5 truncate text-xs text-faint">
-            {selectedModel?.remote && (
-              <CloudIcon className="size-3 shrink-0 text-warn" />
-            )}
-            {selectedModel?.label ?? 'No model'}
-            {selectedModel?.remote && ` · ${selectedModel.provider}`}
-            {autoRoute && ' · auto-routing'}
-            {thinking && ' · thinking'}
-          </p>
+        <header className="flex h-12 shrink-0 items-center gap-2.5 border-b border-line px-4">
+          {!paneOpen && (
+            <button
+              type="button"
+              onClick={() => setPaneOpen(true)}
+              title="Open panel"
+              className="grid size-7 shrink-0 place-items-center rounded-md text-fg opacity-60 transition hover:bg-tint hover:opacity-100"
+            >
+              <ExpandIcon className="size-4" />
+            </button>
+          )}
+
+          <h1 className="truncate text-[13px]">{title}</h1>
+
+          {chat.busy && (
+            <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-accent-tint px-2 py-0.5 text-[11px] text-accent-soft">
+              <span className="size-[5px] animate-breathe rounded-full bg-accent" />
+              {chat.turn.phase === 'queued'
+                ? 'queued'
+                : chat.turn.phase === 'loading'
+                  ? 'loading'
+                  : 'streaming'}
+            </span>
+          )}
+
           <button
             type="button"
             onClick={() => setPaletteOpen(true)}
-            className="ml-auto rounded-lg border border-line px-2 py-1 text-[11px] text-faint transition hover:text-fg"
+            className="ml-auto flex h-[26px] shrink-0 items-center gap-1 rounded-md border border-line px-2 text-[11px] text-fg opacity-60 transition hover:border-accent-line hover:opacity-100"
           >
-            ⌘K
+            <CommandIcon className="size-3" />K
           </button>
         </header>
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           {empty ? (
             <EmptyState onPick={(text) => setDraft(text)} />
           ) : (
-            <div className="mx-auto max-w-3xl space-y-6 px-4 py-6">
-              {chat.messages.map((message) => (
-                <MessageView key={message.id} message={message} />
+            <div className="mx-auto flex max-w-[760px] flex-col gap-[26px] px-6 pt-7 pb-2">
+              {chat.messages.map((message, index) => (
+                <MessageView
+                  key={message.id}
+                  message={message}
+                  onRetry={
+                    index === lastIndex && message.role === 'assistant'
+                      ? retryLast
+                      : undefined
+                  }
+                />
               ))}
               <TurnStatus
                 turn={chat.turn}
@@ -246,10 +298,10 @@ export default function App() {
           )}
         </div>
 
-        <div className="border-t border-line px-4 py-3">
-          <div className="mx-auto max-w-3xl">
+        <div className="px-6 pb-4">
+          <div className="mx-auto max-w-[760px]">
             {note && (
-              <div className="mb-2 flex items-start gap-2 rounded-xl border border-line bg-surface px-3 py-2">
+              <div className="mb-2 flex items-start gap-2 rounded-md border border-line bg-surface px-3 py-2">
                 <pre className="min-w-0 flex-1 overflow-x-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap text-muted">
                   {note}
                 </pre>
@@ -267,6 +319,9 @@ export default function App() {
               onChange={setDraft}
               onSubmit={submit}
               disabled={chat.busy}
+              placeholder={
+                chat.busy ? 'Waiting for the current turn…' : 'Message Hakim…'
+              }
               attachments={attachments}
               onAttach={attach}
               onRemoveAttachment={(path) =>
@@ -276,9 +331,12 @@ export default function App() {
               }
               uploading={uploading}
               uploadError={uploadError}
-              placeholder={
-                chat.busy ? 'Waiting for the current turn…' : 'Message Hakim…'
-              }
+              model={selectedModel}
+              onOpenModels={() => setPaletteOpen(true)}
+              toolCount={tools.data?.tools.length ?? 0}
+              onOpenTools={() => selectPane('tools')}
+              thinking={thinking}
+              onToggleThinking={() => setThinking((value) => !value)}
             />
           </div>
         </div>

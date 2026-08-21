@@ -9,6 +9,7 @@ import {
   BrainIcon,
   CheckIcon,
   ChevronIcon,
+  RetryIcon,
   SparkIcon,
   ToolIcon,
 } from './Icons'
@@ -130,7 +131,7 @@ export function ReasoningPanel({
           {text}
         </p>
         {!live && (
-          <p className="mt-2 border-t border-line-soft pt-2 text-[11px] text-faint">
+          <p className="mt-2 border-t border-line pt-2 text-[11px] text-faint">
             Not saved — the model is never shown its own thinking again, and
             this disappears when the page reloads.
           </p>
@@ -140,18 +141,25 @@ export function ReasoningPanel({
   )
 }
 
-export function MessageView({ message }: { message: Message }) {
+export function MessageView({
+  message,
+  onRetry,
+}: {
+  message: Message
+  /** Only on the last assistant message: re-ask the preceding question. */
+  onRetry?: () => void
+}) {
   if (message.role === 'user') {
     return (
       <div className="group flex animate-rise justify-end gap-1">
-        {/* Kept out of the bubble: white-on-accent would need its own colours,
-            and a control that only appears on hover should not reflow the
-            bubble when it does. */}
         <div className="self-end opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
           <CopyButton text={message.content} label="" />
         </div>
-        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-accent px-4 py-2.5 text-white shadow-sm">
-          <p className="whitespace-pre-wrap break-words leading-relaxed">
+        {/* A raised surface, not an accent flood. The system uses the accent
+            as a line and a glow; a solid violet bubble was the one large
+            saturated fill in the old build. */}
+        <div className="max-w-[82%] rounded-[14px_14px_4px_14px] bg-raised px-3.5 py-2.5 shadow-[var(--shadow-sm)]">
+          <p className="text-[14.5px] leading-relaxed break-words whitespace-pre-wrap">
             {message.content}
           </p>
         </div>
@@ -166,11 +174,23 @@ export function MessageView({ message }: { message: Message }) {
       <div className="text-[15px] text-fg">
         <Markdown text={message.content} />
       </div>
-      <div className="mt-1.5 flex items-center gap-2 text-xs text-faint">
-        {message.model_key && <span className="font-mono">{message.model_key}</span>}
+      <div className="mt-2 flex items-center gap-3 text-[11.5px] text-faint">
+        {message.model_key && (
+          <span className="font-mono">{message.model_key}</span>
+        )}
         {message.elapsed != null && <span>{formatDuration(message.elapsed)}</span>}
-        <div className="opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
-          <CopyButton text={message.content} />
+        <div className="ml-auto flex gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+          <CopyButton text={message.content} label="" />
+          {onRetry && (
+            <button
+              type="button"
+              onClick={onRetry}
+              title="Ask again"
+              className="grid size-[22px] place-items-center rounded-sm text-faint transition hover:bg-tint hover:text-fg"
+            >
+              <RetryIcon className="size-3.5" />
+            </button>
+          )}
         </div>
       </div>
     </div>

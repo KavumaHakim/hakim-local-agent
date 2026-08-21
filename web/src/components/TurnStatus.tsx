@@ -44,7 +44,7 @@ export function TurnStatus({ turn, onEscalate, onDismiss, onCancel }: Props) {
                 <button
                   type="button"
                   onClick={onEscalate}
-                  className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:opacity-90"
+                  className="rounded-md border border-accent px-3 py-1.5 text-xs text-accent transition hover:bg-accent-tint"
                 >
                   Retry on the strong model
                 </button>
@@ -66,7 +66,7 @@ export function TurnStatus({ turn, onEscalate, onDismiss, onCancel }: Props) {
   return (
     <div className="animate-rise space-y-3">
       {turn.routeReason && (
-        <div className="flex items-start gap-2 rounded-lg border border-accent/30 bg-accent-dim/40 px-3 py-2 text-xs text-muted">
+        <div className="flex items-start gap-2 rounded-lg border border-accent/30 bg-accent-tint px-3 py-2 text-xs text-muted">
           <ChipIcon className="mt-px size-3.5 shrink-0 text-accent" />
           <span>
             Switched to <span className="text-fg">{turn.modelLabel}</span> —{' '}
