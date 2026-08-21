@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 from models.connectivity import Connectivity
-from models.manager import ModelManagerError, ModelState
+from models.manager import ModelManagerError, ModelState, load_registry
 from models.remote import MissingKeyError, RemoteClient, RemoteHTTPError
 from tests.test_manager import ManagerHarness
 
@@ -143,6 +143,60 @@ class LifecycleTests(RegistryTests):
         self.assertIsNone(self.manager.active_key())
         self.manager.ensure("local")
         self.assertEqual(self.manager.active_key(), "local")
+
+
+class RelativePathTests(unittest.TestCase):
+    """Registry paths resolve against models.json, not the working directory.
+
+    An absolute models_dir was the one thing that broke when the project
+    folder was renamed, so this is the regression that keeps it relocatable.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "weights").mkdir()
+        (self.home / "weights" / "m.gguf").write_bytes(b"gguf")
+        (self.home / "server.exe").write_text("x", encoding="utf-8")
+
+        registry = {
+            "server_exe": "server.exe",
+            "models_dir": "weights",
+            "default": "m",
+            "models": [
+                {"key": "m", "label": "M", "file": "m.gguf", "port": 8080,
+                 "min_free_mb": 0},
+            ],
+        }
+        self.path = self.home / "models.json"
+        self.path.write_text(json.dumps(registry), encoding="utf-8")
+
+    def test_relative_paths_anchor_to_the_registry_file(self):
+        loaded = load_registry(self.path)
+        self.assertEqual(loaded["server_exe"], self.home / "server.exe")
+        self.assertTrue(loaded["specs"]["m"].available)
+
+    def test_the_working_directory_does_not_matter(self):
+        """The API, the CLI and the tests all run from different places."""
+        previous = os.getcwd()
+        os.chdir(tempfile.gettempdir())
+        self.addCleanup(os.chdir, previous)
+        self.assertTrue(load_registry(self.path)["specs"]["m"].available)
+
+    def test_an_absolute_path_still_wins(self):
+        """For weights kept on another drive."""
+        elsewhere = self.home / "other"
+        elsewhere.mkdir()
+        (elsewhere / "m.gguf").write_bytes(b"gguf")
+
+        registry = json.loads(self.path.read_text(encoding="utf-8"))
+        registry["models_dir"] = str(elsewhere)
+        self.path.write_text(json.dumps(registry), encoding="utf-8")
+
+        self.assertEqual(
+            load_registry(self.path)["specs"]["m"].path, elsewhere / "m.gguf"
+        )
 
 
 class OcrRoleTests(unittest.TestCase):

@@ -98,7 +98,7 @@ Use `tiny` or `fast` for day-to-day work. Reach for `reasoning` deliberately.
 ### Install
 
 ```bash
-cd "C:\Users\SHAMI\HAKIM\AI\local-agent"
+cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent"
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
@@ -118,12 +118,18 @@ Edit [`models.json`](models.json):
 
 ```json
 {
-  "server_exe": "C:\\Users\\SHAMI\\HAKIM\\AI\\LLAMA CP\\llama-server.exe",
-  "models_dir": "C:/Users/SHAMI/HAKIM/AI/local-agent/weights"
+  "server_exe": "../LLAMA CP/llama-server.exe",
+  "models_dir": "weights"
 }
 ```
 
 No model paths are hardcoded anywhere in the Python.
+
+**Paths here are relative to `models.json` itself**, not to the working
+directory — so the project folder can be renamed or moved and nothing needs
+editing. That is not a style choice: these were absolute, the folder was
+renamed, and the hardcoded path was the one thing that broke. An absolute path
+still works if the weights live on another drive.
 
 ---
 
@@ -134,11 +140,11 @@ No model paths are hardcoded anywhere in the Python.
 Two processes: the API, and the front end that talks to it.
 
 ```bash
-cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && .venv\Scripts\python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent" && .venv\Scripts\python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 
 ```bash
-cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && npm --prefix web run dev
+cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent" && npm --prefix web run dev
 ```
 
 Opens on <http://127.0.0.1:5173>. Vite proxies `/api` to the API, so the
@@ -168,7 +174,7 @@ npm --prefix web run build
 ### Terminal
 
 ```bash
-cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && .venv\Scripts\python main.py
+cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent" && .venv\Scripts\python main.py
 ```
 
 ### Starting a model server by hand
@@ -176,7 +182,7 @@ cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && .venv\Scripts\python main.py
 You never have to — the manager does it — but if you want to:
 
 ```bash
-"C:\Users\SHAMI\HAKIM\AI\LLAMA CP\llama-server.exe" -m "C:\Users\SHAMI\HAKIM\AI\local-agent\weights\Ministral-3-3B-Instruct-2512-Q4_K_M.gguf" --jinja -c 4096 -t 4 -np 1 --port 8084
+"C:\Users\SHAMI\HAKIM\AI\LLAMA CP\llama-server.exe" -m "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent\weights\Ministral-3-3B-Instruct-2512-Q4_K_M.gguf" --jinja -c 4096 -t 4 -np 1 --port 8084
 ```
 
 If a healthy server is already on a model's port, the manager **adopts** it
@@ -190,7 +196,7 @@ rather than starting a rival.
 ## 5. Project layout
 
 ```
-local-agent/
+Hakim Local Agent/
 ├── main.py              terminal CLI
 ├── config.py            all settings, environment-driven
 ├── models.json          model registry (paths, ports, RAM thresholds)
@@ -686,7 +692,7 @@ number to check.
 #### Running it
 
 ```bash
-"C:\Users\SHAMI\HAKIM\AI\LLAMA CP\llama-server.exe" -m "C:\Users\SHAMI\HAKIM\AI\local-agent\weights\GLM-OCR-Q8_0.gguf" --mmproj "C:\Users\SHAMI\HAKIM\AI\local-agent\weights\mmproj-GLM-OCR-Q8_0.gguf" -c 4096 -t 4 -np 1 --port 8081
+"C:\Users\SHAMI\HAKIM\AI\LLAMA CP\llama-server.exe" -m "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent\weights\GLM-OCR-Q8_0.gguf" --mmproj "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent\weights\mmproj-GLM-OCR-Q8_0.gguf" -c 4096 -t 4 -np 1 --port 8081
 ```
 
 Then set `OCR_ENABLED=1` and the tool registers itself. Loading takes about
@@ -933,7 +939,7 @@ fast/strong pair live in [`models.json`](models.json).
 ## 14. Tests
 
 ```bash
-cd "C:\Users\SHAMI\HAKIM\AI\local-agent" && .venv\Scripts\python -m unittest discover -s tests -t .
+cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
 **485 tests, no model server needed, and none of them touch the network.**

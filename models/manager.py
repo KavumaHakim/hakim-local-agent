@@ -183,9 +183,19 @@ def load_registry(path: Path | None = None) -> dict[str, Any]:
     except ValueError as exc:
         raise ModelManagerError(f"{path} is not valid JSON: {exc}") from None
 
-    models_dir = Path(models_dir_raw).expanduser() if (
+    # Relative paths resolve against models.json's own directory, not the
+    # working directory, so the project folder can be renamed or moved and
+    # nothing has to be edited. An absolute path still wins, for a weights
+    # directory kept on another drive.
+    here = path.parent
+
+    def anchor(value: str) -> Path:
+        candidate = Path(value).expanduser()
+        return candidate if candidate.is_absolute() else (here / candidate)
+
+    models_dir = anchor(models_dir_raw) if (
         models_dir_raw := raw.get("models_dir", "")
-    ) else Path()
+    ) else here
     specs: dict[str, ModelSpec] = {}
     for entry in raw.get("models", []):
         try:
@@ -237,7 +247,7 @@ def load_registry(path: Path | None = None) -> dict[str, Any]:
     router = raw.get("router") or {}
     fallback = raw.get("default") or next(iter(specs))
     return {
-        "server_exe": Path(raw.get("server_exe", "")).expanduser(),
+        "server_exe": anchor(raw.get("server_exe", "")),
         "specs": specs,
         "default": fallback,
         "max_active": int(raw.get("max_active", 1)),
