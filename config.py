@@ -171,6 +171,88 @@ class Config:
     # chat history. Not injected into the prompt - see tools/memory_tool.py.
     memory_tool_enabled: bool = False
 
+    # --- Document search (RAG) ---
+    # OFF by default, like every other optional tool. The cost of it being on
+    # is not risk here but memory: searching starts a second Python process
+    # holding torch and the embedding model, and this machine has 8 GB.
+    #
+    # That process is short-lived by design. It loads on the first search,
+    # and the same sweeper that unloads an idle llama-server stops it after
+    # rag_idle_seconds, so the steady state is no embedding model resident.
+    rag_enabled: bool = False
+    # Where the index lives. Under data/ with the rest of the generated state.
+    rag_store: Path = field(default=PROJECT_ROOT / "data" / "rag")
+    # BAAI/bge-small-en-v1.5: 384 dimensions, 512-token window, ~130 MB on
+    # disk. Changing this makes existing vectors meaningless, which the
+    # manager detects and reports as "rebuild the index" rather than
+    # silently mixing two coordinate spaces.
+    rag_model: str = "BAAI/bge-small-en-v1.5"
+    rag_dimension: int = 384
+    # Empty means the standard Hugging Face cache. Set it to pin the model
+    # inside the project instead.
+    rag_model_dir: str = ""
+    # Chunking, in tokens. See rag/chunker.py for how tokens are estimated
+    # without loading the tokeniser.
+    rag_chunk_tokens: int = 500
+    rag_overlap_tokens: int = 75
+    # Search. min_score is cosine similarity: BGE puts a genuine match well
+    # above 0.6 and unrelated text near 0.3, so this mostly filters out
+    # "nothing here matches" rather than ranking.
+    rag_top_k: int = 5
+    rag_min_score: float = 0.3
+    # Total characters of retrieved text returned in one tool call.
+    rag_context_chars: int = 6000
+    # Two cores, shared with llama-server. Taking both makes the model this is
+    # meant to be helping crawl.
+    rag_threads: int = 2
+    # Measured on this machine, embedding 1,750-character chunks: the worker
+    # idles at ~417 MB with the model loaded, and each batch slot adds roughly
+    # 15 MB of activations - 535 MB at batch 4, 578 at 8, 674 at 16, 821 at 32.
+    # Throughput barely moves across that range because two cores are the
+    # bottleneck, so the larger batches buy memory pressure and nothing else.
+    rag_batch_size: int = 8
+    # Seconds of inactivity before the embedding worker is stopped.
+    rag_idle_seconds: float = 120.0
+    rag_max_file_bytes: int = 20_000_000
+
+    # --- Memory ---
+    # The tools are off by default (AGENT_ENABLE_MEMORY=1); the store itself
+    # is always there, because the context builder uses it whether or not the
+    # model can call the tools.
+    #
+    # The auxiliary model is what makes memory *intelligent* rather than
+    # merely persistent, and it is the one part that costs a model switch.
+    # Everything else - storing, retrieving, ranking, decay, dedupe - is
+    # ordinary code and runs with whatever model happens to be loaded.
+    memory_aux_model: str = "tiny"
+    # OFF by default. Turning it on lets the agent stop the chat model and
+    # start the auxiliary one when it is idle, which is a visible pause; that
+    # should be a choice, not a surprise.
+    memory_processing_enabled: bool = False
+    # Where the memory vector index lives.
+    memory_store: Path = field(default=PROJECT_ROOT / "data" / "memory")
+    # How many memories may be retrieved into one turn's context.
+    memory_top_k: int = 5
+    # Below this final score a memory is not worth its prompt tokens. This is
+    # what keeps "what is photosynthesis?" from dragging in personal notes.
+    memory_score_floor: float = 0.10
+    # The raw-similarity gate. Calibrated for bge-small-en-v1.5, whose noise
+    # floor is high: unrelated English sentences score 0.4-0.55, so anything
+    # lower retrieves the whole store for every question. Re-measure this if
+    # RAG_MODEL changes - see memory/retrieval.py.
+    memory_min_similarity: float = 0.55
+    # The whole context budget the builder works to, in tokens. Well under the
+    # 4096-token window in models.json, leaving room for the answer.
+    memory_context_tokens: int = 3000
+    # Queue an extraction job every N messages, not every turn.
+    memory_extract_every: int = 4
+    # Wait for this many queued jobs before a model switch is worth it.
+    memory_queue_high_water: int = 6
+    # Summarise a conversation once it passes this many messages.
+    memory_summarize_after: int = 24
+    # Jobs processed in one auxiliary-model session.
+    memory_batch_size: int = 12
+
     # --- HTTP tool ---
     # OFF by default. Loopback only unless you widen it: adding a public host
     # is what turns this from a local-service inspector into a web client.
@@ -268,6 +350,59 @@ class Config:
             http_max_bytes=_env_int("AGENT_HTTP_MAX_BYTES", defaults.http_max_bytes),
             http_allow_writes=_env_bool(
                 "AGENT_HTTP_ALLOW_WRITES", defaults.http_allow_writes
+            ),
+            rag_enabled=_env_bool("AGENT_ENABLE_RAG", defaults.rag_enabled),
+            rag_store=Path(
+                _env_str("RAG_STORE", str(defaults.rag_store))
+            ).expanduser(),
+            rag_model=_env_str("RAG_MODEL", defaults.rag_model),
+            rag_dimension=_env_int("RAG_DIMENSION", defaults.rag_dimension),
+            rag_model_dir=_env_str("RAG_MODEL_DIR", defaults.rag_model_dir),
+            rag_chunk_tokens=_env_int("RAG_CHUNK_TOKENS", defaults.rag_chunk_tokens),
+            rag_overlap_tokens=_env_int(
+                "RAG_CHUNK_OVERLAP", defaults.rag_overlap_tokens
+            ),
+            rag_top_k=_env_int("RAG_TOP_K", defaults.rag_top_k),
+            rag_min_score=_env_float("RAG_MIN_SCORE", defaults.rag_min_score),
+            rag_context_chars=_env_int(
+                "RAG_CONTEXT_CHARS", defaults.rag_context_chars
+            ),
+            rag_threads=_env_int("RAG_THREADS", defaults.rag_threads),
+            rag_batch_size=_env_int("RAG_BATCH_SIZE", defaults.rag_batch_size),
+            rag_idle_seconds=_env_float(
+                "RAG_IDLE_SECONDS", defaults.rag_idle_seconds
+            ),
+            rag_max_file_bytes=_env_int(
+                "RAG_MAX_FILE_BYTES", defaults.rag_max_file_bytes
+            ),
+            memory_aux_model=_env_str("MEMORY_AUX_MODEL", defaults.memory_aux_model),
+            memory_processing_enabled=_env_bool(
+                "AGENT_ENABLE_MEMORY_PROCESSING", defaults.memory_processing_enabled
+            ),
+            memory_store=Path(
+                _env_str("MEMORY_STORE", str(defaults.memory_store))
+            ).expanduser(),
+            memory_top_k=_env_int("MEMORY_TOP_K", defaults.memory_top_k),
+            memory_score_floor=_env_float(
+                "MEMORY_SCORE_FLOOR", defaults.memory_score_floor
+            ),
+            memory_min_similarity=_env_float(
+                "MEMORY_MIN_SIMILARITY", defaults.memory_min_similarity
+            ),
+            memory_context_tokens=_env_int(
+                "MEMORY_CONTEXT_TOKENS", defaults.memory_context_tokens
+            ),
+            memory_extract_every=_env_int(
+                "MEMORY_EXTRACT_EVERY", defaults.memory_extract_every
+            ),
+            memory_queue_high_water=_env_int(
+                "MEMORY_QUEUE_HIGH_WATER", defaults.memory_queue_high_water
+            ),
+            memory_summarize_after=_env_int(
+                "MEMORY_SUMMARIZE_AFTER", defaults.memory_summarize_after
+            ),
+            memory_batch_size=_env_int(
+                "MEMORY_BATCH_SIZE", defaults.memory_batch_size
             ),
         )
 

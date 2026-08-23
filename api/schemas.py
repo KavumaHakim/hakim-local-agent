@@ -193,6 +193,207 @@ class ToolsOut(BaseModel):
     workspace: str
 
 
+# --- document search (RAG) ---
+
+
+class RagIndexRequest(BaseModel):
+    """Index a file, or a folder of them."""
+
+    path: str = Field(min_length=1)
+    # Directories only. A folder of notes is normally worth walking; a folder
+    # that happens to sit above a source tree is not, hence the switch.
+    recursive: bool = True
+    # Re-embed even when size and modification time say nothing changed. The
+    # escape hatch for a file whose timestamp lies.
+    force: bool = False
+
+
+class RagIndexedDocument(BaseModel):
+    document: str
+    chunks: int
+
+
+class RagFailure(BaseModel):
+    document: str
+    error: str
+
+
+class RagIndexResult(BaseModel):
+    success: bool = True
+    indexed: list[RagIndexedDocument] = []
+    # Names only: an unchanged file has nothing else worth reporting.
+    skipped: list[str] = []
+    # Per-file failures. An unreadable PDF in a folder of 400 is reported
+    # here rather than failing the whole run.
+    failed: list[RagFailure] = []
+    documents_total: int = 0
+    chunks_total: int = 0
+
+
+class RagSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    top_k: int | None = Field(default=None, ge=1, le=50)
+    # Cosine similarity. None uses the configured threshold.
+    min_score: float | None = Field(default=None, ge=-1.0, le=1.0)
+
+
+class RagHit(BaseModel):
+    document: str
+    path: str
+    chunk_id: str
+    score: float
+    text: str
+    # Absent for formats that have no pages, rather than null.
+    page: int | None = None
+
+
+class RagSearchResult(BaseModel):
+    success: bool = True
+    query: str
+    count: int
+    results: list[RagHit] = []
+    # Set when there is something the caller should know: an empty index, or
+    # nothing above the threshold.
+    note: str = ""
+    truncated: str = ""
+
+
+class RagDocumentOut(BaseModel):
+    id: int
+    document: str
+    path: str
+    chunks: int
+    pages: int | None = None
+    size_bytes: int
+    indexed_at: str
+
+
+class RagDocumentsOut(BaseModel):
+    success: bool = True
+    count: int
+    chunks_total: int
+    documents: list[RagDocumentOut] = []
+
+
+class RagRemoveResult(BaseModel):
+    success: bool = True
+    document: str
+    removed_chunks: int
+
+
+class RagStatsOut(BaseModel):
+    success: bool = True
+    documents: int
+    chunks: int
+    model: str
+    dimension: int
+    chunk_tokens: int
+    overlap_tokens: int
+    store: str
+    vector_bytes: int
+    # Whether the embedding model is resident right now. The answer should be
+    # False most of the time.
+    embedder_loaded: bool = False
+
+
+# --- memory ---
+
+
+class MemoryOut(BaseModel):
+    id: int
+    type: str
+    content: str
+    importance: float
+    confidence: float
+    status: str
+    created_at: str = ""
+    subject: str = ""
+    superseded_by: int | None = None
+    # Present on search results, absent on a plain listing.
+    score: float | None = None
+    similarity: float | None = None
+
+
+class MemoryListOut(BaseModel):
+    success: bool = True
+    query: str = ""
+    count: int = 0
+    memories: list[MemoryOut] = []
+    # Set when nothing was relevant, which is a real answer rather than a
+    # failure - the UI shows it instead of an empty box.
+    note: str = ""
+
+
+class MemorySearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class MemoryRememberRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+    type: str = "fact"
+    importance: float = Field(default=0.8, ge=0.0, le=1.0)
+    subject: str = ""
+
+
+class MemoryUpdateRequest(BaseModel):
+    content: str | None = None
+    type: str | None = None
+    importance: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    status: str | None = None
+    subject: str | None = None
+
+
+class MemoryProcessorOut(BaseModel):
+    configured: bool = False
+    available: bool = False
+    reason: str = ""
+    running: bool = False
+    last_run: dict[str, Any] = {}
+
+
+class MemoryStatsOut(BaseModel):
+    success: bool = True
+    total: int = 0
+    active: int = 0
+    archived: int = 0
+    superseded: int = 0
+    deleted: int = 0
+    pending_jobs: int = 0
+    # Whether semantic retrieval is possible; False falls back to substring.
+    embeddings: bool = False
+    processor: MemoryProcessorOut = MemoryProcessorOut()
+
+    # Per-type counts arrive as type_fact, type_preference and so on.
+    model_config = {"extra": "allow"}
+
+
+class MemoryConsolidateResult(BaseModel):
+    success: bool = True
+    merged: int = 0
+    superseded: int = 0
+    needs_model: int = 0
+    queued: int = 0
+    note: str = ""
+
+
+class MemoryProcessResult(BaseModel):
+    """What one auxiliary-model batch did, or why it did not run."""
+
+    ran: bool = False
+    reason: str = ""
+    jobs: int = 0
+    by_kind: dict[str, int] = {}
+    memories_created: int = 0
+    embedded: int = 0
+    failed: int = 0
+    stopped_early: bool = False
+    seconds: float = 0.0
+    model: str = ""
+    pending: int = 0
+
+
 # --- health ---
 
 

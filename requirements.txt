@@ -10,3 +10,7 @@ uvicorn[standard]>=0.34
 
 # The front end is not a Python dependency: it lives in web/ and is built with
 # npm. See the README for the two commands that run it.
+
+# Document search is optional and lives in requirements-rag.txt. It pulls in
+# torch, which is larger than everything above put together, so installing it
+# is a separate decision rather than the price of installing this.

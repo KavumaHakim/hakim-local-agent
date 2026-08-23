@@ -46,6 +46,9 @@ manager — the API adds transport, not a second implementation.
 - Streams tokens, and the model's reasoning, as they generate
 - Shows what every tool call sent and received, so you can check its work
 - Reads images you drop in, via OCR
+- Searches your own notes and PDFs by meaning, and answers from them
+- Remembers your preferences and decisions across conversations, and
+  retrieves only the ones relevant to what you just asked
 - Can send a turn to a hosted model instead, when speed matters more than
   keeping it local — and asks first when the router chooses that itself
 - Saves every conversation to a local SQLite file
@@ -201,12 +204,11 @@ Hakim Local Agent/
 ├── config.py            all settings, environment-driven
 ├── models.json          model registry (paths, ports, RAM thresholds)
 ├── chat_store.py        SQLite conversation history
-├── memory_store.py      durable facts, same SQLite file
 ├── requirements.txt
 ├── .gitignore           keeps weights/ and data/ out of any repo
 │
 ├── weights/             the GGUF model files (~9.5 GB, git-ignored)
-├── data/                generated state: the SQLite database
+├── data/                generated state: the SQLite database, and rag/ index
 ├── uploads/             images attached in the UI (git-ignored)
 ├── samples/             example images for the OCR tool
 ├── .env                 API keys for hosted models (git-ignored)
@@ -216,7 +218,8 @@ Hakim Local Agent/
 │   ├── runtime.py       process-wide objects; runs one turn
 │   ├── turns.py         the queue: one turn at a time, with positions
 │   ├── schemas.py       request and response bodies
-│   └── routes/          chat (SSE), conversations, models, meta, uploads
+│   └── routes/          chat (SSE), conversations, models, meta, uploads,
+│                        rag, memory
 │
 ├── web/                 React + TypeScript + Vite + Tailwind
 │   ├── src/lib/         api client, SSE reader, markdown, commands
@@ -236,6 +239,27 @@ Hakim Local Agent/
 │   ├── connectivity.py  cached "is there internet"
 │   └── manager.py       starts/stops/switches llama-server processes
 │
+├── memory/              persistent memory (disabled by default)
+│   ├── types.py         memory kinds, statuses, decay half-lives
+│   ├── store.py         memories, links, jobs, summaries (SQLite)
+│   ├── vectors.py       memory embeddings, reusing the document index
+│   ├── retrieval.py     scoring and decay - pure arithmetic
+│   ├── extraction.py    what is worth remembering, without a model
+│   ├── consolidation.py duplicates and contradictions
+│   ├── processor.py     the one place a model is switched
+│   ├── context.py       assembling a turn under a token budget
+│   └── manager.py       the object everything else talks to
+│
+├── rag/                 document search (disabled by default)
+│   ├── __main__.py      `python -m rag` - index without a model server
+│   ├── extractor.py     file to text, page by page for PDFs
+│   ├── chunker.py       overlapping chunks on paragraph boundaries
+│   ├── embeddings.py    owns the worker process; starts late, stops early
+│   ├── worker.py        BGE in its own process, so its RAM comes back
+│   ├── index.py         flat float32 vectors, searched with numpy
+│   ├── metadata.py      chunk text and documents (SQLite)
+│   └── manager.py       the order everything happens in
+│
 ├── tools/
 │   ├── base.py          Tool, ToolRegistry, argument validation
 │   ├── registry.py      builds the default tool set
@@ -245,8 +269,9 @@ Hakim Local Agent/
 │   ├── shell_tool.py    allowlisted terminal commands (disabled by default)
 │   ├── http_tool.py     allowlisted HTTP requests (disabled by default)
 │   ├── git_tool.py      structured git, commits behind a second flag
-│   ├── memory_tool.py   durable facts across conversations
+│   ├── memory_tool.py   the five memory tools
 │   ├── ocr_tool.py      GLM-OCR client (working)
+│   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
 └── tests/               418 tests, no server required
@@ -501,9 +526,11 @@ turn; guessing big wastes minutes on every simple question.
 | `write_text_file`, `create_directory` | filesystem | **off by default** |
 | `git_status`, `git_log`, `git_diff`, `git_branches` | git | **off by default** |
 | `git_commit`, `git_create_branch` | git | needs a second flag |
-| `remember`, `recall`, `forget` | memory | **off by default** |
+| `remember`, `recall`, `search_memory`, `update_memory`, `forget_memory` | memory | **off by default** |
+| memory background processing | memory | needs a second flag |
 | `http_request` | http | **off by default** |
 | `ocr_image` | ocr | **works** — off until you run the OCR server |
+| `search_documents`, `list_documents` | documents | **off by default** |
 
 Disabled tools are not registered at all — sending the model a definition it can
 only fail on wastes context and a whole round-trip.
@@ -727,6 +754,331 @@ you want something else.
 
 Sample images to try are in `samples/`.
 
+### memory — what the agent remembers about you
+
+Off by default. `AGENT_ENABLE_MEMORY=1`, or the **Memory** switch in the
+sidebar.
+
+Not a chat-history buffer. Four kinds of memory, stored separately and
+retrieved by meaning:
+
+| | What it holds | Example |
+|---|---|---|
+| **working** | the current task, in the prompt only, never persisted | "fixing the PDF importer" |
+| **episodic** | events worth recalling later | "User added Biology.pdf" |
+| **semantic** | durable facts and preferences | "User prefers lightweight local solutions" |
+| **summaries** | what was dropped from a long conversation | one paragraph per conversation |
+
+#### The rule everything is built around
+
+**Only one chat model is ever loaded.** Ministral is the primary reasoner;
+Qwen3.5 2B is an optional memory worker. They are never resident together, and
+that is not enforced by new code — it is enforced by `ModelManager.ensure()`,
+which already stops every other chat model when `max_active` is 1. The memory
+processor drives that same manager rather than loading anything itself.
+
+```
+ normal turn      Ministral loaded -> answer -> done
+ retrieval        no model switch: SQLite + embeddings + arithmetic
+ processing       Ministral stopped -> Qwen loaded -> whole batch -> Qwen stopped
+```
+
+#### Retrieval never loads a language model
+
+This is the part that makes memory cheap enough to use on every turn. Storing,
+ranking, decay, deduplication and forgetting are all ordinary code:
+
+```
+question -> embed (BGE, the same worker document search uses)
+         -> cosine against the memory index
+         -> similarity gate
+         -> score = similarity x importance x confidence x recency x type x usage
+         -> top k -> context builder -> Ministral
+```
+
+A **product**, not a weighted sum, so every factor has a veto: a vaguely
+similar, stale, low-confidence guess cannot out-rank an exact match by being
+strong on one axis.
+
+**The similarity gate is the number that matters.** BGE-small has a high noise
+floor — two unrelated English sentences score 0.4–0.55, not zero. Measured on
+this machine against five stored memories:
+
+| Query | Best hit |
+|---|---|
+| "what editor do I use?" | 0.664 |
+| "what setup do I normally use?" | 0.575 |
+| **"what is photosynthesis?"** | **0.549** |
+| "write a python function to reverse a string" | 0.479 |
+| "explain the french revolution" | 0.395 |
+
+So `MEMORY_MIN_SIMILARITY` defaults to **0.55**, and unrelated questions
+retrieve nothing at all. Set it lower and every question drags the whole store
+into the prompt — that was a real bug here, found only by running it against
+the real model, because a bag-of-words test fake scores unrelated text at ~0
+and hides the problem entirely.
+
+> The honest cost: a genuinely relevant question can land just under the gate.
+> "What kind of tooling does this person like?" scores 0.506 and is cut. The
+> trade is deliberate — precision over recall, because a wrong memory asserted
+> confidently is worse than a missing one — but if you change `RAG_MODEL`, this
+> number has to be re-measured.
+
+#### Decay, not deletion
+
+Memories carry `importance` and `confidence` (0–1) and decay on an exponential
+half-life set by their type — 720 days for a preference, 5 for a temporary
+note. Nothing is deleted by age; it just stops out-ranking fresher things.
+
+Statuses are `active`, `archived`, `superseded` and `deleted`. **Superseded is
+how contradictions are handled.** Told "I use Qwen" and later "I've switched to
+Mistral", the newer memory wins and the older one is kept, linked, and still
+answerable:
+
+```
+CURRENT   User uses Mistral        (active)
+HISTORY   User uses Qwen           (superseded_by -> the above)
+```
+
+That resolution is deterministic — same type, same subject, both active, newer
+wins — and needs no model.
+
+#### What gets remembered, and what does not
+
+After each turn, `observe_turn` runs a couple of regexes and usually does
+nothing. In order:
+
+1. **"Remember that ..."** is stored immediately — no queue, no model. An
+   explicit instruction that sat in a queue behind a model switch would make
+   "I'll remember that" a lie.
+2. **Greetings, thanks, "ok"** are rejected outright and never reach the queue.
+3. **Clear patterns** — "I always use X", "I've switched to Y" — are stored
+   directly, with no model.
+4. **Anything else** is queued, and only every fourth message.
+
+Hedging and time-boxing are checked *first*, so "I might always use X" becomes
+an `intention` at low confidence and "I'm using X today" becomes `temporary`.
+Neither becomes a permanent preference. An uncertain intention must never
+harden into a fact.
+
+#### The queue, and why it batches
+
+Jobs live in SQLite and survive a restart; anything left `running` by a crash
+is returned to the queue at startup. A batch runs only when the agent is idle
+**and** enough work has piled up (`MEMORY_QUEUE_HIGH_WATER`, default 6) —
+switching models after every message would cost minutes for nothing.
+
+When it does run, one model session handles the whole batch: extraction,
+classification, consolidation and summarisation together. Six jobs cost one
+load and one stop, not six of each. If a turn arrives mid-batch the remaining
+jobs go back on the queue and the auxiliary model is stopped immediately —
+responsiveness wins.
+
+The auxiliary model is stopped on **every** exit path, including a crashing
+job. Leaving it resident is the one outcome that would break the memory ceiling
+for the next turn.
+
+#### It works without the auxiliary model
+
+Background processing is a separate switch (`AGENT_ENABLE_MEMORY_PROCESSING=1`)
+and is off by default, because a model swap is a visible pause. Without it you
+still get explicit memories, semantic retrieval, ranking, decay, deduplication,
+conflict resolution and forgetting. Qwen makes memory *smarter*; it is not a
+dependency.
+
+#### Talking to it
+
+Five tools reach the model: `remember`, `recall`, `search_memory`,
+`update_memory`, `forget_memory`. "Forget that I prefer X" actually calls
+`forget_memory` rather than the model saying it will.
+
+```
+.venv\Scripts\python -m rag stats      # documents
+curl 127.0.0.1:8000/api/memory/stats   # memories
+```
+
+`GET /api/memory`, `POST /api/memory`, `POST /api/memory/search`,
+`PATCH /api/memory/{id}`, `DELETE /api/memory/{target}`,
+`POST /api/memory/consolidate`, `POST /api/memory/process`, `GET /api/memory/stats`.
+`process` and `consolidate` are refused mid-turn.
+
+#### Context, under a budget
+
+Every turn is assembled by a context builder rather than "system prompt plus
+everything":
+
+```
+system instructions            always
+working memory                 the current task, if any
+conversation summary           <= 12% of the budget
+retrieved memories             <= 15% of the budget
+recent messages                <= 55%, and never fewer than 4
+```
+
+Budgets are characters converted from tokens at the same conservative ratio the
+document chunker uses, so estimates run high and the real context comes out
+under. Memories and summaries are capped *first*: a turn where retrieved
+memories crowded out the question being asked would be worse than no memory at
+all.
+
+#### Where it lives
+
+Same SQLite file as the chat history — `memory_items`, `memory_links`,
+`memory_jobs`, `conversation_summaries` — plus a `data/memory/memory.f32`
+vector file, the same flat-float32 format the document index uses.
+
+The old keyed `memories(key, value)` table is imported on first open and then
+**renamed** to `memories_legacy`, not dropped. An upgrade should never be the
+thing that loses your data.
+
+### documents — semantic search over your own files
+
+Off by default. It also has dependencies the rest of the project does not,
+kept in their own file so `pip install -r requirements.txt` never drags torch
+in behind your back:
+
+```
+.venv\Scripts\pip install -r requirements-rag.txt
+```
+
+Then `AGENT_ENABLE_RAG=1`, or the **Document search** switch in the sidebar.
+Nothing in `rag/` is imported until you do — the CLI and the API both start
+without any of it installed, and the endpoints answer `501` with the install
+line rather than a traceback.
+
+Ask "according to my biology notes, explain the light-dependent stage" and the
+agent searches your own indexed files, gets back the passages that actually
+mean that, and answers from them with the document and page named. Ask "what is
+25 × 17?" and it uses the calculator instead, because the tool description
+tells it which is which.
+
+#### The pipeline
+
+```
+document -> extract -> clean -> chunk -> embed -> vectors.f32
+                                             \-> chunks.db  (text + metadata)
+```
+
+Each stage is one module in [`rag/`](rag/), and nothing in it reaches the
+network once the embedding model is on disk.
+
+| File | What it does |
+|---|---|
+| [`rag/extractor.py`](rag/extractor.py) | file → text, page by page for PDFs |
+| [`rag/chunker.py`](rag/chunker.py) | text → overlapping chunks on paragraph boundaries |
+| [`rag/embeddings.py`](rag/embeddings.py) | owns the worker process; starts it late, stops it early |
+| [`rag/worker.py`](rag/worker.py) | the model itself, in its own process |
+| [`rag/index.py`](rag/index.py) | the vector file, searched with numpy |
+| [`rag/metadata.py`](rag/metadata.py) | chunk text, documents, the free list (SQLite) |
+| [`rag/manager.py`](rag/manager.py) | decides the order everything happens in |
+
+#### The model
+
+**BAAI/bge-small-en-v1.5** — 384 dimensions, a 512-token window, 134 MB on
+disk. It downloads itself the first time anything needs it, into the standard
+Hugging Face cache; `RAG_MODEL_DIR` moves it. To fetch it ahead of time:
+
+```
+.venv\Scripts\python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
+```
+
+Queries are embedded with BGE's own retrieval instruction prefix and passages
+without one — that asymmetry is what the model was trained for, and dropping it
+costs recall. Vectors are normalised, so cosine similarity is a dot product.
+
+> On Windows the first download fails with **WinError 1314: a required
+> privilege is not held** unless Developer Mode is on, because the Hugging Face
+> cache wants to create symlinks. The worker sets `HF_HUB_DISABLE_SYMLINKS=1`
+> so it copies instead. Nothing to do about it; it is written down because the
+> raw error is baffling.
+
+#### Indexing
+
+Ingestion has nothing to do with chatting, so it has its own entry point and
+needs no model server running:
+
+```
+.venv\Scripts\python -m rag index "C:\Users\you\Documents\notes"
+```
+
+```
+index <path>     a file, or every supported file in a folder
+search "<text>"  the same search the agent's tool makes
+list             what is indexed
+remove <id>      drop one document
+rebuild          re-read and re-embed everything from source
+compact          reclaim rows left behind by deletions
+stats            index size, model, and whether the model is loaded
+```
+
+Handles `.txt` `.md` `.pdf` `.py` and about fifty other text and source
+formats. PDFs are read with **pypdf**, chunked one page at a time so `page` in
+a result is true rather than approximate.
+
+**Re-running `index` is cheap and safe.** A file is skipped when its size and
+modification time are unchanged; if those moved, it is hashed, and skipped
+again if the hash matches. Only genuinely changed files are re-embedded, and a
+document is replaced by path in a single transaction — so running it twice
+cannot produce duplicate chunks. Re-indexing an unchanged folder of two
+documents takes 0.7 s and never loads the model at all.
+
+The same operations are on the API: `POST /api/rag/index`, `POST /api/rag/search`,
+`GET /api/rag/documents`, `DELETE /api/rag/documents/{id}`, `POST /api/rag/rebuild`,
+`GET /api/rag/stats`, `POST /api/rag/unload`. Indexing is refused while a turn
+is running — it would fight it for both cores — but searching is not, because
+that is the agent's own tool call.
+
+#### Why no FAISS, and no vector database
+
+The index is a flat file of float32 read with `numpy.memmap` and searched in
+6 MB blocks. FAISS starts earning its keep somewhere around a million vectors;
+a personal document collection is three orders of magnitude short of that —
+20,000 chunks is 29 MB and one matrix multiply. Against that, `faiss-cpu` is a
+binary wheel to install, a second file format to keep in step with the
+metadata, and an index that has to be rebuilt to delete anything. The
+brute-force scan is also *exact*: no recall is lost to an approximation.
+
+Chunk text and metadata live in SQLite beside it rather than in JSON, because a
+JSON store has to be read and rewritten whole — re-indexing one file in a
+collection of five hundred would rewrite every record and hold all of them in
+memory to do it. A search reads the five rows it hit.
+
+Deleting a document does not move any vectors, because moving one would
+invalidate every row number in the metadata. Its rows go on a free list and are
+overwritten by the next document indexed; `compact` squeezes them out when you
+want the disk back.
+
+#### RAM — the part that shaped the design
+
+The embedding model **never runs in the API process**. It runs in a child
+process, started on first use and stopped once idle by the same sweeper that
+unloads idle llama-servers. Importing torch in-process would add a few hundred
+megabytes that Python never gives back; a child process gives back every byte
+the moment it exits.
+
+Measured here, embedding 1,750-character chunks:
+
+| | Worker RSS |
+|---|---|
+| model loaded, idle | ~417 MB |
+| embedding, batch 4 | ~535 MB |
+| embedding, batch 8 *(default)* | ~578 MB |
+| embedding, batch 16 | ~674 MB |
+| embedding, batch 32 | ~821 MB |
+| **after unload** | **0 — the process is gone** |
+
+Throughput is ~2 chunks/sec across that whole range, because two cores are the
+bottleneck rather than the batch size. That is why the default is 8: the bigger
+batches buy memory pressure and nothing else.
+
+Cold start is the real cost — **50–110 s** for the first search, almost all of
+it importing torch. The worker then stays up for `RAG_IDLE_SECONDS` (120 s by
+default), so follow-up searches are ~0.3 s.
+
+**Do not index a large folder while the 8B model is loaded.** 417 MB next to
+~5 GB of Qwen on an 8 GB machine is how you find the swap file. Index first,
+then chat — which is what the separate `python -m rag` entry point is for.
+
 ---
 
 ## 10. Chat history
@@ -930,6 +1282,31 @@ a connection failure.
 | `AGENT_HTTP_TIMEOUT` | `20` | Seconds |
 | `AGENT_HTTP_MAX_BYTES` | `100000` | Response size cap |
 | `AGENT_HTTP_ALLOW_WRITES` | `0` | Permit POST/PUT/PATCH/DELETE |
+| `AGENT_ENABLE_MEMORY_PROCESSING` | `0` | Let the agent swap models to process memory when idle |
+| `MEMORY_AUX_MODEL` | `tiny` | The memory worker, from models.json |
+| `MEMORY_STORE` | `data/memory` | Memory vector index |
+| `MEMORY_TOP_K` | `5` | Memories per turn |
+| `MEMORY_MIN_SIMILARITY` | `0.55` | Re-measure if RAG_MODEL changes |
+| `MEMORY_SCORE_FLOOR` | `0.10` | Composite score floor |
+| `MEMORY_CONTEXT_TOKENS` | `3000` | Whole context budget |
+| `MEMORY_EXTRACT_EVERY` | `4` | Queue extraction every N messages |
+| `MEMORY_QUEUE_HIGH_WATER` | `6` | Jobs before a switch is worth it |
+| `MEMORY_SUMMARIZE_AFTER` | `24` | Messages before summarising |
+| `MEMORY_BATCH_SIZE` | `12` | Jobs per model session |
+| `AGENT_ENABLE_RAG` | `0` | Document search |
+| `RAG_STORE` | `data/rag` | Where the index lives |
+| `RAG_MODEL` | `BAAI/bge-small-en-v1.5` | Embedding model |
+| `RAG_MODEL_DIR` | *(HF cache)* | Pin the model somewhere else |
+| `RAG_DIMENSION` | `384` | Must match the model |
+| `RAG_CHUNK_TOKENS` | `500` | Chunk size; capped at the model's 512 |
+| `RAG_CHUNK_OVERLAP` | `75` | Clamped to half the chunk |
+| `RAG_TOP_K` | `5` | Passages per search |
+| `RAG_MIN_SCORE` | `0.3` | Cosine similarity floor |
+| `RAG_CONTEXT_CHARS` | `6000` | Retrieved text handed to the model per call |
+| `RAG_THREADS` | `2` | Shared with llama-server |
+| `RAG_BATCH_SIZE` | `8` | Bigger costs RAM, not speed |
+| `RAG_IDLE_SECONDS` | `120` | Before the embedding model is unloaded |
+| `RAG_MAX_FILE_BYTES` | `20000000` | Largest file indexed |
 
 Model paths, ports, contexts, threads, RAM thresholds and the router's
 fast/strong pair live in [`models.json`](models.json).
@@ -946,7 +1323,19 @@ cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent" && .venv\Scripts\python -m unitte
 They run in about 35 seconds.
 
 | File | Covers |
-|---|---|
+|
+The document-search tests use a fake embedder, so the suite stays fast and
+needs no model on disk. The three that load BGE for real are skipped unless
+you ask for them:
+
+```bash
+set RAG_MODEL_TESTS=1
+.venv\Scripts\python -m unittest tests.test_rag.RealModelTests
+```
+
+They take about 140 s, almost all of it importing torch.
+
+---|---|
 | `test_agent.py` | Loop: plain replies, one call, several calls, tool errors, iteration limit, malformed replies |
 | `test_tools.py` | Calculator, workspace jail, OCR validation, registry |
 | `test_python_tool.py` | Restricted execution; spawns real child processes |

@@ -12,7 +12,6 @@ from tools.ocr_tool import OcrClient
 from tools.python_tool import build_python_file_tool, build_python_tool
 from tools.git_tool import build_git_tools
 from tools.http_tool import build_http_tool
-from tools.memory_tool import build_memory_tools
 from tools.shell_tool import build_shell_tool
 
 
@@ -149,15 +148,73 @@ def build_default_registry(config: Config) -> tuple[ToolRegistry, list[DisabledT
         )
 
     if config.memory_tool_enabled:
-        for tool in build_memory_tools(config.db_path):
+        # Imported here so the CLI does not pull in numpy when memory is
+        # off, exactly as document search does.
+        from memory.manager import shared_manager
+        from tools.memory_tool import build_memory_tools
+
+        memory = shared_manager(
+            config.db_path,
+            store_dir=config.memory_store,
+            dimension=config.rag_dimension,
+            top_k=config.memory_top_k,
+            score_floor=config.memory_score_floor,
+            min_similarity=config.memory_min_similarity,
+            context_tokens=config.memory_context_tokens,
+            summarize_after=config.memory_summarize_after,
+            extract_every=config.memory_extract_every,
+            queue_high_water=config.memory_queue_high_water,
+        )
+        for tool in build_memory_tools(memory):
             registry.register(tool)
     else:
         disabled.append(
             DisabledTool(
                 category="memory",
                 reason=(
-                    "off by default - durable facts across conversations. "
-                    "Set AGENT_ENABLE_MEMORY=1."
+                    "off by default - durable facts, preferences and "
+                    "events that survive across conversations, retrieved "
+                    "by meaning. Set AGENT_ENABLE_MEMORY=1. Storing and "
+                    "retrieving need no model; AGENT_ENABLE_MEMORY_PROCESSING=1 "
+                    "additionally lets the agent briefly swap the chat model "
+                    "for a small one to extract and tidy memories while idle."
+                ),
+            )
+        )
+
+    if config.rag_enabled:
+        # Imported here, not at the top: this module pulls in numpy and
+        # the whole rag package, and the CLI is supposed to run on
+        # `requests` alone when document search is off.
+        from tools.document_search import build_document_tools
+
+        for tool in build_document_tools(
+            config.rag_store,
+            model=config.rag_model,
+            model_dir=config.rag_model_dir or None,
+            dimension=config.rag_dimension,
+            chunk_tokens=config.rag_chunk_tokens,
+            overlap_tokens=config.rag_overlap_tokens,
+            top_k=config.rag_top_k,
+            min_score=config.rag_min_score,
+            max_file_bytes=config.rag_max_file_bytes,
+            context_budget=config.rag_context_chars,
+            threads=config.rag_threads,
+            batch_size=config.rag_batch_size,
+            idle_seconds=config.rag_idle_seconds,
+        ):
+            registry.register(tool)
+    else:
+        disabled.append(
+            DisabledTool(
+                category="documents",
+                reason=(
+                    "off by default - semantic search over your own files. "
+                    "Set AGENT_ENABLE_RAG=1. Searching starts a second Python "
+                    "process holding the BGE embedding model (~400 MB), which "
+                    "is stopped again once it has been idle. Index files with "
+                    "`python -m rag index <path>` first; the model itself only "
+                    "reads the index, it cannot change it."
                 ),
             )
         )

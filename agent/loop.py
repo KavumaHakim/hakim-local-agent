@@ -50,11 +50,20 @@ class Agent:
         client: ChatClient,
         config: Config,
         tools: ToolRegistry,
+        memory: Any = None,
+        conversation_id: int | None = None,
     ) -> None:
         self._client = client
         self._config = config
         self._tools = tools
         self._history: list[dict[str, Any]] = []
+        # Optional. With no memory manager the loop behaves exactly as it did
+        # before: system prompt plus history, trimmed by message count.
+        self._memory = memory
+        self._conversation_id = conversation_id
+        # What the last context build put in front of the model. Reported to
+        # the UI so retrieved memories are visible rather than mysterious.
+        self.context_report: dict[str, Any] = {}
 
     @property
     def tools(self) -> ToolRegistry:
@@ -155,7 +164,34 @@ class Agent:
         return self._client.chat(self._messages(), tools=definitions)
 
     def _messages(self) -> list[dict[str, Any]]:
-        return [{"role": "system", "content": SYSTEM_PROMPT}, *self._history]
+        """The context for one model round.
+
+        With no memory manager this is the original behaviour: the system
+        prompt and the whole (already trimmed) history. With one, the context
+        builder assembles the summary, the retrieved memories and a recent
+        window that fits a token budget - see memory/context.py.
+
+        The query used for retrieval is the most recent user message rather
+        than the whole history: retrieving against a transcript matches
+        whatever was talked about most, not what is being asked now.
+        """
+        if self._memory is None:
+            return [{"role": "system", "content": SYSTEM_PROMPT}, *self._history]
+
+        built = self._memory.build_context(
+            system_prompt=SYSTEM_PROMPT,
+            history=self._history,
+            query=self._latest_user_message(),
+            conversation_id=self._conversation_id,
+        )
+        self.context_report = built.report()
+        return built.messages
+
+    def _latest_user_message(self) -> str:
+        for message in reversed(self._history):
+            if message.get("role") == "user":
+                return str(message.get("content") or "")
+        return ""
 
     @staticmethod
     def _assistant_entry(message: dict[str, Any], turn: AssistantTurn) -> dict[str, Any]:
