@@ -6,6 +6,7 @@ import json
 import unittest
 
 from agent.loop import Agent, IterationLimitError
+from agent.prompts import SYSTEM_PROMPT
 from config import Config
 from tests.fake_client import FakeQwenClient, text_message, tool_call_message
 from tools.base import Tool, ToolError, ToolRegistry
@@ -65,8 +66,12 @@ class NormalResponseTests(unittest.TestCase):
         agent, client = build_agent([text_message("ok")])
         agent.send("hello")
 
+        # Asserts the contract - the system prompt goes first, whole - rather
+        # than a phrase from its text. Matching on wording made this fail the
+        # moment the prompt was reworded, which is a test breaking on a change
+        # it was never meant to be watching.
         self.assertEqual(client.calls[0][0]["role"], "system")
-        self.assertIn("You are Qwen", client.calls[0][0]["content"])
+        self.assertEqual(client.calls[0][0]["content"], SYSTEM_PROMPT)
 
     def test_tool_definitions_are_sent(self):
         agent, client = build_agent([text_message("ok")])
