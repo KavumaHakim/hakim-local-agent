@@ -868,6 +868,15 @@ class ModelManager:
             "-c", str(spec.context),
             "-t", str(spec.threads),
             "-np", "1",
+            # No --cache-reuse here, and that is a measured decision rather
+            # than an omission. The theory was that replaying history without
+            # tool calls - they are display metadata and are not stored as
+            # conversation - would make the second turn's prompt diverge from
+            # the cached tokens and force a reprocess. Measured, it does not:
+            # turn two reprocesses 50 tokens of 982 with the flag and 50
+            # without, because the divergence is near the end of the prompt
+            # where there is almost nothing left to redo. Ordinary prefix
+            # caching already covers this, so the flag would be cargo.
             "--host", "127.0.0.1",
             "--port", str(spec.port),
         ]

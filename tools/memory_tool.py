@@ -121,14 +121,12 @@ class MemoryTools:
                 name="remember",
                 category="memory",
                 description=(
-                    "Store one durable fact about the user so it survives into "
-                    "later conversations. Use it when the user states a lasting "
-                    "preference, a decision, or something about their setup - "
-                    "and always when they say 'remember that ...'. "
-                    "Write it as a short third-person sentence: 'User prefers "
-                    "X'. One fact per call. "
-                    "Do NOT store greetings, small talk, passing details, "
-                    "one-off calculations, or anything true only today."
+                    "Store one durable fact about the user, for later "
+                    "conversations. Use for a lasting preference, decision or "
+                    "setup detail, and always when they say 'remember that'. "
+                    "Write it third-person: 'User prefers X'. One fact per "
+                    "call. Do NOT store greetings, small talk, one-off "
+                    "calculations, or anything true only today."
                 ),
                 parameters={
                     "type": "object",
@@ -140,23 +138,18 @@ class MemoryTools:
                         "type": {
                             "type": "string",
                             "description": (
-                                "preference (a lasting choice), fact (lasting "
-                                "state), event (something that happened), "
-                                "intention (something they might do - use this "
-                                "when they are unsure), temporary (true today "
-                                "only). Defaults to fact."
+                                "preference, fact, event, intention (they are "
+                                "unsure), or temporary (true today only). "
+                                "Defaults to fact."
                             ),
                         },
                         "importance": {
                             "type": "number",
-                            "description": "0-1, how much this should outrank others.",
+                            "description": "0-1 priority.",
                         },
                         "subject": {
                             "type": "string",
-                            "description": (
-                                "Optional grouping, e.g. a file or project name, "
-                                "so it can be forgotten as a group later."
-                            ),
+                            "description": "Optional group, e.g. a file name.",
                         },
                     },
                     "required": ["content"],
@@ -167,27 +160,22 @@ class MemoryTools:
                 name="recall",
                 category="memory",
                 description=(
-                    "Look up what is remembered about the user. Give a query to "
-                    "search by meaning, or omit it to list the most important. "
-                    "Use it when the user refers to their preferences, their "
-                    "usual setup, or something discussed in an earlier "
-                    "conversation - and to answer 'what do you remember about "
-                    "me'. Returns nothing when nothing relevant is stored, "
-                    "which is a real answer: say so rather than guessing."
+                    "Look up what is remembered about the user. Query to search "
+                    "by meaning, or omit to list the most important. Use when "
+                    "they refer to their preferences, usual setup, or an "
+                    "earlier conversation. An empty result means nothing is "
+                    "stored - say so rather than guessing."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": (
-                                "What to look for. Omit to list the most "
-                                "important memories."
-                            ),
+                            "description": "What to look for. Omit to list all.",
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum memories to return (default 5).",
+                            "description": "Maximum to return.",
                         },
                     },
                     "required": [],
@@ -198,9 +186,8 @@ class MemoryTools:
                 name="search_memory",
                 category="memory",
                 description=(
-                    "Search memories by meaning and see their relevance scores. "
-                    "Use this instead of recall when checking whether something "
-                    "is known at all, or when recall returned too little."
+                    "Search memories with relevance scores. Use instead of "
+                    "recall when checking whether something is known at all."
                 ),
                 parameters={
                     "type": "object",
@@ -222,35 +209,19 @@ class MemoryTools:
                 name="update_memory",
                 category="memory",
                 description=(
-                    "Correct a stored memory, by its id from recall or "
-                    "search_memory. Use it when something remembered is wrong "
-                    "or out of date but should not be forgotten entirely."
+                    "Correct a stored memory by its id, when it is wrong or "
+                    "out of date but should not be forgotten."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "memory_id": {
-                            "type": "integer",
-                            "description": "The id of the memory to change.",
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Replacement text.",
-                        },
-                        "type": {
-                            "type": "string",
-                            "description": "New type, if it was misclassified.",
-                        },
-                        "importance": {
-                            "type": "number",
-                            "description": "New importance, 0-1.",
-                        },
+                        "memory_id": {"type": "integer", "description": "Which memory."},
+                        "content": {"type": "string", "description": "New text."},
+                        "type": {"type": "string", "description": "New type."},
+                        "importance": {"type": "number", "description": "0-1."},
                         "status": {
                             "type": "string",
-                            "description": (
-                                "active, or archived to stop it being retrieved "
-                                "without deleting it."
-                            ),
+                            "description": "active, or archived to stop retrieval.",
                         },
                     },
                     "required": ["memory_id"],
@@ -261,20 +232,16 @@ class MemoryTools:
                 name="forget_memory",
                 category="memory",
                 description=(
-                    "Forget what is remembered about something. Give a memory "
-                    "id, or a description like 'my editor preference' to forget "
-                    "everything about it. Use it whenever the user asks you to "
-                    "forget something - actually call this, do not just say you "
-                    "will."
+                    "Forget something remembered. Give a memory id, or a "
+                    "description to forget everything about it. Call this "
+                    "whenever asked to forget - do not just say you will."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
                         "target": {
                             "type": "string",
-                            "description": (
-                                "A memory id, or a description of what to forget."
-                            ),
+                            "description": "A memory id, or what to forget.",
                         }
                     },
                     "required": ["target"],

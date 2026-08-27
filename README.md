@@ -18,6 +18,7 @@ manager — the API adds transport, not a second implementation.
 
 1. [What it does](#1-what-it-does)
 2. [Hardware reality](#2-hardware-reality)
+2a. [Why a turn takes as long as it does](#2a-why-a-turn-takes-as-long-as-it-does)
 3. [Setup](#3-setup)
 4. [Running it](#4-running-it)
 5. [Project layout](#5-project-layout)
@@ -87,6 +88,93 @@ is fast because llama.cpp's prefix cache only had to process 69 new tokens.
 - Thinking mode roughly doubles the wait. Off by default in practice.
 
 Use `tiny` or `fast` for day-to-day work. Reach for `reasoning` deliberately.
+
+---
+
+## 2a. Why a turn takes as long as it does
+
+Measured on this machine (i5-6300U, 2 physical cores, 8 GB) with
+`Qwen3.5-2B-XS-Q3_K_S`, using llama.cpp's own `llama-bench` and the `timings`
+block llama-server returns. Worth reading before trying to optimise anything,
+because the obvious suspects turned out not to be the problem.
+
+### Generation is ~2 tok/s, and threads do not change that
+
+```
+threads   prompt (pp128)      generation (tg32)
+   1       7.81 ± 0.57          1.58 ± 0.14
+   2      13.57 ± 1.90          1.88 ± 0.49
+   3      12.66 ± 3.77          2.15 ± 0.19
+   4      16.70 ± 3.69          2.05 ± 0.66
+```
+
+The generation figures overlap inside their error bars. Two threads, three or
+four make no difference to how fast tokens come out — the machine is bound by
+memory bandwidth, not by cores. `-t 4` is kept because it is the best of them
+for prompt processing, which is the part that *is* compute-bound.
+
+> An earlier run of this suggested `-t 3` was 81% faster. It was noise: the
+> dev servers were running during part of it. The numbers above come from
+> `llama-bench` with repetitions and standard deviations, on an idle machine.
+> If you re-measure, do it that way — single timed requests on this hardware
+> vary by more than the effect being looked for.
+
+### The prefix is what makes the agent slower than raw llama-server
+
+Same server, same model, four shapes of request:
+
+| request | prompt tokens | prompt time | total |
+|---|---|---|---|
+| a bare question | 22 | 2.1 s | 19.2 s |
+| + the system prompt | 339 | 30.5 s | 46.3 s |
+| + tool definitions (**a real turn**) | **906** | **62.4 s** | 77.1 s |
+| the same request again | 4 | 0.6 s | 17.0 s |
+
+Prompt processing runs at about 14.5 tok/s. A turn carries 906 tokens of
+prefix before the user's question, so the first turn of a conversation spends
+**a minute** on prompt evaluation. That is the whole difference between this
+and typing into llama-server's own UI — not tokens per second, which is
+identical, but how much prompt there is.
+
+**The cache works.** The fourth row is the same request repeated: 4 tokens
+processed instead of 906, 61.8 s saved. So the prefix is paid once per
+conversation, not once per turn.
+
+`--cache-reuse` is deliberately **not** passed. The theory was that replaying
+history without tool calls would diverge from the cached tokens and force a
+reprocess; measured, turn two reprocesses 50 tokens of 982 either way, because
+the divergence is near the end of the prompt where little is left to redo.
+
+### Tools are the prefix
+
+| enabled | tools | prompt tokens | first turn |
+|---|---|---|---|
+| default | 3 | 894 | ~62 s |
+| + documents | 5 | 1,167 | ~80 s |
+| + memory | 8 | 1,740 | ~120 s |
+| everything | 21 | 3,646 | ~251 s |
+
+Every tool switched on is prompt tokens paid on the first turn of every
+conversation. Turning on all of them costs **four minutes** before the model
+writes anything. This is the reason tool descriptions here are terse and the
+reason tools are off by default — it is not caution about capability, it is
+that each one has a measurable price.
+
+### So, to make it faster
+
+1. **Turn off tools you are not using.** Biggest single lever, and it is a
+   switch in the sidebar.
+2. **Keep the conversation going** rather than starting a new one. The prefix
+   is cached; a new conversation pays it again.
+3. **Turn off Thinking** unless the question needs it. It does not change
+   tok/s, it changes how many tokens are generated — hundreds of them, at
+   2 tok/s.
+4. **Mind the idle timeout.** `idle_timeout_seconds` in `models.json` is 300.
+   When the model unloads, its KV cache goes with it, so the next message pays
+   both the reload and the full prefix again. Raise it if you have RAM to
+   spare and think in long pauses.
+5. **Use a smaller model.** At 2 tok/s the model is the ceiling, and the 8B is
+   far slower still.
 
 ---
 

@@ -222,6 +222,8 @@ export default function App() {
           onSetModelHidden={(key, hidden) =>
             void models.setHidden(key, hidden)
           }
+          onOverrideModel={(key, values) => void models.override(key, values)}
+          onClearModelOverride={(key) => void models.clearOverride(key)}
           tools={tools.data}
           toolPending={tools.pending}
           onSetOcrBackend={(backend) => void tools.setOcrBackend(backend)}

@@ -9,6 +9,8 @@
 import { useState } from 'react'
 import type {
   Conversation,
+  Model,
+  ModelOverride,
   ModelsResponse,
   OcrBackend,
   ToolsResponse,
@@ -46,6 +48,8 @@ interface Props {
   onSetPrimary: (key: string) => void
   onRescanModels: () => void
   onSetModelHidden: (key: string, hidden: boolean) => void
+  onOverrideModel: (key: string, values: ModelOverride) => void
+  onClearModelOverride: (key: string) => void
 
   tools: ToolsResponse | null
   toolPending: string | null
@@ -414,6 +418,8 @@ function SettingsPane({
   onSetPrimary,
   onRescanModels,
   onSetModelHidden,
+  onOverrideModel,
+  onClearModelOverride,
   autoRoute,
   onAutoRoute,
   thinking,
@@ -441,6 +447,8 @@ function SettingsPane({
           onSetPrimary={onSetPrimary}
           onRescan={onRescanModels}
           onSetHidden={onSetModelHidden}
+          onOverride={onOverrideModel}
+          onClearOverride={onClearModelOverride}
         />
       )}
 
@@ -486,15 +494,20 @@ function ModelSettings({
   onSetPrimary,
   onRescan,
   onSetHidden,
+  onOverride,
+  onClearOverride,
 }: {
   models: ModelsResponse
   busyKey: string | null
   onSetPrimary: (key: string) => void
   onRescan: () => void
   onSetHidden: (key: string, hidden: boolean) => void
+  onOverride: (key: string, values: ModelOverride) => void
+  onClearOverride: (key: string) => void
 }) {
   // Only chat models can be the primary. A vision backend runs alongside one
   // and cannot drive the agent loop, so offering it here would be a trap.
+  const [editing, setEditing] = useState<string | null>(null)
   const chat = models.models.filter((model) => model.role === 'chat')
   const choices = chat.filter((model) => !model.hidden)
   const hidden = chat.filter((model) => model.hidden)
@@ -528,12 +541,13 @@ function ModelSettings({
           return (
             <div
               key={model.key}
-              className={`flex items-start gap-1 rounded border px-2 py-1.5 transition ${
+              className={`rounded border transition ${
                 primary
                   ? 'border-accent bg-raised'
                   : 'border-line hover:border-faint'
               }`}
             >
+            <div className="flex items-start gap-1 px-2 py-1.5">
             <button
               type="button"
               onClick={() => !primary && onSetPrimary(model.key)}
@@ -575,6 +589,19 @@ function ModelSettings({
                 </span>
               ))}
             </button>
+            {!model.remote && (
+              <button
+                type="button"
+                onClick={() =>
+                  setEditing(editing === model.key ? null : model.key)
+                }
+                disabled={busyKey === model.key}
+                className="shrink-0 rounded px-1 text-[10.5px] text-faint hover:text-ink disabled:opacity-50"
+                title="Context, threads and RAM for this model"
+              >
+                {editing === model.key ? 'close' : 'tune'}
+              </button>
+            )}
             {!primary && (
               <button
                 type="button"
@@ -585,6 +612,21 @@ function ModelSettings({
               >
                 hide
               </button>
+            )}
+            </div>
+            {editing === model.key && (
+              <ModelTuner
+                model={model}
+                busy={busyKey === model.key}
+                onApply={(values) => {
+                  onOverride(model.key, values)
+                  setEditing(null)
+                }}
+                onReset={() => {
+                  onClearOverride(model.key)
+                  setEditing(null)
+                }}
+              />
             )}
             </div>
           )
@@ -619,6 +661,164 @@ function ModelSettings({
         press Rescan. Context and RAM are read from the file&apos;s own header.
       </p>
     </div>
+  )
+}
+
+/**
+ * Context, threads and the RAM threshold for one model.
+ *
+ * Context gets live feedback because it is the field that can quietly make a
+ * model unstartable: the KV cache grows linearly with it, and on an 8 GB
+ * machine the difference between 4,096 and 32,768 is gigabytes. The cost per
+ * token is derived from what the server already reported for the current
+ * setting, so the estimate is the model's real arithmetic rather than a guess.
+ *
+ * Blank means "leave it alone" rather than "set it to zero" - only fields that
+ * were actually typed into are sent.
+ */
+function ModelTuner({
+  model,
+  busy,
+  onApply,
+  onReset,
+}: {
+  model: Model
+  busy: boolean
+  onApply: (values: ModelOverride) => void
+  onReset: () => void
+}) {
+  const [label, setLabel] = useState(model.label)
+  const [context, setContext] = useState(String(model.context))
+  const [threads, setThreads] = useState(String(model.threads))
+  const [minFree, setMinFree] = useState(String(model.min_free_mb))
+
+  // Bytes of KV cache per token, from the figures already measured for the
+  // context this model is running at now.
+  const perToken =
+    model.context > 0 && model.kv_cache_mb > 0
+      ? (model.kv_cache_mb * 1024 * 1024) / model.context
+      : 0
+  const wanted = Number(context)
+  const projected =
+    perToken > 0 && Number.isFinite(wanted) && wanted > 0
+      ? Math.round((perToken * wanted) / (1024 * 1024))
+      : 0
+  const overTrained =
+    model.training_context > 0 && wanted > model.training_context
+
+  function apply() {
+    const values: ModelOverride = {}
+    if (label.trim() && label.trim() !== model.label) values.label = label.trim()
+    if (context && Number(context) !== model.context)
+      values.context = Number(context)
+    if (threads && Number(threads) !== model.threads)
+      values.threads = Number(threads)
+    if (minFree && Number(minFree) !== model.min_free_mb)
+      values.min_free_mb = Number(minFree)
+    onApply(values)
+  }
+
+  return (
+    <div className="border-t border-line px-2 py-2">
+      <Field label="Name">
+        <input
+          value={label}
+          onChange={(event) => setLabel(event.target.value)}
+          className="w-full rounded border border-line bg-base px-1.5 py-0.5 text-[11px]"
+        />
+      </Field>
+
+      <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+        <Field label="Context">
+          <input
+            type="number"
+            value={context}
+            min={512}
+            step={512}
+            onChange={(event) => setContext(event.target.value)}
+            className="w-full rounded border border-line bg-base px-1.5 py-0.5 text-[11px]"
+          />
+        </Field>
+        <Field label="Threads">
+          <input
+            type="number"
+            value={threads}
+            min={1}
+            max={64}
+            onChange={(event) => setThreads(event.target.value)}
+            className="w-full rounded border border-line bg-base px-1.5 py-0.5 text-[11px]"
+          />
+        </Field>
+        <Field label="Needs MB">
+          <input
+            type="number"
+            value={minFree}
+            min={0}
+            step={50}
+            onChange={(event) => setMinFree(event.target.value)}
+            className="w-full rounded border border-line bg-base px-1.5 py-0.5 text-[11px]"
+          />
+        </Field>
+      </div>
+
+      <div className="mt-1.5 space-y-0.5 text-[10px] leading-snug text-faint">
+        {projected > 0 && (
+          <p>
+            KV cache at {wanted.toLocaleString()} tokens:{' '}
+            <span className={projected > 1024 ? 'text-danger' : ''}>
+              ~{projected.toLocaleString()} MB
+            </span>
+            {model.kv_cache_mb > 0 && (
+              <> (now ~{model.kv_cache_mb.toLocaleString()} MB)</>
+            )}
+          </p>
+        )}
+        {overTrained && (
+          <p className="text-danger">
+            Above the {model.training_context.toLocaleString()} tokens this
+            model was trained for.
+          </p>
+        )}
+        <p>Applies the next time this model starts.</p>
+      </div>
+
+      <div className="mt-2 flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={apply}
+          disabled={busy}
+          className="rounded border border-accent px-2 py-0.5 text-[11px] disabled:opacity-50"
+        >
+          {busy ? 'Saving…' : 'Apply'}
+        </button>
+        {model.customised && (
+          <button
+            type="button"
+            onClick={onReset}
+            disabled={busy}
+            className="rounded border border-line px-2 py-0.5 text-[11px] text-faint hover:text-ink disabled:opacity-50"
+            title="Back to the registry or discovered values"
+          >
+            Reset
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string
+  children: React.ReactNode
+}) {
+  return (
+    <label className="block">
+      <span className="mb-0.5 block text-[10px] text-faint">{label}</span>
+      {children}
+    </label>
   )
 }
 

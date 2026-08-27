@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import type {
   Conversation,
+  ModelOverride,
   ModelsResponse,
   OcrBackend,
   ToolsResponse,
@@ -99,6 +100,33 @@ export function useModels() {
     }
   }, [])
 
+  const override = useCallback(
+    async (key: string, values: ModelOverride) => {
+      setBusyKey(key)
+      setError(null)
+      try {
+        setData(await api.overrideModel(key, values))
+      } catch (failure) {
+        setError(failure instanceof Error ? failure.message : String(failure))
+      } finally {
+        setBusyKey(null)
+      }
+    },
+    [],
+  )
+
+  const clearOverride = useCallback(async (key: string) => {
+    setBusyKey(key)
+    setError(null)
+    try {
+      setData(await api.clearModelOverride(key))
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setBusyKey(null)
+    }
+  }, [])
+
   const load = useCallback(async (key: string) => {
     setBusyKey(key)
     setError(null)
@@ -135,6 +163,8 @@ export function useModels() {
     setPrimary,
     rescan,
     setHidden,
+    override,
+    clearOverride,
   }
 }
 

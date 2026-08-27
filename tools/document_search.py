@@ -95,19 +95,11 @@ class DocumentSearchTools:
                 name="search_documents",
                 category="documents",
                 description=(
-                    "Search the user's indexed local documents (notes, PDFs, "
-                    "files) by meaning and return the most relevant passages "
-                    "with their document name and page. "
-                    "Use this whenever the request refers to the user's own "
-                    "material - 'my notes', 'the report', 'according to the "
-                    "handbook', 'what does my document say about X' - or when "
-                    "answering needs specific facts that would be in their "
-                    "files rather than in general knowledge. "
-                    "Do NOT use it for general knowledge, arithmetic, code you "
-                    "can write yourself, or anything already answered in this "
-                    "conversation. Searching returns nothing useful when the "
-                    "topic was never indexed. "
-                    "Quote or cite the document and page when you use a result."
+                    "Search the user's own indexed documents by meaning. "
+                    "Use when the request refers to their material - 'my "
+                    "notes', 'the report', 'according to the handbook'. "
+                    "Do NOT use for general knowledge, arithmetic, or code you "
+                    "can write yourself. Cite the document and page."
                 ),
                 parameters={
                     "type": "object",
@@ -115,18 +107,13 @@ class DocumentSearchTools:
                         "query": {
                             "type": "string",
                             "description": (
-                                "What to look for, as a question or a "
-                                "description of the topic. Full sentences "
-                                "retrieve better than keywords."
+                                "What to look for. Full sentences retrieve "
+                                "better than keywords."
                             ),
                         },
                         "top_k": {
                             "type": "integer",
-                            "description": (
-                                "How many passages to return. Defaults to the "
-                                "configured value; raise it only when one "
-                                "passage is clearly not enough."
-                            ),
+                            "description": "How many passages to return.",
                         },
                     },
                     "required": ["query"],
@@ -137,10 +124,9 @@ class DocumentSearchTools:
                 name="list_documents",
                 category="documents",
                 description=(
-                    "List which local documents have been indexed and are "
-                    "searchable. Use it to answer 'what documents do you have' "
-                    "or to check whether a file the user mentions is available "
-                    "before searching for something that may not be there."
+                    "List which documents are indexed and searchable. Use to "
+                    "answer 'what documents do you have', or to check a file "
+                    "exists before searching it."
                 ),
                 parameters={"type": "object", "properties": {}, "required": []},
                 run=self.list_documents,
