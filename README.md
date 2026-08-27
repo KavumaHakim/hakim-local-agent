@@ -23,6 +23,7 @@ manager — the API adds transport, not a second implementation.
 5. [Project layout](#5-project-layout)
 6. [Architecture](#6-architecture)
 7. [Models and switching](#7-models-and-switching)
+7a. [Adding your own models](#7a-adding-your-own-models)
 8. [Auto-routing](#8-auto-routing)
 9. [Tools](#9-tools)
 10. [Chat history](#10-chat-history)
@@ -41,7 +42,8 @@ manager — the API adds transport, not a second implementation.
 
 - Chats with a local model served by `llama-server`
 - Calls tools when they help: exact arithmetic, reading files in a workspace
-- Manages four local models, holding only one in RAM at a time
+- Finds any model you drop in `weights/`, sizing it from its own GGUF header
+- Holds only one model in RAM at a time
 - Optionally picks the model itself based on how hard the prompt looks
 - Streams tokens, and the model's reasoning, as they generate
 - Shows what every tool call sent and received, so you can check its work
@@ -234,6 +236,9 @@ Hakim Local Agent/
 │   └── router.py        picks a model from the prompt
 │
 ├── models/
+│   ├── gguf.py          reads a GGUF header without loading the model
+│   ├── discovery.py     turns a folder of .gguf files into model entries
+│   ├── preferences.py   your choices, in data/models.local.json
 │   ├── qwen.py          llama-server client (the only module that speaks HTTP)
 │   ├── remote.py        hosted providers (the only module that leaves the box)
 │   ├── connectivity.py  cached "is there internet"
@@ -270,7 +275,8 @@ Hakim Local Agent/
 │   ├── http_tool.py     allowlisted HTTP requests (disabled by default)
 │   ├── git_tool.py      structured git, commits behind a second flag
 │   ├── memory_tool.py   the five memory tools
-│   ├── ocr_tool.py      GLM-OCR client (working)
+│   ├── ocr_tool.py      OCR, dispatching to one of two backends
+│   ├── tesseract.py     the Tesseract backend
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
@@ -469,6 +475,117 @@ own, so the CLI still runs with no API and no Node anywhere in sight.
 
 ---
 
+## 7a. Adding your own models
+
+Copy a `.gguf` into `weights/` and the app finds it. There is nothing to edit
+and no restart: press **Rescan folder** in Settings, or run `/rescan` in the
+CLI.
+
+```
+weights/
+├── Ministral-3-3B-Instruct-2512-Q4_K_M.gguf     declared in models.json
+├── Qwen3-8B-Q4_K_M.gguf                         declared in models.json
+└── Whatever-You-Dropped-In-Q4_K_M.gguf          found automatically
+```
+
+> It is `weights/`, not `models/`, for a boring reason: `models/` is the Python
+> package (`models/manager.py`, `models/qwen.py`). A data directory with that
+> name would shadow it on the import path. `models_dir` in `models.json` moves
+> it anywhere you like, including another drive.
+
+### What it works out for itself
+
+A hand-written registry entry supplies three things a dropped-in file does not,
+and all three are read from the model's own **GGUF header** rather than guessed:
+
+| | Where it comes from |
+|---|---|
+| **context** | the largest of 2048/4096/8192 whose KV cache fits a 420 MB budget |
+| **RAM threshold** | weights (file × 0.8, measured) + KV cache + 250 MB headroom |
+| **port** | the next free one from 8090, skipping anything already claimed |
+
+**Context is the one that matters.** Ministral is trained for 262,144 tokens
+and costs 79,872 bytes of KV cache per token — running it as trained would ask
+for **19.5 GB** of cache on an 8 GB machine. llama.cpp would try. So the
+context is a RAM decision, made from the header, and the settings panel says so
+rather than showing a number that looks arbitrary:
+
+```
+Running at 4,096 of the 262,144 tokens it was trained for;
+the full context would need 19,968 MB of KV cache.
+```
+
+The sizing is checked against the entries that were measured by hand. It
+reproduces GLM-OCR's 52,224 bytes/token exactly, puts GLM-OCR on 8192 and
+Ministral on 4096 — the contexts those entries use — and estimates the 8B at
+6,290 MB against the 6,200 MB someone measured for it.
+
+An `mmproj-*.gguf` is recognised as a vision projector, paired with its model,
+and never offered as something to talk to.
+
+### Three layers, in this order
+
+```
+models.json            curated, hand-tuned, in version control
+      ↓
+weights/               everything the folder holds that is not already claimed
+      ↓
+data/models.local.json your choices from the settings panel
+```
+
+Layering rather than replacing is the point. A measured `min_free_mb` in
+`models.json` beats anything inferred, so **a curated entry is never
+overwritten by a scan of the same file**. And `models.json` is now optional: a
+fresh clone with one `.gguf` and no registry works.
+
+### Choosing the primary
+
+On first launch, when there is more than one usable chat model and none has
+been chosen, you are asked once:
+
+```
+Which model should be the primary?
+
+  1. Ministral 3B      (2,047 MB, needs 1,900 MB free)
+  2. Qwen3.5 2B (M)    (1,023 MB, needs 1,150 MB free)
+  3. Qwen3.5 2B (XS)   (704 MB, needs 900 MB free)
+
+  This machine has 995 MB free right now.
+```
+
+One model is not a choice, so a single-model install is never interrupted.
+
+The answer goes in `data/models.local.json`, which is generated and
+git-ignored. **Delete it to return to first-launch state** — it is not
+load-bearing. Change it later in Settings, or with `/primary <key>`.
+
+Choosing a primary deliberately does **not** load it. Choosing costs nothing;
+loading costs minutes on this hardware, so they are two buttons.
+
+### What Settings can change
+
+Primary model, the router's two ends, and per-model `label`, `context`,
+`threads` and `min_free_mb`. Retuning applies the next time that model starts,
+because llama-server is given those on the command line.
+
+Deliberately **not** editable: `file`, `port` and `role`. Those decide what a
+model *is* and where it runs, and getting them wrong from a settings panel
+produces a model that will not start for reasons the panel cannot explain.
+
+Models you do not want in the picker can be hidden; the file stays where it is,
+and the primary cannot be hidden.
+
+```
+POST   /api/models/rescan          re-read the folder
+POST   /api/models/primary         {"key": "..."}
+POST   /api/models/router          {"fast": "...", "strong": "..."}
+PATCH  /api/models/{key}           retune one model
+DELETE /api/models/{key}/override  back to registry values
+POST   /api/models/{key}/hidden    {"hidden": true}
+```
+
+---
+
 ## 8. Auto-routing
 
 Off by default. Turn on with the sidebar toggle or `/auto`.
@@ -529,7 +646,7 @@ turn; guessing big wastes minutes on every simple question.
 | `remember`, `recall`, `search_memory`, `update_memory`, `forget_memory` | memory | **off by default** |
 | memory background processing | memory | needs a second flag |
 | `http_request` | http | **off by default** |
-| `ocr_image` | ocr | **works** — off until you run the OCR server |
+| `ocr_image` | ocr | **off by default** — Tesseract or the GLM-OCR model |
 | `search_documents`, `list_documents` | documents | **off by default** |
 
 Disabled tools are not registered at all — sending the model a definition it can
@@ -690,7 +807,7 @@ ERR  file:///C:/Windows/win.ini            Only http and https urls are allowed
 
 It is not a browser: no cookie jar, no session state, no JavaScript.
 
-### ocr — working
+### ocr — reading text out of images
 
 Reads text from images through a second llama-server running GLM-OCR.
 
@@ -698,6 +815,78 @@ Reads text from images through a second llama-server running GLM-OCR.
 field correct — reference `HK-4127-B`, recipient, crate count and signature — in
 **37 s** first run, ~28 s after. A four-row table came back with all figures
 intact.
+
+### Two backends, and how to choose
+
+`ocr_image` has two readers behind it. They are different trades rather than
+more and less of one thing, which is why this is a chooser in the Tools pane
+and not a quality setting:
+
+| | RAM | One page | Layout |
+|---|---|---|---|
+| **Tesseract** | ~50 MB | **0.5 s** (measured) | no — lines of text, in order |
+| **GLM-OCR** | ~1.4 GB | ~30 s | yes — tables, columns, handwriting |
+
+Measured here against Tesseract 5.5.3 and the images in `samples/`:
+`note.png` in 0.56 s and `table.png` in 0.44 s, both transcribed correctly.
+The table came back as plain rows with no structure, exactly as the row above
+says it will.
+
+On an 8 GB machine that gap decides most cases. "Read the text off this
+screenshot" does not need a vision model, and paying 1.4 GB and half a minute
+for it is a poor trade. A scanned page whose table you actually need is exactly
+what the model is for.
+
+`OCR_BACKEND` picks, and the Tools pane has a chooser. The model's own tool
+description changes with it, because the two behave differently enough that one
+description would be a lie for whichever is running:
+
+> **Tesseract** — "…it transcribes text line by line. It does not follow
+> instructions and does not preserve tables or columns, so do not ask it to
+> extract a particular field."
+>
+> **GLM-OCR** — "…it understands layout. Use for photos, scans, tables and
+> handwriting, and say what to extract."
+
+A `prompt` sent to Tesseract comes back with a `note` saying it was ignored,
+rather than being silently dropped.
+
+Everything above the backend is shared: the same workspace jail, the same
+extension allowlist, the same size cap.
+
+#### Installing Tesseract
+
+```
+scoop install tesseract
+```
+
+or `winget install UB-Mannheim.TesseractOCR`, or the installer from
+[UB-Mannheim](https://github.com/UB-Mannheim/tesseract/wiki). If it ends up
+somewhere unusual, `TESSERACT_CMD` takes a full path — and the code already
+checks `C:\Program Files\Tesseract-OCR\` before giving up, because that is
+where the installer puts it and it does not touch PATH.
+
+> **Scoop's package ships no language data.** The binary installs, but
+> `--list-langs` returns nothing and every read fails with "Could not
+> initialize tesseract". The full `tesseract-languages` package is over a
+> gigabyte; one file is enough:
+>
+> ```bash
+> curl -L -o "$env:USERPROFILE\scooppps	esseract\current	essdata\eng.traineddata" https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata
+> ```
+>
+> That is 4 MB, and the error message names the missing pack rather than
+> failing vaguely. The UB-Mannheim installer bundles English already.
+
+`TESSERACT_LANG` selects a language pack (`eng` by default) and a missing one
+is reported as a missing pack rather than a generic failure. `TESSERACT_PSM`
+is page segmentation: 3 is automatic, and 6 — "a single uniform block" — is
+what to try when 3 scrambles a simple image.
+
+Tesseract is called as a subprocess rather than through `pytesseract`. The
+wrapper's whole job is to build an argument list and read stdout, and this
+project already starts and supervises `llama-server` the same way; a dependency
+to avoid twenty lines would not pay for itself.
 
 #### The two files it needs
 
@@ -1282,6 +1471,11 @@ a connection failure.
 | `AGENT_HTTP_TIMEOUT` | `20` | Seconds |
 | `AGENT_HTTP_MAX_BYTES` | `100000` | Response size cap |
 | `AGENT_HTTP_ALLOW_WRITES` | `0` | Permit POST/PUT/PATCH/DELETE |
+| `OCR_BACKEND` | `model` | `tesseract` or `model` |
+| `TESSERACT_CMD` | *(found)* | Full path to tesseract.exe when it is not on PATH |
+| `TESSERACT_LANG` | `eng` | Language pack |
+| `TESSERACT_PSM` | `3` | Page segmentation; 6 for a single block |
+| `OCR_TIMEOUT` | `120` | Seconds, both backends |
 | `AGENT_ENABLE_MEMORY_PROCESSING` | `0` | Let the agent swap models to process memory when idle |
 | `MEMORY_AUX_MODEL` | `tiny` | The memory worker, from models.json |
 | `MEMORY_STORE` | `data/memory` | Memory vector index |

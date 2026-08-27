@@ -226,10 +226,14 @@ def build_default_registry(config: Config) -> tuple[ToolRegistry, list[DisabledT
             DisabledTool(
                 category="ocr",
                 reason=(
-                    "off by default. GLM-OCR-Q8_0.gguf holds only the language "
-                    "half; the vision projector (mmproj) is a separate file "
-                    "and is not present, so the OCR server cannot start. "
-                    "Set OCR_ENABLED=1 once you have it."
+                    "off by default - reads text out of images. Set "
+                    "OCR_ENABLED=1. Two backends, chosen with OCR_BACKEND: "
+                    "'tesseract' (default) is a ~50 MB binary that transcribes "
+                    "a page in under a second and needs Tesseract installed; "
+                    "'model' is the GLM-OCR vision model, which understands "
+                    "tables and handwriting but costs ~1.4 GB and ~30 s a page "
+                    "and needs its server running with both the model and its "
+                    "mmproj projector file."
                 ),
             )
         )

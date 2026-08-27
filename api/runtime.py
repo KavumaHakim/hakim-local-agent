@@ -178,6 +178,18 @@ class Runtime:
                 if other.depends_on == flag_id:
                     self._overrides[other.field] = False
 
+    def set_ocr_backend(self, backend: str) -> None:
+        """Choose the OCR reader for this process.
+
+        The tool switches are booleans and share one mechanism; this is a
+        string, so it gets its own setter rather than bending that one. Like
+        the switches it lives in memory only - a restart returns to whatever
+        OCR_BACKEND says.
+        """
+        if backend not in ("tesseract", "model"):
+            raise ValueError(f"Unknown OCR backend {backend!r}.")
+        self._overrides["ocr_backend"] = backend
+
     def effective_config(self) -> Config:
         """The config with the UI's switches applied."""
         if not self._overrides:

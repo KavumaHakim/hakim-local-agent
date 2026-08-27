@@ -8,7 +8,12 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
-import type { Conversation, ModelsResponse, ToolsResponse } from '../lib/types'
+import type {
+  Conversation,
+  ModelsResponse,
+  OcrBackend,
+  ToolsResponse,
+} from '../lib/types'
 
 /** A ticking count of seconds since `since`, or 0 when it is null. */
 export function useElapsed(since: number | null): number {
@@ -48,6 +53,52 @@ export function useModels() {
     void refresh()
   }, [refresh])
 
+  /**
+   * Settings that change the catalogue rather than what is running.
+   *
+   * All of them return the fresh snapshot, so one round trip both applies the
+   * change and refreshes the list - there is no second fetch to get out of
+   * step with.
+   */
+  const setPrimary = useCallback(async (key: string) => {
+    setBusyKey(key)
+    setError(null)
+    try {
+      setData(await api.setPrimaryModel(key))
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setBusyKey(null)
+    }
+  }, [])
+
+  const rescan = useCallback(async (): Promise<string[]> => {
+    setBusyKey('__rescan__')
+    setError(null)
+    try {
+      const result = await api.rescanModels()
+      setData(result.models)
+      return result.added
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+      return []
+    } finally {
+      setBusyKey(null)
+    }
+  }, [])
+
+  const setHidden = useCallback(async (key: string, hidden: boolean) => {
+    setBusyKey(key)
+    setError(null)
+    try {
+      setData(await api.setModelHidden(key, hidden))
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setBusyKey(null)
+    }
+  }, [])
+
   const load = useCallback(async (key: string) => {
     setBusyKey(key)
     setError(null)
@@ -74,7 +125,17 @@ export function useModels() {
     }
   }, [])
 
-  return { models: data, busyKey, error, refresh, load, unload }
+  return {
+    models: data,
+    busyKey,
+    error,
+    refresh,
+    load,
+    unload,
+    setPrimary,
+    rescan,
+    setHidden,
+  }
 }
 
 export function useConversations() {
@@ -143,7 +204,19 @@ export function useTools() {
     }
   }, [])
 
-  return { data, toggle, pending, error }
+  const setOcrBackend = useCallback(async (backend: OcrBackend) => {
+    setPending('ocr-backend')
+    setError(null)
+    try {
+      setData(await api.setOcrBackend(backend))
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setPending(null)
+    }
+  }, [])
+
+  return { data, toggle, pending, error, setOcrBackend }
 }
 
 /** Fires `handler` on a key chord, e.g. ctrl/cmd+K. */

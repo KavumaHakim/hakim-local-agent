@@ -216,8 +216,15 @@ export default function App() {
             if (id === chat.conversationId) newConversation()
           }}
           models={models.models}
+          modelBusyKey={models.busyKey}
+          onSetPrimary={(key) => void models.setPrimary(key)}
+          onRescanModels={() => void models.rescan()}
+          onSetModelHidden={(key, hidden) =>
+            void models.setHidden(key, hidden)
+          }
           tools={tools.data}
           toolPending={tools.pending}
+          onSetOcrBackend={(backend) => void tools.setOcrBackend(backend)}
           toolError={tools.error}
           onToggleTool={(id, enabled) => void tools.toggle(id, enabled)}
           autoRoute={autoRoute}

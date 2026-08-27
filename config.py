@@ -102,6 +102,29 @@ class Config:
     # server's request format has not been verified. See tools/ocr_tool.py.
     ocr_enabled: bool = False
     ocr_max_image_bytes: int = 10_000_000
+    # Which reader the ocr_image tool uses.
+    #
+    #   "tesseract" - a ~50 MB binary, under a second a page, transcribes
+    #                 text line by line. Needs Tesseract installed.
+    #   "model"     - the GLM-OCR vision model: ~1.4 GB and ~30 s a page, but
+    #                 it understands tables, columns and handwriting.
+    #
+    # "model" is the default only because it is what was here first and its
+    # weights are already on disk: changing the default would silently break a
+    # working setup for anyone without Tesseract installed. On this hardware
+    # Tesseract is usually the better trade - set OCR_BACKEND=tesseract once
+    # you have it. Neither is strictly better, which is why it is a switch.
+    ocr_backend: str = "model"
+    # Empty means "find it": PATH first, then the Windows installer's own
+    # locations. Set it to a full path when Tesseract is somewhere unusual.
+    tesseract_cmd: str = ""
+    tesseract_lang: str = "eng"
+    # Page segmentation mode. 3 is fully automatic; 6 ("a single uniform
+    # block") is what to try when 3 scrambles a simple image.
+    tesseract_psm: int = 3
+    # Shared by both backends, but they are worlds apart: Tesseract should
+    # finish in under a second, the model takes tens of seconds.
+    ocr_timeout: float = 120.0
     ocr_allowed_extensions: tuple[str, ...] = (
         ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
     )
@@ -289,6 +312,11 @@ class Config:
             ocr_max_image_bytes=_env_int(
                 "OCR_MAX_IMAGE_BYTES", defaults.ocr_max_image_bytes
             ),
+            ocr_backend=_env_str("OCR_BACKEND", defaults.ocr_backend).lower(),
+            tesseract_cmd=_env_str("TESSERACT_CMD", defaults.tesseract_cmd),
+            tesseract_lang=_env_str("TESSERACT_LANG", defaults.tesseract_lang),
+            tesseract_psm=_env_int("TESSERACT_PSM", defaults.tesseract_psm),
+            ocr_timeout=_env_float("OCR_TIMEOUT", defaults.ocr_timeout),
             request_timeout=_env_float("AGENT_REQUEST_TIMEOUT", defaults.request_timeout),
             connect_timeout=_env_float("AGENT_CONNECT_TIMEOUT", defaults.connect_timeout),
             max_history_messages=_env_int("AGENT_MAX_HISTORY", defaults.max_history_messages),

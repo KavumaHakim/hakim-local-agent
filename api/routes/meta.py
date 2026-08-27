@@ -28,6 +28,7 @@ from models.manager import ModelManagerError, ModelState
 
 from api.schemas import (
     DisabledToolOut,
+    OcrBackendRequest,
     HealthOut,
     SwitchOut,
     ToggleRequest,
@@ -47,6 +48,74 @@ def _ocr_running(runtime: Runtime) -> bool:
         return runtime.manager.status(OCR_MODEL_KEY).state is ModelState.READY
     except (ModelManagerError, KeyError):
         return False
+
+
+def _ocr_workable(runtime: Runtime, config) -> bool:
+    """Whether OCR would actually work right now.
+
+    The two backends need different things, and reporting the flag alone would
+    show a switch that is on while every attempt to use it fails. Tesseract
+    needs a binary on disk; the model needs a server answering.
+    """
+    if config.ocr_backend == "tesseract":
+        from tools.tesseract import TesseractBackend
+
+        return TesseractBackend(command=config.tesseract_cmd).available()
+    return _ocr_running(runtime)
+
+
+def _ocr_status(runtime: Runtime, config) -> tuple[bool, str]:
+    """Whether the selected OCR backend can run, and what to do if not.
+
+    The two need entirely different things - a binary on disk against a server
+    answering - so the hint names the specific missing thing rather than
+    saying "OCR is unavailable".
+    """
+    if config.ocr_backend == "tesseract":
+        from tools.tesseract import TesseractBackend
+
+        backend = TesseractBackend(command=config.tesseract_cmd)
+        if backend.available():
+            return True, ""
+        return False, backend.missing_message()
+
+    if _ocr_running(runtime):
+        return True, ""
+    return False, (
+        f"The GLM-OCR server is not running on {config.ocr_url}. Start it, or "
+        f"switch to Tesseract, which needs no server and no GPU."
+    )
+
+
+@router.post("/ocr-backend", response_model=ToolsOut)
+def set_ocr_backend(
+    body: OcrBackendRequest, runtime: Runtime = Depends(get_runtime)
+):
+    """Choose which reader ocr_image uses.
+
+    Refused mid-turn for the same reason the tool switches are: the registry
+    is built when a turn starts, and changing the tool's description underneath
+    one would either do nothing or change what the model was told halfway
+    through.
+    """
+    if runtime.queue.busy():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "A turn is running. The OCR backend applies from the next turn.",
+        )
+
+    if body.backend == "tesseract":
+        from tools.tesseract import TesseractBackend
+
+        backend = TesseractBackend(
+            command=runtime.effective_config().tesseract_cmd
+        )
+        if not backend.available():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, backend.missing_message()
+            )
+    runtime.set_ocr_backend(body.backend)
+    return _tools_snapshot(runtime)
 
 
 def _tools_snapshot(runtime: Runtime) -> ToolsOut:
@@ -87,7 +156,7 @@ def _tools_snapshot(runtime: Runtime) -> ToolsOut:
         # attempt to use it fails.
         enabled = bool(getattr(config, flag.field))
         if flag.id == OCR_MODEL_KEY:
-            enabled = enabled and _ocr_running(runtime)
+            enabled = enabled and _ocr_workable(runtime, config)
 
         switches.append(
             SwitchOut(
@@ -101,11 +170,15 @@ def _tools_snapshot(runtime: Runtime) -> ToolsOut:
             )
         )
 
+    ready, hint = _ocr_status(runtime, config)
     return ToolsOut(
         tools=tools,
         disabled=[DisabledToolOut(**vars(item)) for item in disabled],
         switches=switches,
         workspace=str(config.workspace),
+        ocr_backend=config.ocr_backend,
+        ocr_ready=ready,
+        ocr_hint=hint,
     )
 
 
@@ -146,13 +219,28 @@ def set_tool(
     # the tool, so one toggle does both rather than leaving someone to discover
     # the second half from an error message.
     if flag_id == "ocr":
-        try:
-            if body.enabled:
-                runtime.ensure_model(OCR_MODEL_KEY)
-            else:
-                runtime.manager.stop(OCR_MODEL_KEY)
-        except ModelManagerError as exc:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+        config = runtime.effective_config()
+        if config.ocr_backend == "tesseract":
+            # Nothing to start: Tesseract is a binary invoked per image, not a
+            # server. Refusing early is better than switching the tool on and
+            # having it fail on the first attachment.
+            from tools.tesseract import TesseractBackend
+
+            backend = TesseractBackend(command=config.tesseract_cmd)
+            if body.enabled and not backend.available():
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, backend.missing_message()
+                )
+        else:
+            try:
+                if body.enabled:
+                    runtime.ensure_model(OCR_MODEL_KEY)
+                else:
+                    runtime.manager.stop(OCR_MODEL_KEY)
+            except ModelManagerError as exc:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, str(exc)
+                ) from None
 
     flag = FLAGS_BY_ID[flag_id]
     if body.enabled and flag.depends_on:

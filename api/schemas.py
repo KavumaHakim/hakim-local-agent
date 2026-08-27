@@ -127,6 +127,21 @@ class ModelOut(BaseModel):
     # the UI needs to say which of the two is wrong.
     has_key: bool = True
     usable: bool = True
+    # True when this model was found in the models folder rather than declared
+    # in models.json. Shown, because a discovered model's context and RAM
+    # figures are inferred from its header and may want retuning.
+    discovered: bool = False
+    # Hidden models stay in the catalogue so they can be un-hidden, but are
+    # not offered to the model picker or the router.
+    hidden: bool = False
+    # Set when a value came from the settings panel rather than the registry.
+    customised: bool = False
+    file_mb: int = 0
+    # From the GGUF header: what the model was trained for, against what it is
+    # actually being run at. A large gap is the interesting case.
+    training_context: int = 0
+    kv_cache_mb: int = 0
+    notes: list[str] = []
 
 
 class ModelsOut(BaseModel):
@@ -140,6 +155,54 @@ class ModelsOut(BaseModel):
     available_ram_mb: int | None = None
     # Whether hosted models can be reached at all. Cached, so this is cheap.
     online: bool = False
+    # Where to drop a .gguf file for it to be picked up.
+    models_dir: str = ""
+    # True when several chat models exist and no primary has been chosen yet.
+    # The UI shows the first-launch picker on this; a single-model install
+    # never sets it, because one model is not a choice.
+    setup_required: bool = False
+
+
+# --- model settings ---
+
+
+class ModelPrimaryRequest(BaseModel):
+    key: str = Field(min_length=1)
+
+
+class ModelRouterRequest(BaseModel):
+    fast: str = ""
+    strong: str = ""
+
+
+class ModelOverrideRequest(BaseModel):
+    """Retune one model. Every field is optional; only what is sent changes.
+
+    Deliberately no `file`, `port` or `role`: those decide what a model *is*
+    and where it runs, and getting them wrong from a settings panel produces a
+    model that will not start for reasons the panel cannot explain.
+    """
+
+    label: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=200)
+    context: int | None = Field(default=None, ge=512, le=131_072)
+    threads: int | None = Field(default=None, ge=1, le=64)
+    min_free_mb: int | None = Field(default=None, ge=0, le=128_000)
+
+
+class ModelHideRequest(BaseModel):
+    hidden: bool = True
+
+
+class RescanOut(BaseModel):
+    """What a rescan of the models folder found."""
+
+    success: bool = True
+    models_dir: str
+    # Keys that were not in the catalogue before this scan.
+    added: list[str] = []
+    total: int = 0
+    models: ModelsOut
 
 
 # --- tools ---
@@ -175,6 +238,12 @@ class SwitchOut(BaseModel):
     risk: str = ''
 
 
+class OcrBackendRequest(BaseModel):
+    """Choose between Tesseract and the GLM-OCR model."""
+
+    backend: str = Field(pattern="^(tesseract|model)$")
+
+
 class ToggleRequest(BaseModel):
     enabled: bool
 
@@ -191,6 +260,13 @@ class ToolsOut(BaseModel):
     disabled: list[DisabledToolOut]
     switches: list[SwitchOut] = []
     workspace: str
+    # Which reader ocr_image uses: "tesseract" or "model". They behave
+    # differently enough that the UI names the active one rather than showing
+    # a single "OCR" switch that means two things.
+    ocr_backend: str = "model"
+    # Whether that backend could run right now, and why not.
+    ocr_ready: bool = False
+    ocr_hint: str = ""
 
 
 # --- document search (RAG) ---

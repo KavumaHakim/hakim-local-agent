@@ -10,7 +10,10 @@ import type {
   Conversation,
   ConversationDetail,
   Health,
+  ModelOverride,
   ModelsResponse,
+  RescanResponse,
+  OcrBackend,
   ToolsResponse,
   UploadResult,
 } from './types'
@@ -94,7 +97,49 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
+  /** Choose which reader ocr_image uses. Applies from the next turn. */
+  setOcrBackend: (backend: OcrBackend) =>
+    request<ToolsResponse>('/ocr-backend', {
+      method: 'POST',
+      body: JSON.stringify({ backend }),
+    }),
+
   models: () => request<ModelsResponse>('/models'),
+
+  /** Re-read the models folder. Cheap: headers only, never a tensor. */
+  rescanModels: () =>
+    request<RescanResponse>('/models/rescan', { method: 'POST' }),
+
+  /** Choose the model everything defaults to. Does not load it. */
+  setPrimaryModel: (key: string) =>
+    request<ModelsResponse>('/models/primary', {
+      method: 'POST',
+      body: JSON.stringify({ key }),
+    }),
+
+  setRouter: (fast: string, strong: string) =>
+    request<ModelsResponse>('/models/router', {
+      method: 'POST',
+      body: JSON.stringify({ fast, strong }),
+    }),
+
+  /** Retune one model. Applies the next time it starts. */
+  overrideModel: (key: string, values: ModelOverride) =>
+    request<ModelsResponse>(`/models/${encodeURIComponent(key)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(values),
+    }),
+
+  clearModelOverride: (key: string) =>
+    request<ModelsResponse>(`/models/${encodeURIComponent(key)}/override`, {
+      method: 'DELETE',
+    }),
+
+  setModelHidden: (key: string, hidden: boolean) =>
+    request<ModelsResponse>(`/models/${encodeURIComponent(key)}/hidden`, {
+      method: 'POST',
+      body: JSON.stringify({ hidden }),
+    }),
 
   loadModel: (key: string) =>
     request<ModelsResponse>(`/models/${encodeURIComponent(key)}/load`, {

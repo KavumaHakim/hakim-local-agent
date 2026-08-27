@@ -126,21 +126,34 @@ async def upload_image(
     # accepts - it resolves paths against the jail, not the filesystem root.
     relative = target.relative_to(Path(config.workspace)).as_posix()
 
+    # The two backends need entirely different things, so the hint has to name
+    # the one that is actually selected. Reporting "start the GLM-OCR server"
+    # to someone using Tesseract sends them to fix something irrelevant.
     enabled = config.ocr_enabled
-    reachable = _ocr_server_reachable(config.ocr_url) if enabled else False
+    reachable = False
     if not enabled:
         hint = (
             "The OCR tool is off, so the agent cannot read this yet. Turn on "
             "OCR in the sidebar."
         )
-    elif not reachable:
-        hint = (
-            f"OCR is on but nothing is listening on {config.ocr_url}. Start "
-            f"the GLM-OCR server first - it runs separately from the chat "
-            f"models and needs both the model and its mmproj file."
-        )
+    elif config.ocr_backend == "tesseract":
+        from tools.tesseract import TesseractBackend
+
+        backend = TesseractBackend(command=config.tesseract_cmd)
+        reachable = backend.available()
+        hint = "" if reachable else backend.missing_message()
     else:
-        hint = ""
+        reachable = _ocr_server_reachable(config.ocr_url)
+        hint = (
+            ""
+            if reachable
+            else (
+                f"OCR is on but nothing is listening on {config.ocr_url}. "
+                f"Start the GLM-OCR server - it runs separately from the chat "
+                f"models and needs both the model and its mmproj file - or "
+                f"switch the OCR reader to Tesseract, which needs no server."
+            )
+        )
 
     return UploadOut(
         path=relative,
