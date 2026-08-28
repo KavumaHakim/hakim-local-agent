@@ -160,6 +160,50 @@ writes anything. This is the reason tool descriptions here are terse and the
 reason tools are off by default — it is not caution about capability, it is
 that each one has a measurable price.
 
+### Hitting the context window
+
+A 4,096-token model has less room than it sounds. The system prompt and tool
+schemas take about 1,080 tokens before anything happens, leaving roughly 3,000
+for the question, the conversation and the answer.
+
+Two things used to overrun that, and both are now bounded against the model's
+own context rather than a fixed number:
+
+| | limit |
+|---|---|
+| one tool result | `AGENT_TOOL_RESULT_SHARE`, a quarter of the context |
+| the conversation replayed | `AGENT_HISTORY_SHARE`, half of it |
+
+On a 4,096-token model that is 3,348 and 6,696 characters. A model with a
+larger window gets proportionally more without editing anything.
+
+This matters most for **images**. A dense scanned page OCRs to six or seven
+thousand characters, which on its own is nearly twice what a 4,096-token model
+can spare - so a single image used to fail the whole turn rather than part of
+one result. It is now cut, and the cut is announced in the result the model
+reads:
+
+```json
+{"text": "...", "characters": 6930,
+ "truncated": "'text' was cut: 3,931 of 6,930 characters are not shown,
+               because the whole result does not fit this model's context.
+               Say so rather than treating this as complete."}
+```
+
+The wording is deliberate. A model handed the first half of a page with no
+indication summarises it as though it were the whole page, which is worse than
+an error - it is a confident wrong answer.
+
+History is trimmed by size as well as by message count, and trimmed **before**
+the request rather than after it. `max_history_messages` counts messages,
+which says nothing about how much context they occupy: sixty short exchanges
+fit comfortably and three pages of OCR do not.
+
+If you are losing text you need, the fix is more context rather than a bigger
+share of the same context. Raise the model's `context` in Settings - the tuner
+shows what the KV cache will cost before you commit to it - or use a model
+with a larger window for that work.
+
 ### So, to make it faster
 
 1. **Turn off tools you are not using.** Biggest single lever, and it is a

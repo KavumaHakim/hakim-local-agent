@@ -274,3 +274,106 @@ class MalformedResponseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HistorySizeTrimmingTests(unittest.TestCase):
+    """History is trimmed by size as well as by message count.
+
+    Counting messages says nothing about how much context they occupy: sixty
+    short exchanges fit a 4,096-token window and three pages of OCR do not.
+    Without a size limit a few large tool results overflow the window and the
+    turn fails outright.
+    """
+
+    def agent(self, **overrides):
+        settings = dict(model_context=4096, max_iterations=5)
+        settings.update(overrides)
+        config = Config(**settings)
+        client = FakeQwenClient([text_message("ok")], repeat_last=True)
+        return Agent(client, config, ToolRegistry([CALCULATOR_TOOL])), client, config
+
+    def test_a_long_conversation_is_cut_to_the_size_budget(self):
+        agent, client, config = self.agent()
+        for n in range(12):
+            agent.send("x" * 2000)
+
+        sent = client.calls[-1]
+        conversation = sum(len(str(m.get("content", ""))) for m in sent[1:])
+        self.assertLessEqual(conversation, config.max_history_chars)
+
+    def test_the_newest_user_message_always_survives(self):
+        agent, client, _ = self.agent()
+        for n in range(12):
+            agent.send(f"message {n} " + "x" * 3000)
+
+        sent = client.calls[-1]
+        self.assertIn("message 11", sent[-2]["content"] + sent[-1]["content"])
+
+    def test_a_single_oversized_message_is_not_discarded(self):
+        # Nothing safe is left to drop, so it is sent as it is rather than
+        # leaving the model with no question at all.
+        agent, client, config = self.agent()
+        agent.send("y" * (config.max_history_chars * 3))
+
+        sent = client.calls[-1]
+        self.assertEqual(sent[-1]["role"], "user")
+        self.assertGreater(len(sent[-1]["content"]), config.max_history_chars)
+
+    def test_the_message_count_limit_still_applies(self):
+        agent, client, _ = self.agent(max_history_messages=4)
+        for n in range(10):
+            agent.send("short")
+
+        self.assertLessEqual(len(client.calls[-1]) - 1, 5)
+
+    def test_a_bigger_context_keeps_more_history(self):
+        small, small_client, _ = self.agent(model_context=4096)
+        large, large_client, _ = self.agent(model_context=32768)
+        for n in range(12):
+            small.send("x" * 2000)
+            large.send("x" * 2000)
+
+        self.assertGreater(len(large_client.calls[-1]), len(small_client.calls[-1]))
+
+    def test_trimming_never_orphans_a_tool_result(self):
+        # A tool message whose assistant tool_calls were dropped is rejected by
+        # the chat template, so a cut may only land on a user message.
+        agent, client, _ = self.agent()
+        client._responses = [
+            tool_call_message(("calculate", {"expression": "2+2"})),
+            text_message("4"),
+        ]
+        for n in range(8):
+            client._responses = [
+                tool_call_message(("calculate", {"expression": "2+2"})),
+                text_message("4"),
+            ]
+            agent.send("compute " + "x" * 1500)
+
+        for sent in client.calls:
+            roles = [m["role"] for m in sent]
+            for index, role in enumerate(roles):
+                if role == "tool":
+                    # Every tool message has an assistant before it.
+                    self.assertIn("assistant", roles[:index])
+
+    def test_a_capped_tool_result_reaches_the_model_cut(self):
+        config = Config(model_context=4096)
+        big = Tool(
+            name="huge",
+            category="test",
+            description="Returns a lot.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            run=lambda **_: {"success": True, "text": "z" * 40_000},
+        )
+        client = FakeQwenClient(
+            [tool_call_message(("huge", {})), text_message("done")]
+        )
+        agent = Agent(client, config, ToolRegistry([big]))
+        agent.send("go")
+
+        tool_message = [m for m in client.calls[1] if m["role"] == "tool"][0]
+        self.assertLessEqual(
+            len(tool_message["content"]), config.max_tool_result_chars
+        )
+        self.assertIn("truncated", tool_message["content"])

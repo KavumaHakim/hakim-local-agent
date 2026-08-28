@@ -57,6 +57,11 @@ class Tool:
         }
 
 
+# Characters set aside for the truncation note, so adding it cannot push a
+# trimmed result back over the limit.
+_NOTE_RESERVE = 260
+
+
 @dataclass(frozen=True)
 class ToolResult:
     """The outcome of one tool call."""
@@ -71,10 +76,76 @@ class ToolResult:
     @property
     def content(self) -> str:
         """JSON text appended to the conversation as the tool message."""
+        return self.content_within(0)
+
+    def content_within(self, limit: int) -> str:
+        """The same JSON, cut to `limit` characters. 0 means no limit.
+
+        Needed because a tool result goes straight into the model's context and
+        some of them are unbounded: a page of OCR, or a file read. On a model
+        with a 4,096-token window - about 9,800 characters once the system
+        prompt and the tool schemas are paid for - one dense page overflows it
+        and the whole turn fails.
+
+        The cut is made inside the payload's longest string rather than on the
+        serialised text, so the result stays valid JSON. And it is *announced*:
+        a truncated field is replaced with a marker saying how much is missing,
+        because a model handed the first half of a page with no indication
+        will summarise it as though it were the whole thing.
+        """
+        payload = self.payload
         try:
-            return json.dumps(self.payload, ensure_ascii=False, default=str)
+            text = json.dumps(payload, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
             return json.dumps({"success": False, "error": "Unserialisable result"})
+
+        if limit <= 0 or len(text) <= limit:
+            return text
+
+        payload = dict(payload)
+        # Longest first: cutting the biggest field usually gets under the
+        # limit in one step and leaves the small metadata fields intact.
+        fields = sorted(
+            (key for key, value in payload.items() if isinstance(value, str)),
+            key=lambda key: len(payload[key]),
+            reverse=True,
+        )
+
+        for key in fields:
+            if len(text) <= limit:
+                break
+            original = payload[key]
+
+            # How many characters everything *except* this field costs, with
+            # room set aside for the note that is about to be added. Measuring
+            # it rather than subtracting an estimate is what stops the note
+            # pushing the result back over the limit - which, when the first
+            # attempt at this got it wrong, threw the text away entirely.
+            probe = dict(payload)
+            probe[key] = ""
+            probe.pop("truncated", None)
+            try:
+                fixed = len(json.dumps(probe, ensure_ascii=False, default=str))
+            except (TypeError, ValueError):
+                break
+
+            keep = max(0, min(len(original), limit - fixed - _NOTE_RESERVE))
+            if keep >= len(original):
+                continue
+
+            payload[key] = original[:keep]
+            payload["truncated"] = (
+                f"{key!r} was cut: {len(original) - keep:,} of "
+                f"{len(original):,} characters are not shown, because the "
+                f"whole result does not fit this model's context. Say so "
+                f"rather than treating this as complete."
+            )
+            try:
+                text = json.dumps(payload, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                break
+
+        return text
 
     def summary(self, limit: int = 100) -> str:
         """One-line rendering for the CLI."""

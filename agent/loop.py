@@ -108,6 +108,11 @@ class Agent:
         definitions = self._tools.get_tool_definitions()
 
         for _ in range(max(1, self._config.max_iterations)):
+            # Trim before sending, not after. Trimming afterwards leaves the
+            # history within budget but says nothing about the request just
+            # made - the newly appended message is exactly what pushes it over,
+            # and that request is the one that fails.
+            self._trim_history()
             message = self._chat(definitions, on_token, on_reasoning)
 
             try:
@@ -129,7 +134,13 @@ class Agent:
                         # Ties the result back to the call the model made.
                         "tool_call_id": call.id,
                         "name": call.name,
-                        "content": result.content,
+                        # Capped against the model's context. Uncapped, a
+                        # page of OCR or a large file read overflows the
+                        # window and loses the whole turn rather than part of
+                        # one result.
+                        "content": result.content_within(
+                            self._config.max_tool_result_chars
+                        ),
                     }
                 )
                 if observer is not None:
@@ -214,15 +225,41 @@ class Agent:
         which the chat template would reject.
         """
         limit = self._config.max_history_messages
-        if limit <= 0 or len(self._history) <= limit:
-            return
+        budget = self._config.max_history_chars
 
-        excess = len(self._history) - limit
-        for index in range(excess, len(self._history)):
-            if self._history[index].get("role") == "user":
-                del self._history[:index]
+        while self._history:
+            too_many = limit > 0 and len(self._history) > limit
+            too_large = budget > 0 and self._history_chars() > budget
+            if not (too_many or too_large):
                 return
-        # No safe cut point found; keep the history as it is.
+
+            # Search from 1, never 0: a cut of zero would make no progress and
+            # this would spin. It also means the most recent user message can
+            # never be dropped, which is the one thing the turn cannot lose.
+            cut = next(
+                (
+                    index
+                    for index in range(1, len(self._history))
+                    if self._history[index].get("role") == "user"
+                ),
+                None,
+            )
+            if cut is None:
+                # Nothing safe left to drop. Cutting anywhere else would orphan
+                # a tool result from the assistant message that called it, and
+                # the chat template rejects that outright.
+                return
+            del self._history[:cut]
+
+    def _history_chars(self) -> int:
+        """Roughly what the conversation costs, for the size limit.
+
+        Characters rather than tokens, because counting tokens means loading a
+        tokeniser and this runs on every round of every turn.
+        """
+        return sum(
+            len(str(message.get("content", ""))) for message in self._history
+        )
 
 
 def summarize_arguments(arguments: dict[str, Any], limit: int = 80) -> str:

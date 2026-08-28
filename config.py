@@ -141,6 +141,24 @@ class Config:
     # always preserved on top of this. Set to 0 to disable trimming.
     max_history_messages: int = 60
 
+    # --- Tool results in the model's context ---
+    #
+    # A tool result goes straight into the context, and several of them are
+    # unbounded: a page of OCR, a file read, a long directory listing. On a
+    # 4096-token model the system prompt and tool schemas already cost about
+    # 1,080 tokens, so one dense page overflows the window and the turn fails
+    # outright - which is what "I keep hitting the context window" looks like.
+    #
+    # The cap is a share of the model's own context rather than a fixed number,
+    # so a bigger model is allowed bigger results without editing anything.
+    model_context: int = 4096
+    tool_result_share: float = 0.25
+    # And the share the conversation itself may take. `max_history_messages`
+    # counts messages, which says nothing about size: sixty short exchanges fit
+    # a 4096-token window comfortably and three pages of OCR do not. Both
+    # limits apply, and whichever bites first wins.
+    history_share: float = 0.5
+
     # --- Agent loop ---
     max_iterations: int = 8
 
@@ -286,6 +304,28 @@ class Config:
     # GET and HEAD always; the state-changing methods need this.
     http_allow_writes: bool = False
 
+    @property
+    def max_tool_result_chars(self) -> int:
+        """How much of one tool result may reach the model, in characters.
+
+        A quarter of the context by default. The rest has to hold the system
+        prompt, the tool schemas, the conversation so far and the answer, and
+        a single result taking more than a quarter of the window is a result
+        that should have been summarised by whatever produced it.
+        """
+        tokens = max(256, int(self.model_context * self.tool_result_share))
+        return int(tokens * 3.27)
+
+    @property
+    def max_history_chars(self) -> int:
+        """How much conversation may be replayed to the model, in characters.
+
+        Half the context by default, leaving the rest for the system prompt,
+        the tool schemas and the answer itself.
+        """
+        tokens = max(512, int(self.model_context * self.history_share))
+        return int(tokens * 3.27)
+
     @classmethod
     def from_env(cls) -> "Config":
         defaults = cls()
@@ -321,6 +361,10 @@ class Config:
             connect_timeout=_env_float("AGENT_CONNECT_TIMEOUT", defaults.connect_timeout),
             max_history_messages=_env_int("AGENT_MAX_HISTORY", defaults.max_history_messages),
             max_iterations=_env_int("AGENT_MAX_ITERATIONS", defaults.max_iterations),
+            tool_result_share=_env_float(
+                "AGENT_TOOL_RESULT_SHARE", defaults.tool_result_share
+            ),
+            history_share=_env_float("AGENT_HISTORY_SHARE", defaults.history_share),
             workspace=workspace,
             db_path=Path(
                 _env_str("AGENT_DB_PATH", str(defaults.db_path))
@@ -433,6 +477,12 @@ class Config:
                 "MEMORY_BATCH_SIZE", defaults.memory_batch_size
             ),
         )
+
+
+# Characters per token, measured on this machine against a real turn: 906
+# tokens for the system prompt, the tool schemas and a short question. Used to
+# turn a token budget into a character budget without loading a tokeniser.
+CHARS_PER_TOKEN = 3.27
 
 
 def load_config() -> Config:

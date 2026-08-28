@@ -270,7 +270,9 @@ class Runtime:
         """
         return build_default_registry(config)
 
-    def turn_config(self, *, qwen_url: str, enable_thinking: bool) -> Config:
+    def turn_config(
+        self, *, qwen_url: str, enable_thinking: bool, context: int = 4096
+    ) -> Config:
         """The frozen config for one turn, with per-turn settings applied.
 
         Built from `effective_config` so a tool switched on in the UI is
@@ -280,6 +282,7 @@ class Runtime:
             self.effective_config(),
             qwen_url=qwen_url,
             enable_thinking=enable_thinking,
+            model_context=context,
         )
 
     # --- seams ---
@@ -413,7 +416,11 @@ class Runtime:
             )
 
             config = self.turn_config(
-                qwen_url=spec.url, enable_thinking=request.enable_thinking
+                qwen_url=spec.url,
+                enable_thinking=request.enable_thinking,
+                # So a tool result is capped against the window it has to fit,
+                # not against a guess.
+                context=spec.context,
             )
             registry, _ = self.registry_for(config)
             # Memory is attached only when its tools are on. The context
