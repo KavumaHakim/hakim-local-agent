@@ -98,7 +98,7 @@ Use `tiny` or `fast` for day-to-day work. Reach for `reasoning` deliberately.
 ### Install
 
 ```bash
-cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent"
+cd "C:\path\to\Hakim Local Agent"
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
@@ -140,11 +140,11 @@ still works if the weights live on another drive.
 Two processes: the API, and the front end that talks to it.
 
 ```bash
-cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent" && .venv\Scripts\python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 
 ```bash
-cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent" && npm --prefix web run dev
+cd "C:\path\to\Hakim Local Agent" && npm --prefix web run dev
 ```
 
 Opens on <http://127.0.0.1:5173>. Vite proxies `/api` to the API, so the
@@ -174,7 +174,7 @@ npm --prefix web run build
 ### Terminal
 
 ```bash
-cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent" && .venv\Scripts\python main.py
+cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python main.py
 ```
 
 ### Starting a model server by hand
@@ -182,7 +182,7 @@ cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent" && .venv\Scripts\python main.py
 You never have to — the manager does it — but if you want to:
 
 ```bash
-"C:\Users\SHAMI\HAKIM\AI\LLAMA CP\llama-server.exe" -m "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent\weights\Ministral-3-3B-Instruct-2512-Q4_K_M.gguf" --jinja -c 4096 -t 4 -np 1 --port 8084
+"C:\path\to\llama.cpp\llama-server.exe" -m "C:\path\to\Hakim Local Agent\weights\Ministral-3-3B-Instruct-2512-Q4_K_M.gguf" --jinja -c 4096 -t 4 -np 1 --port 8084
 ```
 
 If a healthy server is already on a model's port, the manager **adopts** it
@@ -692,7 +692,7 @@ number to check.
 #### Running it
 
 ```bash
-"C:\Users\SHAMI\HAKIM\AI\LLAMA CP\llama-server.exe" -m "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent\weights\GLM-OCR-Q8_0.gguf" --mmproj "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent\weights\mmproj-GLM-OCR-Q8_0.gguf" -c 4096 -t 4 -np 1 --port 8081
+"C:\path\to\llama.cpp\llama-server.exe" -m "C:\path\to\Hakim Local Agent\weights\GLM-OCR-Q8_0.gguf" --mmproj "C:\path\to\Hakim Local Agent\weights\mmproj-GLM-OCR-Q8_0.gguf" -c 4096 -t 4 -np 1 --port 8081
 ```
 
 Then set `OCR_ENABLED=1` and the tool registers itself. Loading takes about
@@ -813,7 +813,7 @@ because the fixes differ: the **OCR tool** must be switched on, and the
 not in the manager's rotation, and needs both its model and its `mmproj` file:
 
 ```bash
-"C:\Users\SHAMI\HAKIM\AI\LLAMA CP\llama-server.exe" -m weights\GLM-OCR-Q8_0.gguf --mmproj weights\mmproj-GLM-OCR-Q8_0.gguf -c 4096 -t 4 -np 1 --port 8081
+"C:\path\to\llama.cpp\llama-server.exe" -m weights\GLM-OCR-Q8_0.gguf --mmproj weights\mmproj-GLM-OCR-Q8_0.gguf -c 4096 -t 4 -np 1 --port 8081
 ```
 
 Confirm it came up with vision, which is the check that actually matters:
@@ -939,7 +939,7 @@ fast/strong pair live in [`models.json`](models.json).
 ## 14. Tests
 
 ```bash
-cd "C:\Users\SHAMI\HAKIM\AI\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
+cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
 **485 tests, no model server needed, and none of them touch the network.**
@@ -1149,7 +1149,7 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 - Widening the terminal allowlist as specific needs appear
 - Real sandboxing for the Python tool (container or VM)
 - Conversation search and export
-- The custom C99 inference engine at `C:\Users\SHAMI\mmengine` — parked until
+- The custom C99 inference engine at `C:\path\to\mmengine` — parked until
   it is further along
 
 ---
