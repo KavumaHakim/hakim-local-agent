@@ -29,11 +29,14 @@ from tools.base import Tool, ToolError
 PROTECTED_TOP_LEVEL = frozenset(
     {
         "agent", "models", "tools", "tests", ".git", ".venv",
+        # The document and memory subsystems are agent source as much as
+        # anything above: writing there would reach every other guard.
+        "rag", "memory",
         # The HTTP layer and the front end it serves. `api` matters as much as
         # the rest: it builds the registry the model is offered, so writing
         # there would reach every other guard. `web` is what the browser runs.
         "api", "web", ".claude",
-        "main.py", "config.py", "chat_store.py", "memory_store.py",
+        "main.py", "config.py", "chat_store.py",
         "models.json", "requirements.txt", "README.md",
     }
 )

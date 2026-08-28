@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import threading
 import time
 from typing import Any
 
@@ -68,6 +69,13 @@ TOOL_FLAGS: tuple[ToolFlag, ...] = (
         "git_writes", "git_allow_writes", "Git — commit and branch", depends_on="git"
     ),
     ToolFlag("memory", "memory_tool_enabled", "Memory"),
+    ToolFlag(
+        "memory_processing",
+        "memory_processing_enabled",
+        "Memory - background processing",
+        depends_on="memory",
+    ),
+    ToolFlag("documents", "rag_enabled", "Document search"),
     ToolFlag("ocr", "ocr_enabled", "OCR"),
 )
 
@@ -143,6 +151,10 @@ class Runtime:
         self.store = ChatStore(self.config.db_path)
         self.queue = TurnQueue(self.run_turn)
         self.connectivity = Connectivity()
+        # Built lazily: memory pulls in numpy, and a runtime for a CLI-only
+        # or memory-off setup should not pay for that at startup.
+        self._memory = None
+        self._memory_lock = threading.Lock()
         # Tool switches flipped from the UI, applied on top of the environment.
         # Held in memory only: a restart returns to whatever the environment
         # says, so the env vars stay the durable answer to "what is on here"
@@ -166,11 +178,86 @@ class Runtime:
                 if other.depends_on == flag_id:
                     self._overrides[other.field] = False
 
+    def set_ocr_backend(self, backend: str) -> None:
+        """Choose the OCR reader for this process.
+
+        The tool switches are booleans and share one mechanism; this is a
+        string, so it gets its own setter rather than bending that one. Like
+        the switches it lives in memory only - a restart returns to whatever
+        OCR_BACKEND says.
+        """
+        if backend not in ("tesseract", "model"):
+            raise ValueError(f"Unknown OCR backend {backend!r}.")
+        self._overrides["ocr_backend"] = backend
+
     def effective_config(self) -> Config:
         """The config with the UI's switches applied."""
         if not self._overrides:
             return self.config
         return dataclasses.replace(self.config, **self._overrides)
+
+    # --- memory ---
+
+    def memory(self):
+        """The process-wide memory manager, with its processor attached.
+
+        Returns None when the optional dependencies are missing, which is a
+        supported state: the agent simply runs without memory rather than
+        failing to start.
+        """
+        if self._memory is not None:
+            return self._memory
+        with self._memory_lock:
+            if self._memory is not None:
+                return self._memory
+            config = self.config
+            try:
+                from memory.manager import shared_manager
+                from memory.processor import MemoryProcessor
+            except ImportError:
+                return None
+
+            manager = shared_manager(
+                config.db_path,
+                store_dir=config.memory_store,
+                dimension=config.rag_dimension,
+                top_k=config.memory_top_k,
+                score_floor=config.memory_score_floor,
+            min_similarity=config.memory_min_similarity,
+                context_tokens=config.memory_context_tokens,
+                summarize_after=config.memory_summarize_after,
+                extract_every=config.memory_extract_every,
+                queue_high_water=config.memory_queue_high_water,
+            )
+            # The processor drives THIS manager - the same object that owns
+            # llama-server and enforces one chat model at a time. Building a
+            # second loader here is exactly what the design forbids.
+            manager.attach_processor(
+                MemoryProcessor(
+                    manager.store,
+                    manager.vectors,
+                    manager=self.manager,
+                    config=config,
+                    aux_key=config.memory_aux_model,
+                    batch_size=config.memory_batch_size,
+                )
+            )
+            self._memory = manager
+            return self._memory
+
+    def sweep_memory(self) -> dict:
+        """Run a memory batch if the triggers allow. Called by the sweeper.
+
+        `queue.busy` is passed rather than read once, so a batch that starts
+        just as a turn arrives puts its remaining jobs back instead of making
+        the user wait for a model switch in each direction.
+        """
+        if not self.effective_config().memory_processing_enabled:
+            return {"ran": False, "reason": "background processing is off"}
+        manager = self.memory()
+        if manager is None:
+            return {"ran": False, "reason": "memory is unavailable"}
+        return manager.maybe_process(busy=self.queue.busy)
 
     # --- introspection used by several routes ---
 
@@ -183,7 +270,9 @@ class Runtime:
         """
         return build_default_registry(config)
 
-    def turn_config(self, *, qwen_url: str, enable_thinking: bool) -> Config:
+    def turn_config(
+        self, *, qwen_url: str, enable_thinking: bool, context: int = 4096
+    ) -> Config:
         """The frozen config for one turn, with per-turn settings applied.
 
         Built from `effective_config` so a tool switched on in the UI is
@@ -193,6 +282,7 @@ class Runtime:
             self.effective_config(),
             qwen_url=qwen_url,
             enable_thinking=enable_thinking,
+            model_context=context,
         )
 
     # --- seams ---
@@ -326,10 +416,25 @@ class Runtime:
             )
 
             config = self.turn_config(
-                qwen_url=spec.url, enable_thinking=request.enable_thinking
+                qwen_url=spec.url,
+                enable_thinking=request.enable_thinking,
+                # So a tool result is capped against the window it has to fit,
+                # not against a guess.
+                context=spec.context,
             )
             registry, _ = self.registry_for(config)
-            agent = Agent(self.make_client(config, spec), config, registry)
+            # Memory is attached only when its tools are on. The context
+            # builder is what injects retrieved memories, so switching memory
+            # off has to switch the injection off too - otherwise the roster
+            # would say "no memory" while the prompt was full of it.
+            memory = self.memory() if config.memory_tool_enabled else None
+            agent = Agent(
+                self.make_client(config, spec),
+                config,
+                registry,
+                memory=memory,
+                conversation_id=request.conversation_id,
+            )
             agent.load_history(history)
 
             def on_token(text: str) -> None:
@@ -367,6 +472,28 @@ class Runtime:
                 elapsed=elapsed,
                 model_key=target,
             )
+            # Cheap and deterministic: a regex or two, an immediate write
+            # for anything explicit, and at most a queued job. No model is
+            # loaded or unloaded here - that happens later, when idle.
+            memory_note = {}
+            if memory is not None:
+                try:
+                    memory_note = memory.observe_turn(
+                        prompt=request.prompt,
+                        answer=result.content,
+                        conversation_id=request.conversation_id,
+                        message_count=len(stored) + 2,
+                    )
+                    memory.queue_summary(
+                        request.conversation_id,
+                        [
+                            {"id": m.id, "role": m.role, "content": m.content}
+                            for m in stored
+                        ],
+                    )
+                except Exception:  # noqa: BLE001 - memory must not fail a turn
+                    memory_note = {}
+
             turn.emit(
                 "done",
                 message_id=message_id,
@@ -374,6 +501,8 @@ class Runtime:
                 tools=calls,
                 elapsed=elapsed,
                 model_key=target,
+                memory=memory_note,
+                context=agent.context_report,
             )
 
         except IterationLimitError as exc:

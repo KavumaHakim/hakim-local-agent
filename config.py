@@ -102,6 +102,29 @@ class Config:
     # server's request format has not been verified. See tools/ocr_tool.py.
     ocr_enabled: bool = False
     ocr_max_image_bytes: int = 10_000_000
+    # Which reader the ocr_image tool uses.
+    #
+    #   "tesseract" - a ~50 MB binary, under a second a page, transcribes
+    #                 text line by line. Needs Tesseract installed.
+    #   "model"     - the GLM-OCR vision model: ~1.4 GB and ~30 s a page, but
+    #                 it understands tables, columns and handwriting.
+    #
+    # "model" is the default only because it is what was here first and its
+    # weights are already on disk: changing the default would silently break a
+    # working setup for anyone without Tesseract installed. On this hardware
+    # Tesseract is usually the better trade - set OCR_BACKEND=tesseract once
+    # you have it. Neither is strictly better, which is why it is a switch.
+    ocr_backend: str = "model"
+    # Empty means "find it": PATH first, then the Windows installer's own
+    # locations. Set it to a full path when Tesseract is somewhere unusual.
+    tesseract_cmd: str = ""
+    tesseract_lang: str = "eng"
+    # Page segmentation mode. 3 is fully automatic; 6 ("a single uniform
+    # block") is what to try when 3 scrambles a simple image.
+    tesseract_psm: int = 3
+    # Shared by both backends, but they are worlds apart: Tesseract should
+    # finish in under a second, the model takes tens of seconds.
+    ocr_timeout: float = 120.0
     ocr_allowed_extensions: tuple[str, ...] = (
         ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
     )
@@ -117,6 +140,24 @@ class Config:
     # Number of non-system messages kept in history. The system prompt is
     # always preserved on top of this. Set to 0 to disable trimming.
     max_history_messages: int = 60
+
+    # --- Tool results in the model's context ---
+    #
+    # A tool result goes straight into the context, and several of them are
+    # unbounded: a page of OCR, a file read, a long directory listing. On a
+    # 4096-token model the system prompt and tool schemas already cost about
+    # 1,080 tokens, so one dense page overflows the window and the turn fails
+    # outright - which is what "I keep hitting the context window" looks like.
+    #
+    # The cap is a share of the model's own context rather than a fixed number,
+    # so a bigger model is allowed bigger results without editing anything.
+    model_context: int = 4096
+    tool_result_share: float = 0.25
+    # And the share the conversation itself may take. `max_history_messages`
+    # counts messages, which says nothing about size: sixty short exchanges fit
+    # a 4096-token window comfortably and three pages of OCR do not. Both
+    # limits apply, and whichever bites first wins.
+    history_share: float = 0.5
 
     # --- Agent loop ---
     max_iterations: int = 8
@@ -171,6 +212,88 @@ class Config:
     # chat history. Not injected into the prompt - see tools/memory_tool.py.
     memory_tool_enabled: bool = False
 
+    # --- Document search (RAG) ---
+    # OFF by default, like every other optional tool. The cost of it being on
+    # is not risk here but memory: searching starts a second Python process
+    # holding torch and the embedding model, and this machine has 8 GB.
+    #
+    # That process is short-lived by design. It loads on the first search,
+    # and the same sweeper that unloads an idle llama-server stops it after
+    # rag_idle_seconds, so the steady state is no embedding model resident.
+    rag_enabled: bool = False
+    # Where the index lives. Under data/ with the rest of the generated state.
+    rag_store: Path = field(default=PROJECT_ROOT / "data" / "rag")
+    # BAAI/bge-small-en-v1.5: 384 dimensions, 512-token window, ~130 MB on
+    # disk. Changing this makes existing vectors meaningless, which the
+    # manager detects and reports as "rebuild the index" rather than
+    # silently mixing two coordinate spaces.
+    rag_model: str = "BAAI/bge-small-en-v1.5"
+    rag_dimension: int = 384
+    # Empty means the standard Hugging Face cache. Set it to pin the model
+    # inside the project instead.
+    rag_model_dir: str = ""
+    # Chunking, in tokens. See rag/chunker.py for how tokens are estimated
+    # without loading the tokeniser.
+    rag_chunk_tokens: int = 500
+    rag_overlap_tokens: int = 75
+    # Search. min_score is cosine similarity: BGE puts a genuine match well
+    # above 0.6 and unrelated text near 0.3, so this mostly filters out
+    # "nothing here matches" rather than ranking.
+    rag_top_k: int = 5
+    rag_min_score: float = 0.3
+    # Total characters of retrieved text returned in one tool call.
+    rag_context_chars: int = 6000
+    # Two cores, shared with llama-server. Taking both makes the model this is
+    # meant to be helping crawl.
+    rag_threads: int = 2
+    # Measured on this machine, embedding 1,750-character chunks: the worker
+    # idles at ~417 MB with the model loaded, and each batch slot adds roughly
+    # 15 MB of activations - 535 MB at batch 4, 578 at 8, 674 at 16, 821 at 32.
+    # Throughput barely moves across that range because two cores are the
+    # bottleneck, so the larger batches buy memory pressure and nothing else.
+    rag_batch_size: int = 8
+    # Seconds of inactivity before the embedding worker is stopped.
+    rag_idle_seconds: float = 120.0
+    rag_max_file_bytes: int = 20_000_000
+
+    # --- Memory ---
+    # The tools are off by default (AGENT_ENABLE_MEMORY=1); the store itself
+    # is always there, because the context builder uses it whether or not the
+    # model can call the tools.
+    #
+    # The auxiliary model is what makes memory *intelligent* rather than
+    # merely persistent, and it is the one part that costs a model switch.
+    # Everything else - storing, retrieving, ranking, decay, dedupe - is
+    # ordinary code and runs with whatever model happens to be loaded.
+    memory_aux_model: str = "tiny"
+    # OFF by default. Turning it on lets the agent stop the chat model and
+    # start the auxiliary one when it is idle, which is a visible pause; that
+    # should be a choice, not a surprise.
+    memory_processing_enabled: bool = False
+    # Where the memory vector index lives.
+    memory_store: Path = field(default=PROJECT_ROOT / "data" / "memory")
+    # How many memories may be retrieved into one turn's context.
+    memory_top_k: int = 5
+    # Below this final score a memory is not worth its prompt tokens. This is
+    # what keeps "what is photosynthesis?" from dragging in personal notes.
+    memory_score_floor: float = 0.10
+    # The raw-similarity gate. Calibrated for bge-small-en-v1.5, whose noise
+    # floor is high: unrelated English sentences score 0.4-0.55, so anything
+    # lower retrieves the whole store for every question. Re-measure this if
+    # RAG_MODEL changes - see memory/retrieval.py.
+    memory_min_similarity: float = 0.55
+    # The whole context budget the builder works to, in tokens. Well under the
+    # 4096-token window in models.json, leaving room for the answer.
+    memory_context_tokens: int = 3000
+    # Queue an extraction job every N messages, not every turn.
+    memory_extract_every: int = 4
+    # Wait for this many queued jobs before a model switch is worth it.
+    memory_queue_high_water: int = 6
+    # Summarise a conversation once it passes this many messages.
+    memory_summarize_after: int = 24
+    # Jobs processed in one auxiliary-model session.
+    memory_batch_size: int = 12
+
     # --- HTTP tool ---
     # OFF by default. Loopback only unless you widen it: adding a public host
     # is what turns this from a local-service inspector into a web client.
@@ -180,6 +303,28 @@ class Config:
     http_max_bytes: int = 100_000
     # GET and HEAD always; the state-changing methods need this.
     http_allow_writes: bool = False
+
+    @property
+    def max_tool_result_chars(self) -> int:
+        """How much of one tool result may reach the model, in characters.
+
+        A quarter of the context by default. The rest has to hold the system
+        prompt, the tool schemas, the conversation so far and the answer, and
+        a single result taking more than a quarter of the window is a result
+        that should have been summarised by whatever produced it.
+        """
+        tokens = max(256, int(self.model_context * self.tool_result_share))
+        return int(tokens * 3.27)
+
+    @property
+    def max_history_chars(self) -> int:
+        """How much conversation may be replayed to the model, in characters.
+
+        Half the context by default, leaving the rest for the system prompt,
+        the tool schemas and the answer itself.
+        """
+        tokens = max(512, int(self.model_context * self.history_share))
+        return int(tokens * 3.27)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -207,10 +352,19 @@ class Config:
             ocr_max_image_bytes=_env_int(
                 "OCR_MAX_IMAGE_BYTES", defaults.ocr_max_image_bytes
             ),
+            ocr_backend=_env_str("OCR_BACKEND", defaults.ocr_backend).lower(),
+            tesseract_cmd=_env_str("TESSERACT_CMD", defaults.tesseract_cmd),
+            tesseract_lang=_env_str("TESSERACT_LANG", defaults.tesseract_lang),
+            tesseract_psm=_env_int("TESSERACT_PSM", defaults.tesseract_psm),
+            ocr_timeout=_env_float("OCR_TIMEOUT", defaults.ocr_timeout),
             request_timeout=_env_float("AGENT_REQUEST_TIMEOUT", defaults.request_timeout),
             connect_timeout=_env_float("AGENT_CONNECT_TIMEOUT", defaults.connect_timeout),
             max_history_messages=_env_int("AGENT_MAX_HISTORY", defaults.max_history_messages),
             max_iterations=_env_int("AGENT_MAX_ITERATIONS", defaults.max_iterations),
+            tool_result_share=_env_float(
+                "AGENT_TOOL_RESULT_SHARE", defaults.tool_result_share
+            ),
+            history_share=_env_float("AGENT_HISTORY_SHARE", defaults.history_share),
             workspace=workspace,
             db_path=Path(
                 _env_str("AGENT_DB_PATH", str(defaults.db_path))
@@ -269,7 +423,66 @@ class Config:
             http_allow_writes=_env_bool(
                 "AGENT_HTTP_ALLOW_WRITES", defaults.http_allow_writes
             ),
+            rag_enabled=_env_bool("AGENT_ENABLE_RAG", defaults.rag_enabled),
+            rag_store=Path(
+                _env_str("RAG_STORE", str(defaults.rag_store))
+            ).expanduser(),
+            rag_model=_env_str("RAG_MODEL", defaults.rag_model),
+            rag_dimension=_env_int("RAG_DIMENSION", defaults.rag_dimension),
+            rag_model_dir=_env_str("RAG_MODEL_DIR", defaults.rag_model_dir),
+            rag_chunk_tokens=_env_int("RAG_CHUNK_TOKENS", defaults.rag_chunk_tokens),
+            rag_overlap_tokens=_env_int(
+                "RAG_CHUNK_OVERLAP", defaults.rag_overlap_tokens
+            ),
+            rag_top_k=_env_int("RAG_TOP_K", defaults.rag_top_k),
+            rag_min_score=_env_float("RAG_MIN_SCORE", defaults.rag_min_score),
+            rag_context_chars=_env_int(
+                "RAG_CONTEXT_CHARS", defaults.rag_context_chars
+            ),
+            rag_threads=_env_int("RAG_THREADS", defaults.rag_threads),
+            rag_batch_size=_env_int("RAG_BATCH_SIZE", defaults.rag_batch_size),
+            rag_idle_seconds=_env_float(
+                "RAG_IDLE_SECONDS", defaults.rag_idle_seconds
+            ),
+            rag_max_file_bytes=_env_int(
+                "RAG_MAX_FILE_BYTES", defaults.rag_max_file_bytes
+            ),
+            memory_aux_model=_env_str("MEMORY_AUX_MODEL", defaults.memory_aux_model),
+            memory_processing_enabled=_env_bool(
+                "AGENT_ENABLE_MEMORY_PROCESSING", defaults.memory_processing_enabled
+            ),
+            memory_store=Path(
+                _env_str("MEMORY_STORE", str(defaults.memory_store))
+            ).expanduser(),
+            memory_top_k=_env_int("MEMORY_TOP_K", defaults.memory_top_k),
+            memory_score_floor=_env_float(
+                "MEMORY_SCORE_FLOOR", defaults.memory_score_floor
+            ),
+            memory_min_similarity=_env_float(
+                "MEMORY_MIN_SIMILARITY", defaults.memory_min_similarity
+            ),
+            memory_context_tokens=_env_int(
+                "MEMORY_CONTEXT_TOKENS", defaults.memory_context_tokens
+            ),
+            memory_extract_every=_env_int(
+                "MEMORY_EXTRACT_EVERY", defaults.memory_extract_every
+            ),
+            memory_queue_high_water=_env_int(
+                "MEMORY_QUEUE_HIGH_WATER", defaults.memory_queue_high_water
+            ),
+            memory_summarize_after=_env_int(
+                "MEMORY_SUMMARIZE_AFTER", defaults.memory_summarize_after
+            ),
+            memory_batch_size=_env_int(
+                "MEMORY_BATCH_SIZE", defaults.memory_batch_size
+            ),
         )
+
+
+# Characters per token, measured on this machine against a real turn: 906
+# tokens for the system prompt, the tool schemas and a short question. Used to
+# turn a token budget into a character budget without loading a tokeniser.
+CHARS_PER_TOKEN = 3.27
 
 
 def load_config() -> Config:

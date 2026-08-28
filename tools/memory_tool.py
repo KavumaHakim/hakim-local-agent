@@ -2,23 +2,33 @@
 
 Off by default (config.memory_tool_enabled, env AGENT_ENABLE_MEMORY=1).
 
-Three operations: remember, recall, forget. `forget` exists despite the
-project's general rule against destructive operations, because this is the
-agent's own store rather than the user's data, and a memory that turns out to
-be wrong is worse than no memory at all. The blast radius is one row.
+Five operations, matching the design: remember, recall, search_memory,
+update_memory and forget_memory. `recall` and `search_memory` look alike on
+purpose - `recall` is the everyday one and returns memories ready to quote,
+while `search_memory` exposes scores and lets the model widen the net when it
+is checking whether something is known at all.
 
-Memories are NOT injected into the system prompt. That would look convenient
-and cost real time: prompt tokens run at a few per second on this machine, so a
-growing preamble would tax every single turn, including the ones that need no
-memory at all. The agent calls `recall` when it has a reason to.
+**None of these load a chat model.** Retrieval is embeddings and arithmetic, so
+the agent can call them mid-turn with Mistral resident and nothing gets
+unloaded. `remember` writes immediately for the same reason: telling the user
+"noted" while the memory waits behind a model switch would be a lie.
+
+Memories are still NOT injected into the system prompt by this module. The
+context builder does that, with a budget, once per turn - see memory/context.py.
+The tools exist for when the agent has a reason to look something up itself.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from memory_store import MemoryStore
+from memory.manager import MemoryManager, MemoryOperationError
 from tools.base import Tool, ToolError
+
+# Retrieval hands back at most this much text in one call. Memories are short,
+# so this is generous - but a store with a thousand rows must not be able to
+# empty itself into a prompt.
+MAX_RESULTS = 25
 
 
 class MemoryToolError(ToolError):
@@ -26,26 +36,84 @@ class MemoryToolError(ToolError):
 
 
 class MemoryTools:
-    def __init__(self, store: MemoryStore) -> None:
-        self._store = store
+    """The model-facing half of the memory system."""
 
-    def remember(self, key: str, value: str) -> dict[str, Any]:
+    def __init__(self, manager: MemoryManager, *, conversation_id: int | None = None) -> None:
+        self._memory = manager
+        self._conversation_id = conversation_id
+
+    # --- operations ---
+
+    def remember(
+        self,
+        content: str,
+        type: str = "fact",
+        importance: float | None = None,
+        subject: str = "",
+    ) -> dict[str, Any]:
         try:
-            return self._store.remember(key, value)
-        except ValueError as exc:
+            return self._memory.remember(
+                content,
+                type=type,
+                importance=0.8 if importance is None else float(importance),
+                subject=subject,
+                conversation_id=self._conversation_id,
+            )
+        except MemoryOperationError as exc:
             raise MemoryToolError(str(exc)) from None
 
-    def recall(self, query: str = "", limit: int = 20) -> dict[str, Any]:
+    def recall(self, query: str = "", limit: int = 5) -> dict[str, Any]:
         try:
-            return self._store.recall(query, limit)
-        except (ValueError, TypeError) as exc:
+            return self._memory.recall(query, limit=_bounded(limit))
+        except MemoryOperationError as exc:
             raise MemoryToolError(str(exc)) from None
 
-    def forget(self, key: str) -> dict[str, Any]:
+    def search_memory(self, query: str, limit: int = 10) -> dict[str, Any]:
+        if not query or not query.strip():
+            raise MemoryToolError("Give something to search for.")
+        found = self._memory.search(query, limit=_bounded(limit))
+        if found:
+            self._memory.store.touch([item.memory.id for item in found])
+        return {
+            "success": True,
+            "query": query.strip(),
+            "count": len(found),
+            "memories": [item.as_dict() for item in found],
+        }
+
+    def update_memory(
+        self,
+        memory_id: int,
+        content: str = "",
+        type: str = "",
+        importance: float | None = None,
+        status: str = "",
+    ) -> dict[str, Any]:
+        changes: dict[str, Any] = {}
+        if content.strip():
+            changes["content"] = content.strip()
+        if type.strip():
+            changes["type"] = type.strip()
+        if status.strip():
+            changes["status"] = status.strip()
+        if importance is not None:
+            changes["importance"] = float(importance)
+        if not changes:
+            raise MemoryToolError(
+                "Give at least one of content, type, importance or status."
+            )
         try:
-            return self._store.forget(key)
-        except ValueError as exc:
+            return self._memory.update(int(memory_id), **changes)
+        except MemoryOperationError as exc:
             raise MemoryToolError(str(exc)) from None
+
+    def forget_memory(self, target: str) -> dict[str, Any]:
+        try:
+            return self._memory.forget(target)
+        except MemoryOperationError as exc:
+            raise MemoryToolError(str(exc)) from None
+
+    # --- definitions ---
 
     def tools(self) -> list[Tool]:
         return [
@@ -53,24 +121,38 @@ class MemoryTools:
                 name="remember",
                 category="memory",
                 description=(
-                    "Store a durable fact under a short key, so it survives "
-                    "into later conversations. Storing the same key again "
-                    "replaces it. Keep it to a fact or a decision, not a "
-                    "transcript."
+                    "Store one durable fact about the user, for later "
+                    "conversations. Use for a lasting preference, decision or "
+                    "setup detail, and always when they say 'remember that'. "
+                    "Write it third-person: 'User prefers X'. One fact per "
+                    "call. Do NOT store greetings, small talk, one-off "
+                    "calculations, or anything true only today."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "key": {
+                        "content": {
                             "type": "string",
-                            "description": "Short identifier, e.g. 'preferred editor'.",
+                            "description": "The fact, as one short sentence.",
                         },
-                        "value": {
+                        "type": {
                             "type": "string",
-                            "description": "The fact to remember.",
+                            "description": (
+                                "preference, fact, event, intention (they are "
+                                "unsure), or temporary (true today only). "
+                                "Defaults to fact."
+                            ),
+                        },
+                        "importance": {
+                            "type": "number",
+                            "description": "0-1 priority.",
+                        },
+                        "subject": {
+                            "type": "string",
+                            "description": "Optional group, e.g. a file name.",
                         },
                     },
-                    "required": ["key", "value"],
+                    "required": ["content"],
                 },
                 run=self.remember,
             ),
@@ -78,19 +160,22 @@ class MemoryTools:
                 name="recall",
                 category="memory",
                 description=(
-                    "Look up stored facts. Give a query to search keys and "
-                    "values, or omit it to list the most recent."
+                    "Look up what is remembered about the user. Query to search "
+                    "by meaning, or omit to list the most important. Use when "
+                    "they refer to their preferences, usual setup, or an "
+                    "earlier conversation. An empty result means nothing is "
+                    "stored - say so rather than guessing."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Text to search for. Omit to list recent memories.",
+                            "description": "What to look for. Omit to list all.",
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum results (default 20).",
+                            "description": "Maximum to return.",
                         },
                     },
                     "required": [],
@@ -98,26 +183,83 @@ class MemoryTools:
                 run=self.recall,
             ),
             Tool(
-                name="forget",
+                name="search_memory",
                 category="memory",
                 description=(
-                    "Delete one stored fact by its key. Use when something "
-                    "remembered turns out to be wrong."
+                    "Search memories with relevance scores. Use instead of "
+                    "recall when checking whether something is known at all."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "key": {
+                        "query": {
                             "type": "string",
-                            "description": "The key to remove.",
+                            "description": "What to search for.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum results (default 10).",
+                        },
+                    },
+                    "required": ["query"],
+                },
+                run=self.search_memory,
+            ),
+            Tool(
+                name="update_memory",
+                category="memory",
+                description=(
+                    "Correct a stored memory by its id, when it is wrong or "
+                    "out of date but should not be forgotten."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {"type": "integer", "description": "Which memory."},
+                        "content": {"type": "string", "description": "New text."},
+                        "type": {"type": "string", "description": "New type."},
+                        "importance": {"type": "number", "description": "0-1."},
+                        "status": {
+                            "type": "string",
+                            "description": "active, or archived to stop retrieval.",
+                        },
+                    },
+                    "required": ["memory_id"],
+                },
+                run=self.update_memory,
+            ),
+            Tool(
+                name="forget_memory",
+                category="memory",
+                description=(
+                    "Forget something remembered. Give a memory id, or a "
+                    "description to forget everything about it. Call this "
+                    "whenever asked to forget - do not just say you will."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "description": "A memory id, or what to forget.",
                         }
                     },
-                    "required": ["key"],
+                    "required": ["target"],
                 },
-                run=self.forget,
+                run=self.forget_memory,
             ),
         ]
 
 
-def build_memory_tools(db_path) -> list[Tool]:
-    return MemoryTools(MemoryStore(db_path)).tools()
+def _bounded(limit: Any) -> int:
+    try:
+        return max(1, min(int(limit), MAX_RESULTS))
+    except (TypeError, ValueError):
+        return 5
+
+
+def build_memory_tools(
+    manager: MemoryManager, *, conversation_id: int | None = None
+) -> list[Tool]:
+    """The memory tools, bound to a manager."""
+    return MemoryTools(manager, conversation_id=conversation_id).tools()

@@ -31,7 +31,15 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.routes import chat, conversations, meta, models, uploads
+from api.routes import (
+    chat,
+    conversations,
+    memory,
+    meta,
+    models,
+    rag,
+    uploads,
+)
 from api.runtime import Runtime
 
 # The built React app, when there is one. Absent during development.
@@ -40,6 +48,18 @@ WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 # How often to look for models to unload. Well under the idle timeout so the
 # sweep is not itself the thing that makes unloading late.
 SWEEP_SECONDS = 30.0
+
+
+def _embeddings():
+    """The embeddings module, imported on use.
+
+    Kept out of the import graph so the API starts without numpy and
+    sentence-transformers installed. Document search is optional, and its
+    dependencies are the largest in the project by a wide margin.
+    """
+    from rag import embeddings
+
+    return embeddings
 
 
 def _sweeper(runtime: Runtime, stop: threading.Event) -> None:
@@ -59,6 +79,14 @@ def _sweeper(runtime: Runtime, stop: threading.Event) -> None:
             continue
         try:
             runtime.manager.unload_idle()
+            # The embedding worker is a model too, and it is idle far more
+            # often than it is busy: one search, then nothing. Same sweep, so
+            # there is one answer in this project to "a model nobody is using".
+            _embeddings().sweep_shared()
+            # Memory processing is the one thing here that may START a model.
+            # It is last, it is skipped whenever a turn is running, and it is
+            # off unless AGENT_ENABLE_MEMORY_PROCESSING says otherwise.
+            runtime.sweep_memory()
         except Exception:  # noqa: BLE001 - a sweep failure must not kill the thread
             pass
 
@@ -88,6 +116,9 @@ def _lifespan_for(supplied: Runtime | None):
         finally:
             stop.set()
             runtime.queue.stop()
+            # Leaks a Python process holding torch otherwise, the same way a
+            # missed stop_all() leaks a llama-server holding gigabytes.
+            _embeddings().unload_shared()
             # Without this, every restart leaks a llama-server holding
             # gigabytes. It is also why `--reload` is a bad idea here: the
             # reloader kills the worker in a way that does not always reach
@@ -111,6 +142,8 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
     app.include_router(models.router, prefix="/api")
     app.include_router(meta.router, prefix="/api")
     app.include_router(uploads.router, prefix="/api")
+    app.include_router(rag.router, prefix="/api")
+    app.include_router(memory.router, prefix="/api")
 
     _mount_web(app)
     return app

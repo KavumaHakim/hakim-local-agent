@@ -85,6 +85,19 @@ export interface Model {
   has_key: boolean
   /** Whether it can be used right now. A remote model needs a key AND network. */
   usable: boolean
+  /** Found in the models folder rather than declared in models.json. */
+  discovered: boolean
+  /** Kept in the catalogue so it can be brought back, but not offered. */
+  hidden: boolean
+  /** Retuned from the settings panel rather than taken from the registry. */
+  customised: boolean
+  file_mb: number
+  /** From the GGUF header: what the model was trained for. */
+  training_context: number
+  /** What its KV cache costs at the context it is actually running at. */
+  kv_cache_mb: number
+  /** Things worth knowing before choosing it. Missing weights, capped context. */
+  notes: string[]
 }
 
 export interface ModelsResponse {
@@ -98,6 +111,28 @@ export interface ModelsResponse {
   available_ram_mb: number | null
   /** Whether hosted models can be reached at all. */
   online: boolean
+  /** Where to drop a .gguf for it to be picked up. */
+  models_dir: string
+  /** True when several models exist and none has been chosen as primary. */
+  setup_required: boolean
+}
+
+export interface RescanResponse {
+  success: boolean
+  models_dir: string
+  /** Keys that were not in the catalogue before this scan. */
+  added: string[]
+  total: number
+  models: ModelsResponse
+}
+
+/** What the settings panel may change about one model. */
+export interface ModelOverride {
+  label?: string
+  description?: string
+  context?: number
+  threads?: number
+  min_free_mb?: number
 }
 
 export interface Tool {
@@ -130,7 +165,15 @@ export interface ToolsResponse {
   disabled: DisabledTool[]
   switches: ToolSwitch[]
   workspace: string
+  /** Which reader ocr_image uses: "tesseract" or "model". */
+  ocr_backend: OcrBackend
+  /** Whether that backend could actually run right now. */
+  ocr_ready: boolean
+  /** What to do about it when it cannot. */
+  ocr_hint: string
 }
+
+export type OcrBackend = 'tesseract' | 'model'
 
 /** An image stored in the workspace, ready to be named in a prompt. */
 export interface UploadResult {

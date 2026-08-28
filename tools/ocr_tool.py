@@ -1,4 +1,23 @@
-"""OCR tool backed by a GLM-OCR llama.cpp server.
+"""OCR with a choice of backend: the GLM-OCR model, or Tesseract.
+
+`OCR_BACKEND` picks between them, and they are genuinely different trades
+rather than one being better:
+
+                      RAM        one page      understands layout
+    GLM-OCR         ~1.4 GB      ~30 s         yes - tables, columns, headings
+    Tesseract       ~50 MB       <1 s          no - lines of text, in order
+
+Tesseract is the default because most OCR here is "read the text off this
+screenshot", and paying 1.4 GB and half a minute for that on an 8 GB machine is
+a poor trade. GLM-OCR earns its cost on a page whose structure matters.
+
+Everything above the backend is shared: the same workspace jail, the same size
+and extension checks, and one `ocr_image` tool whose description changes to
+match whichever backend is active - so the model is told what it is actually
+getting.
+
+The model backend is documented below.
+
 
 VERIFIED against a running server (GLM-OCR-Q8_0 + mmproj-GLM-OCR-Q8_0):
 the endpoint below returns correct transcriptions, /props reports
@@ -33,6 +52,7 @@ import requests
 from config import Config
 from tools.base import Tool, ToolError
 from tools.filesystem import WorkspaceFiles
+from tools.tesseract import TesseractBackend, TesseractError
 
 # Tuned against the running model. Mentioning tables at all makes GLM-OCR wrap
 # even plain lines in <table> markup, so this prompt does not - and asks for
@@ -61,8 +81,21 @@ class OcrError(ToolError):
 class OcrClient:
     """Validates image paths and sends them to the GLM-OCR server."""
 
-    def __init__(self, config: Config, workspace: WorkspaceFiles) -> None:
+    def __init__(
+        self,
+        config: Config,
+        workspace: WorkspaceFiles,
+        tesseract: TesseractBackend | None = None,
+    ) -> None:
         self._config = config
+        # Injectable, so the tests can point at a stub binary rather than
+        # needing Tesseract installed to exercise the dispatch.
+        self._tesseract = tesseract or TesseractBackend(
+            command=config.tesseract_cmd,
+            language=config.tesseract_lang,
+            psm=config.tesseract_psm,
+            timeout=config.ocr_timeout,
+        )
         self._workspace = workspace
         self._session = requests.Session()
 
@@ -159,15 +192,63 @@ class OcrClient:
 
     # --- the tool entry point ---
 
+    @property
+    def backend(self) -> str:
+        """Which backend is active: "tesseract" or "model"."""
+        return "tesseract" if self._config.ocr_backend == "tesseract" else "model"
+
+    def backend_ready(self) -> tuple[bool, str]:
+        """Whether the active backend can actually run, and why not."""
+        if self.backend == "tesseract":
+            if self._tesseract.available():
+                return True, ""
+            return False, self._tesseract.missing_message()
+        if not self.health():
+            return False, (
+                f"The GLM-OCR server is not answering on {self._config.ocr_url}. "
+                f"Start it, or switch OCR to Tesseract, which needs no server."
+            )
+        return True, ""
+
     def ocr_image(self, path: str, prompt: str | None = None) -> dict[str, Any]:
-        """Extract text from an image inside the workspace."""
+        """Extract text from an image inside the workspace.
+
+        The path is validated the same way whichever backend reads it: the
+        workspace jail and the size limit are properties of the tool, not of
+        the reader behind it.
+        """
         target = self.validate(path)
+
+        if self.backend == "tesseract":
+            try:
+                text = self._tesseract.read(target)
+            except TesseractError as exc:
+                raise OcrError(str(exc)) from None
+            return {
+                "success": True,
+                "path": path,
+                "text": text,
+                "characters": len(text),
+                "backend": "tesseract",
+                # Said plainly, because a prompt silently doing nothing is the
+                # kind of thing that wastes an afternoon.
+                **(
+                    {"note": (
+                        "Tesseract transcribes only; the prompt was ignored. "
+                        "Switch OCR to the GLM-OCR model to direct extraction."
+                    )}
+                    if prompt
+                    else {}
+                ),
+            }
+
         text = self._send(target, prompt or DEFAULT_PROMPT)
         return {
             "success": True,
             "path": path,
             "text": text,
             "characters": len(text),
+            "backend": "model",
         }
 
     def _data_uri(self, path: Path) -> str:
@@ -256,16 +337,39 @@ class OcrClient:
             raise OcrError("The OCR server returned no text for that image.")
         return text.strip()
 
+    def _description(self) -> str:
+        """What the model is told, which depends on the backend.
+
+        The two behave differently enough that one description would be wrong
+        for whichever is running: Tesseract cannot follow an instruction and
+        cannot see a table, and telling the model otherwise wastes a round
+        trip and produces a confident wrong answer about the result.
+        """
+        common = (
+            "Read the text in an image or scanned document inside the "
+            "workspace. Give a path relative to the workspace root. "
+        )
+        if self.backend == "tesseract":
+            return common + (
+                "Backed by Tesseract: fast and cheap, and it transcribes text "
+                "line by line. It does not follow instructions and does not "
+                "preserve tables or columns, so do not ask it to extract a "
+                "particular field - read the text and pick the field yourself. "
+                "Best on screenshots and clean scans; weak on photographs and "
+                "handwriting."
+            )
+        return common + (
+            "Backed by the GLM-OCR vision model: slower and heavier, but it "
+            "understands layout. Use for photos, scans, tables and "
+            "handwriting, and say what to extract if you want something "
+            "specific. Tables come back as HTML."
+        )
+
     def tool(self) -> Tool:
         return Tool(
             name="ocr_image",
             category="ocr",
-            description=(
-                "Read the text in an image or scanned document inside the "
-                "workspace. Use for photos, scans, screenshots, tables and "
-                "handwriting. Give a path relative to the workspace root. "
-                "Optionally say what to extract. Tables come back as HTML."
-            ),
+            description=self._description(),
             parameters={
                 "type": "object",
                 "properties": {
@@ -277,7 +381,8 @@ class OcrClient:
                         "type": "string",
                         "description": (
                             "Optional instruction, e.g. 'extract the table as "
-                            "markdown'."
+                            "markdown'. Ignored by the Tesseract backend, "
+                            "which only transcribes."
                         ),
                     },
                 },

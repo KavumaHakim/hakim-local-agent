@@ -50,11 +50,20 @@ class Agent:
         client: ChatClient,
         config: Config,
         tools: ToolRegistry,
+        memory: Any = None,
+        conversation_id: int | None = None,
     ) -> None:
         self._client = client
         self._config = config
         self._tools = tools
         self._history: list[dict[str, Any]] = []
+        # Optional. With no memory manager the loop behaves exactly as it did
+        # before: system prompt plus history, trimmed by message count.
+        self._memory = memory
+        self._conversation_id = conversation_id
+        # What the last context build put in front of the model. Reported to
+        # the UI so retrieved memories are visible rather than mysterious.
+        self.context_report: dict[str, Any] = {}
 
     @property
     def tools(self) -> ToolRegistry:
@@ -99,6 +108,11 @@ class Agent:
         definitions = self._tools.get_tool_definitions()
 
         for _ in range(max(1, self._config.max_iterations)):
+            # Trim before sending, not after. Trimming afterwards leaves the
+            # history within budget but says nothing about the request just
+            # made - the newly appended message is exactly what pushes it over,
+            # and that request is the one that fails.
+            self._trim_history()
             message = self._chat(definitions, on_token, on_reasoning)
 
             try:
@@ -120,7 +134,13 @@ class Agent:
                         # Ties the result back to the call the model made.
                         "tool_call_id": call.id,
                         "name": call.name,
-                        "content": result.content,
+                        # Capped against the model's context. Uncapped, a
+                        # page of OCR or a large file read overflows the
+                        # window and loses the whole turn rather than part of
+                        # one result.
+                        "content": result.content_within(
+                            self._config.max_tool_result_chars
+                        ),
                     }
                 )
                 if observer is not None:
@@ -155,7 +175,34 @@ class Agent:
         return self._client.chat(self._messages(), tools=definitions)
 
     def _messages(self) -> list[dict[str, Any]]:
-        return [{"role": "system", "content": SYSTEM_PROMPT}, *self._history]
+        """The context for one model round.
+
+        With no memory manager this is the original behaviour: the system
+        prompt and the whole (already trimmed) history. With one, the context
+        builder assembles the summary, the retrieved memories and a recent
+        window that fits a token budget - see memory/context.py.
+
+        The query used for retrieval is the most recent user message rather
+        than the whole history: retrieving against a transcript matches
+        whatever was talked about most, not what is being asked now.
+        """
+        if self._memory is None:
+            return [{"role": "system", "content": SYSTEM_PROMPT}, *self._history]
+
+        built = self._memory.build_context(
+            system_prompt=SYSTEM_PROMPT,
+            history=self._history,
+            query=self._latest_user_message(),
+            conversation_id=self._conversation_id,
+        )
+        self.context_report = built.report()
+        return built.messages
+
+    def _latest_user_message(self) -> str:
+        for message in reversed(self._history):
+            if message.get("role") == "user":
+                return str(message.get("content") or "")
+        return ""
 
     @staticmethod
     def _assistant_entry(message: dict[str, Any], turn: AssistantTurn) -> dict[str, Any]:
@@ -178,15 +225,41 @@ class Agent:
         which the chat template would reject.
         """
         limit = self._config.max_history_messages
-        if limit <= 0 or len(self._history) <= limit:
-            return
+        budget = self._config.max_history_chars
 
-        excess = len(self._history) - limit
-        for index in range(excess, len(self._history)):
-            if self._history[index].get("role") == "user":
-                del self._history[:index]
+        while self._history:
+            too_many = limit > 0 and len(self._history) > limit
+            too_large = budget > 0 and self._history_chars() > budget
+            if not (too_many or too_large):
                 return
-        # No safe cut point found; keep the history as it is.
+
+            # Search from 1, never 0: a cut of zero would make no progress and
+            # this would spin. It also means the most recent user message can
+            # never be dropped, which is the one thing the turn cannot lose.
+            cut = next(
+                (
+                    index
+                    for index in range(1, len(self._history))
+                    if self._history[index].get("role") == "user"
+                ),
+                None,
+            )
+            if cut is None:
+                # Nothing safe left to drop. Cutting anywhere else would orphan
+                # a tool result from the assistant message that called it, and
+                # the chat template rejects that outright.
+                return
+            del self._history[:cut]
+
+    def _history_chars(self) -> int:
+        """Roughly what the conversation costs, for the size limit.
+
+        Characters rather than tokens, because counting tokens means loading a
+        tokeniser and this runs on every round of every turn.
+        """
+        return sum(
+            len(str(message.get("content", ""))) for message in self._history
+        )
 
 
 def summarize_arguments(arguments: dict[str, Any], limit: int = 80) -> str:

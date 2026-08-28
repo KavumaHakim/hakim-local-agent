@@ -20,6 +20,7 @@ Two deliberate choices worth knowing about:
 from __future__ import annotations
 
 import ctypes
+import dataclasses
 import json
 import os
 import socket
@@ -31,10 +32,18 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from models.preferences import ModelPreferences
+
 import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REGISTRY = PROJECT_ROOT / "models.json"
+# Where dropped-in GGUF files are looked for. Not "models/": that is the
+# Python package this module lives in, and a data directory of the same
+# name would shadow it on the import path.
+DEFAULT_MODELS_DIRNAME = "weights"
+# Generated state lives under data/, as everything generated here does.
+DEFAULT_PREFERENCES_DIR = PROJECT_ROOT / "data"
 
 # Below this there is not enough room for the process itself, whatever the
 # model. Above it, a shortfall against a model's own figure only means paging,
@@ -173,13 +182,32 @@ def available_ram_mb() -> int | None:
         return None  # not Windows, or the call is unavailable
 
 
-def load_registry(path: Path | None = None) -> dict[str, Any]:
-    """Read models.json."""
+def load_registry(
+    path: Path | None = None,
+    *,
+    preferences_dir: Path | None = None,
+    discover_models: bool = True,
+) -> dict[str, Any]:
+    """Build the model catalogue from three layers, in increasing priority.
+
+      1. `models.json` - curated, hand-tuned, in version control. Optional:
+         a fresh install with no registry at all still works.
+      2. the models folder - every .gguf that no curated entry already claims,
+         sized from its GGUF header by `models.discovery`.
+      3. `data/models.local.json` - the user's own choices from the settings
+         panel, which win over both.
+
+    Layering rather than replacing is what makes discovery safe to add. A
+    measured `min_free_mb` in models.json is better than anything inferred
+    here, so a curated entry is never overwritten by a scan of the same file.
+    """
     path = path or DEFAULT_REGISTRY
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        raise ModelManagerError(f"Model registry not found: {path}") from None
+        # No registry is a supported state, not an error: drop a model in the
+        # folder and the app finds it. Everything below has a default.
+        raw = {}
     except ValueError as exc:
         raise ModelManagerError(f"{path} is not valid JSON: {exc}") from None
 
@@ -193,9 +221,10 @@ def load_registry(path: Path | None = None) -> dict[str, Any]:
         candidate = Path(value).expanduser()
         return candidate if candidate.is_absolute() else (here / candidate)
 
-    models_dir = anchor(models_dir_raw) if (
-        models_dir_raw := raw.get("models_dir", "")
-    ) else here
+    # Defaults to weights/ rather than the registry's own folder. `models/`
+    # would be the obvious name but it is the Python package, and a data
+    # directory sharing it would shadow the import.
+    models_dir = anchor(raw.get("models_dir", "") or DEFAULT_MODELS_DIRNAME)
     specs: dict[str, ModelSpec] = {}
     for entry in raw.get("models", []):
         try:
@@ -236,25 +265,126 @@ def load_registry(path: Path | None = None) -> dict[str, Any]:
         except (KeyError, TypeError, ValueError) as exc:
             raise ModelManagerError(f"Bad model entry in {path}: {exc}") from None
 
-    if not specs:
-        raise ModelManagerError(f"{path} defines no models.")
+    curated_keys = set(specs)
+
+    # --- layer 2: whatever is in the models folder ---
+    discovered: list[Any] = []
+    if discover_models:
+        from models.discovery import discover
+
+        discovered = discover(
+            models_dir,
+            taken_keys=curated_keys,
+            taken_ports=[s.port for s in specs.values() if not s.remote],
+            known_files=[
+                name
+                for spec in specs.values()
+                if not spec.remote
+                for name in (
+                    spec.path.name,
+                    spec.mmproj.name if spec.mmproj else "",
+                )
+                if name
+            ],
+        )
+        for item in discovered:
+            specs[item.key] = ModelSpec(
+                key=item.key,
+                label=item.label,
+                path=item.file.resolve(),
+                port=item.port,
+                context=item.context,
+                threads=item.threads,
+                min_free_mb=item.min_free_mb,
+                description=item.description,
+                role=item.role,
+                mmproj=item.mmproj.resolve() if item.mmproj else None,
+            )
+
+    # --- layer 3: the user's own settings ---
+    # Preferences live beside the registry that named them, not at a fixed
+    # path. In production that is the project's data/ directory; in a test that
+    # passes a temporary registry it is a temporary directory, which is what
+    # keeps the suite from reading and rewriting the real user's settings.
+    if preferences_dir is None:
+        preferences_dir = (
+            DEFAULT_PREFERENCES_DIR if path == DEFAULT_REGISTRY else path.parent
+        )
+    preferences = ModelPreferences.load(preferences_dir)
+    for key, values in preferences.overrides.items():
+        spec = specs.get(key)
+        if spec is None:
+            continue
+        specs[key] = dataclasses.replace(
+            spec,
+            **{
+                name: value
+                for name, value in values.items()
+                if name in ("label", "context", "threads", "min_free_mb", "description")
+            },
+        )
+
+    # Hidden models stay in the catalogue but are not offered. Removing them
+    # outright would make un-hiding impossible from the UI, and would silently
+    # break a `primary` that points at one.
+    offered = {
+        key: spec for key, spec in specs.items() if not preferences.is_hidden(key)
+    }
 
     # Remote models all report port 0, so only the local ones are checked.
     ports = [spec.port for spec in specs.values() if not spec.remote]
     if len(set(ports)) != len(ports):
-        raise ModelManagerError("Two models share a port in models.json.")
+        raise ModelManagerError(
+            "Two models share a port. Give one of them a different `port` in "
+            "models.json."
+        )
 
     router = raw.get("router") or {}
-    fallback = raw.get("default") or next(iter(specs))
+    chat_keys = [
+        key for key, spec in offered.items() if spec.role == "chat" and spec.available
+    ]
+
+    # The primary, in priority order: what the user chose, what the registry
+    # ships, then the first usable chat model. The last is what makes a fresh
+    # install with one dropped-in model work without being asked anything.
+    fallback = ""
+    for candidate in (preferences.primary, raw.get("default", "")):
+        if candidate and candidate in offered:
+            fallback = candidate
+            break
+    if not fallback:
+        fallback = chat_keys[0] if chat_keys else (next(iter(specs), ""))
+
+    if not specs:
+        raise ModelManagerError(
+            f"No models. Put a .gguf file in {models_dir}, or add an entry to "
+            f"{path}."
+        )
+
+    # True when there is a real choice to make and nobody has made it. One
+    # model is not a choice, so a single-model install is never interrupted.
+    setup_required = not preferences.setup_complete and len(chat_keys) > 1
+
+    def routed(name: str) -> str:
+        chosen = getattr(preferences, f"router_{name}", "") or router.get(name, "")
+        return chosen if chosen in offered else fallback
+
     return {
         "server_exe": anchor(raw.get("server_exe", "")),
         "specs": specs,
+        "offered": offered,
         "default": fallback,
         "max_active": int(raw.get("max_active", 1)),
         "idle_timeout": float(raw.get("idle_timeout_seconds", 0)),
         # Which model the router treats as cheap and which as capable.
-        "router_fast": router.get("fast", fallback),
-        "router_strong": router.get("strong", fallback),
+        "router_fast": routed("fast"),
+        "router_strong": routed("strong"),
+        "models_dir": models_dir,
+        "preferences": preferences,
+        "discovered": [item.key for item in discovered],
+        "curated": sorted(curated_keys),
+        "setup_required": setup_required,
+        "registry_path": path,
     }
 
 
@@ -267,15 +397,12 @@ class ModelManager:
         *,
         start_timeout: float = 600.0,
         stop_timeout: float = 10.0,
+        preferences_dir: Path | None = None,
     ) -> None:
-        registry = load_registry(registry_path)
-        self._server_exe: Path = registry["server_exe"]
-        self._specs: dict[str, ModelSpec] = registry["specs"]
-        self._default: str = registry["default"]
-        self._max_active: int = registry["max_active"]
-        self._idle_timeout: float = registry["idle_timeout"]
-        self.router_fast: str = registry["router_fast"]
-        self.router_strong: str = registry["router_strong"]
+        self._registry_path = registry_path
+        self._preferences_dir = preferences_dir
+        registry = load_registry(registry_path, preferences_dir=preferences_dir)
+        self._apply(registry)
         self._start_timeout = start_timeout
         self._stop_timeout = stop_timeout
 
@@ -287,6 +414,155 @@ class ModelManager:
         # a second model while one is coming up.
         self._lock = threading.RLock()
         self._session = requests.Session()
+
+    def _apply(self, registry: dict[str, Any]) -> None:
+        """Adopt a freshly loaded registry.
+
+        Shared by construction and `rescan`, so the two cannot drift: a field
+        added to the registry has exactly one place to be picked up.
+        """
+        self._server_exe: Path = registry["server_exe"]
+        self._specs: dict[str, ModelSpec] = registry["specs"]
+        self._offered: dict[str, ModelSpec] = registry["offered"]
+        self._default: str = registry["default"]
+        self._max_active: int = registry["max_active"]
+        self._idle_timeout: float = registry["idle_timeout"]
+        self.router_fast: str = registry["router_fast"]
+        self.router_strong: str = registry["router_strong"]
+        self._models_dir: Path = registry["models_dir"]
+        self._preferences: ModelPreferences = registry["preferences"]
+        self._discovered: list[str] = registry["discovered"]
+        self._curated: list[str] = registry["curated"]
+        self._setup_required: bool = registry["setup_required"]
+
+    # --- the models folder ---
+
+    @property
+    def models_dir(self) -> Path:
+        """Where dropped-in GGUF files are looked for."""
+        return self._models_dir
+
+    @property
+    def setup_required(self) -> bool:
+        """Whether a primary model still has to be chosen.
+
+        False when there is only one candidate: a single-model install has no
+        choice to offer and should not be interrupted to make one.
+        """
+        return self._setup_required
+
+    def is_discovered(self, key: str) -> bool:
+        """Whether this model was found on disk rather than declared."""
+        return key in self._discovered
+
+    def is_hidden(self, key: str) -> bool:
+        return self._preferences.is_hidden(key)
+
+    def rescan(self) -> list[str]:
+        """Re-read the models folder and the preferences file.
+
+        Returns the keys that are new. Running processes survive: keys are
+        derived from the filename and are stable, so a model loaded before a
+        rescan is still loaded, and still addressable, after one.
+        """
+        with self._lock:
+            before = set(self._specs)
+            registry = load_registry(
+                self._registry_path, preferences_dir=self._preferences_dir
+            )
+            self._apply(registry)
+
+            # Carry over the status of anything still present, so a rescan does
+            # not forget which model is running.
+            statuses = {}
+            for key, spec in self._specs.items():
+                existing = self._statuses.get(key)
+                if existing is not None:
+                    existing.spec = spec
+                    statuses[key] = existing
+                else:
+                    statuses[key] = ModelStatus(spec=spec)
+            self._statuses = statuses
+
+            # A model whose file was deleted while it was running would leave
+            # an orphan process that nothing can address any more.
+            for key in list(self._processes):
+                if key not in self._specs:
+                    self.stop(key)
+            return sorted(set(self._specs) - before)
+
+    # --- user settings ---
+
+    @property
+    def preferences(self) -> ModelPreferences:
+        return self._preferences
+
+    def set_primary(self, key: str) -> None:
+        """Choose the model everything defaults to, and remember it."""
+        spec = self.get_spec(key)
+        if spec.role != "chat":
+            raise ModelManagerError(
+                f"{spec.label} is a {spec.role} backend, not a chat model, so "
+                f"it cannot be the primary."
+            )
+        with self._lock:
+            self._preferences.set_primary(key)
+            self._preferences.save()
+            self._default = key
+            self._setup_required = False
+            if self.router_fast not in self._offered:
+                self.router_fast = key
+
+    def set_router(self, *, fast: str = "", strong: str = "") -> None:
+        """Point the auto-router's cheap and capable ends at chosen models."""
+        for candidate in (fast, strong):
+            if candidate:
+                self.get_spec(candidate)
+        with self._lock:
+            self._preferences.set_router(fast=fast, strong=strong)
+            self._preferences.save()
+            if fast:
+                self.router_fast = fast
+            if strong:
+                self.router_strong = strong
+
+    def set_override(self, key: str, values: dict[str, Any]) -> dict[str, Any]:
+        """Retune one model from the settings panel, and persist it.
+
+        Takes effect on the model's next start: llama-server is given its
+        context and thread count on the command line, so a running process
+        keeps the values it was started with.
+        """
+        self.get_spec(key)
+        with self._lock:
+            applied = self._preferences.override(key, values)
+            if applied:
+                self._preferences.save()
+        if applied:
+            self.rescan()
+        return applied
+
+    def clear_override(self, key: str) -> bool:
+        """Put a model back to its registry or discovered values."""
+        with self._lock:
+            cleared = self._preferences.clear_override(key)
+            if cleared:
+                self._preferences.save()
+        if cleared:
+            self.rescan()
+        return cleared
+
+    def set_hidden(self, key: str, hidden: bool) -> None:
+        """Stop offering a model, without deleting its file."""
+        self.get_spec(key)
+        if hidden and key == self._default:
+            raise ModelManagerError(
+                "That is the primary model. Choose a different primary first."
+            )
+        with self._lock:
+            self._preferences.hide(key, hidden)
+            self._preferences.save()
+        self.rescan()
 
     # --- introspection ---
 
@@ -592,6 +868,15 @@ class ModelManager:
             "-c", str(spec.context),
             "-t", str(spec.threads),
             "-np", "1",
+            # No --cache-reuse here, and that is a measured decision rather
+            # than an omission. The theory was that replaying history without
+            # tool calls - they are display metadata and are not stored as
+            # conversation - would make the second turn's prompt diverge from
+            # the cached tokens and force a reprocess. Measured, it does not:
+            # turn two reprocesses 50 tokens of 982 with the flag and 50
+            # without, because the divergence is near the end of the prompt
+            # where there is almost nothing left to redo. Ordinary prefix
+            # caching already covers this, so the flag would be cargo.
             "--host", "127.0.0.1",
             "--port", str(spec.port),
         ]

@@ -127,6 +127,21 @@ class ModelOut(BaseModel):
     # the UI needs to say which of the two is wrong.
     has_key: bool = True
     usable: bool = True
+    # True when this model was found in the models folder rather than declared
+    # in models.json. Shown, because a discovered model's context and RAM
+    # figures are inferred from its header and may want retuning.
+    discovered: bool = False
+    # Hidden models stay in the catalogue so they can be un-hidden, but are
+    # not offered to the model picker or the router.
+    hidden: bool = False
+    # Set when a value came from the settings panel rather than the registry.
+    customised: bool = False
+    file_mb: int = 0
+    # From the GGUF header: what the model was trained for, against what it is
+    # actually being run at. A large gap is the interesting case.
+    training_context: int = 0
+    kv_cache_mb: int = 0
+    notes: list[str] = []
 
 
 class ModelsOut(BaseModel):
@@ -140,6 +155,54 @@ class ModelsOut(BaseModel):
     available_ram_mb: int | None = None
     # Whether hosted models can be reached at all. Cached, so this is cheap.
     online: bool = False
+    # Where to drop a .gguf file for it to be picked up.
+    models_dir: str = ""
+    # True when several chat models exist and no primary has been chosen yet.
+    # The UI shows the first-launch picker on this; a single-model install
+    # never sets it, because one model is not a choice.
+    setup_required: bool = False
+
+
+# --- model settings ---
+
+
+class ModelPrimaryRequest(BaseModel):
+    key: str = Field(min_length=1)
+
+
+class ModelRouterRequest(BaseModel):
+    fast: str = ""
+    strong: str = ""
+
+
+class ModelOverrideRequest(BaseModel):
+    """Retune one model. Every field is optional; only what is sent changes.
+
+    Deliberately no `file`, `port` or `role`: those decide what a model *is*
+    and where it runs, and getting them wrong from a settings panel produces a
+    model that will not start for reasons the panel cannot explain.
+    """
+
+    label: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=200)
+    context: int | None = Field(default=None, ge=512, le=131_072)
+    threads: int | None = Field(default=None, ge=1, le=64)
+    min_free_mb: int | None = Field(default=None, ge=0, le=128_000)
+
+
+class ModelHideRequest(BaseModel):
+    hidden: bool = True
+
+
+class RescanOut(BaseModel):
+    """What a rescan of the models folder found."""
+
+    success: bool = True
+    models_dir: str
+    # Keys that were not in the catalogue before this scan.
+    added: list[str] = []
+    total: int = 0
+    models: ModelsOut
 
 
 # --- tools ---
@@ -175,6 +238,12 @@ class SwitchOut(BaseModel):
     risk: str = ''
 
 
+class OcrBackendRequest(BaseModel):
+    """Choose between Tesseract and the GLM-OCR model."""
+
+    backend: str = Field(pattern="^(tesseract|model)$")
+
+
 class ToggleRequest(BaseModel):
     enabled: bool
 
@@ -191,6 +260,214 @@ class ToolsOut(BaseModel):
     disabled: list[DisabledToolOut]
     switches: list[SwitchOut] = []
     workspace: str
+    # Which reader ocr_image uses: "tesseract" or "model". They behave
+    # differently enough that the UI names the active one rather than showing
+    # a single "OCR" switch that means two things.
+    ocr_backend: str = "model"
+    # Whether that backend could run right now, and why not.
+    ocr_ready: bool = False
+    ocr_hint: str = ""
+
+
+# --- document search (RAG) ---
+
+
+class RagIndexRequest(BaseModel):
+    """Index a file, or a folder of them."""
+
+    path: str = Field(min_length=1)
+    # Directories only. A folder of notes is normally worth walking; a folder
+    # that happens to sit above a source tree is not, hence the switch.
+    recursive: bool = True
+    # Re-embed even when size and modification time say nothing changed. The
+    # escape hatch for a file whose timestamp lies.
+    force: bool = False
+
+
+class RagIndexedDocument(BaseModel):
+    document: str
+    chunks: int
+
+
+class RagFailure(BaseModel):
+    document: str
+    error: str
+
+
+class RagIndexResult(BaseModel):
+    success: bool = True
+    indexed: list[RagIndexedDocument] = []
+    # Names only: an unchanged file has nothing else worth reporting.
+    skipped: list[str] = []
+    # Per-file failures. An unreadable PDF in a folder of 400 is reported
+    # here rather than failing the whole run.
+    failed: list[RagFailure] = []
+    documents_total: int = 0
+    chunks_total: int = 0
+
+
+class RagSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    top_k: int | None = Field(default=None, ge=1, le=50)
+    # Cosine similarity. None uses the configured threshold.
+    min_score: float | None = Field(default=None, ge=-1.0, le=1.0)
+
+
+class RagHit(BaseModel):
+    document: str
+    path: str
+    chunk_id: str
+    score: float
+    text: str
+    # Absent for formats that have no pages, rather than null.
+    page: int | None = None
+
+
+class RagSearchResult(BaseModel):
+    success: bool = True
+    query: str
+    count: int
+    results: list[RagHit] = []
+    # Set when there is something the caller should know: an empty index, or
+    # nothing above the threshold.
+    note: str = ""
+    truncated: str = ""
+
+
+class RagDocumentOut(BaseModel):
+    id: int
+    document: str
+    path: str
+    chunks: int
+    pages: int | None = None
+    size_bytes: int
+    indexed_at: str
+
+
+class RagDocumentsOut(BaseModel):
+    success: bool = True
+    count: int
+    chunks_total: int
+    documents: list[RagDocumentOut] = []
+
+
+class RagRemoveResult(BaseModel):
+    success: bool = True
+    document: str
+    removed_chunks: int
+
+
+class RagStatsOut(BaseModel):
+    success: bool = True
+    documents: int
+    chunks: int
+    model: str
+    dimension: int
+    chunk_tokens: int
+    overlap_tokens: int
+    store: str
+    vector_bytes: int
+    # Whether the embedding model is resident right now. The answer should be
+    # False most of the time.
+    embedder_loaded: bool = False
+
+
+# --- memory ---
+
+
+class MemoryOut(BaseModel):
+    id: int
+    type: str
+    content: str
+    importance: float
+    confidence: float
+    status: str
+    created_at: str = ""
+    subject: str = ""
+    superseded_by: int | None = None
+    # Present on search results, absent on a plain listing.
+    score: float | None = None
+    similarity: float | None = None
+
+
+class MemoryListOut(BaseModel):
+    success: bool = True
+    query: str = ""
+    count: int = 0
+    memories: list[MemoryOut] = []
+    # Set when nothing was relevant, which is a real answer rather than a
+    # failure - the UI shows it instead of an empty box.
+    note: str = ""
+
+
+class MemorySearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class MemoryRememberRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+    type: str = "fact"
+    importance: float = Field(default=0.8, ge=0.0, le=1.0)
+    subject: str = ""
+
+
+class MemoryUpdateRequest(BaseModel):
+    content: str | None = None
+    type: str | None = None
+    importance: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    status: str | None = None
+    subject: str | None = None
+
+
+class MemoryProcessorOut(BaseModel):
+    configured: bool = False
+    available: bool = False
+    reason: str = ""
+    running: bool = False
+    last_run: dict[str, Any] = {}
+
+
+class MemoryStatsOut(BaseModel):
+    success: bool = True
+    total: int = 0
+    active: int = 0
+    archived: int = 0
+    superseded: int = 0
+    deleted: int = 0
+    pending_jobs: int = 0
+    # Whether semantic retrieval is possible; False falls back to substring.
+    embeddings: bool = False
+    processor: MemoryProcessorOut = MemoryProcessorOut()
+
+    # Per-type counts arrive as type_fact, type_preference and so on.
+    model_config = {"extra": "allow"}
+
+
+class MemoryConsolidateResult(BaseModel):
+    success: bool = True
+    merged: int = 0
+    superseded: int = 0
+    needs_model: int = 0
+    queued: int = 0
+    note: str = ""
+
+
+class MemoryProcessResult(BaseModel):
+    """What one auxiliary-model batch did, or why it did not run."""
+
+    ran: bool = False
+    reason: str = ""
+    jobs: int = 0
+    by_kind: dict[str, int] = {}
+    memories_created: int = 0
+    embedded: int = 0
+    failed: int = 0
+    stopped_early: bool = False
+    seconds: float = 0.0
+    model: str = ""
+    pending: int = 0
 
 
 # --- health ---

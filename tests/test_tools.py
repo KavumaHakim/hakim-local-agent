@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from config import Config
-from tools.base import ToolRegistry
+from tools.base import ToolRegistry, ToolResult
 from tools.calculator import CALCULATOR_TOOL, CalculationError, calculate, evaluate
 from tools.filesystem import FilesystemToolError, WorkspaceFiles
 from tools.ocr_tool import OcrClient, OcrError
@@ -287,3 +289,106 @@ class RegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolResultTruncationTests(unittest.TestCase):
+    """A tool result has to fit the model's context, or the turn is lost.
+
+    Several tools are unbounded - a page of OCR, a file read - and on a
+    4,096-token model the prompt and tool schemas already cost about 1,080
+    tokens. One dense page overflows the window and fails the whole turn
+    rather than one result.
+    """
+
+    def result(self, text: str) -> ToolResult:
+        return ToolResult(
+            "ocr_image",
+            {
+                "success": True,
+                "path": "scan.png",
+                "text": text,
+                "characters": len(text),
+                "backend": "model",
+            },
+        )
+
+    def test_a_small_result_is_untouched(self):
+        result = self.result("a short line of text")
+        self.assertEqual(result.content_within(4000), result.content)
+        self.assertNotIn("truncated", json.loads(result.content_within(4000)))
+
+    def test_a_limit_of_zero_means_no_limit(self):
+        result = self.result("x" * 50_000)
+        self.assertEqual(len(result.content_within(0)), len(result.content))
+
+    def test_an_oversized_result_is_cut_to_the_limit(self):
+        result = self.result("x" * 20_000)
+        capped = result.content_within(3_000)
+        self.assertLessEqual(len(capped), 3_000)
+
+    def test_the_cut_result_is_still_valid_json(self):
+        # Cutting the serialised text instead of the payload would produce a
+        # broken JSON string, which the model cannot read at all.
+        payload = json.loads(self.result("x" * 20_000).content_within(3_000))
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["path"], "scan.png")
+
+    def test_the_model_is_told_what_is_missing(self):
+        # A model handed half a page with no indication will summarise it as
+        # though it were the whole thing.
+        payload = json.loads(self.result("x" * 20_000).content_within(3_000))
+        self.assertIn("truncated", payload)
+        self.assertIn("20,000", payload["truncated"])
+        self.assertIn("not shown", payload["truncated"])
+
+    def test_the_true_length_survives_the_cut(self):
+        payload = json.loads(self.result("x" * 20_000).content_within(3_000))
+        self.assertEqual(payload["characters"], 20_000)
+        self.assertLess(len(payload["text"]), 20_000)
+
+    def test_as_much_text_as_fits_is_kept(self):
+        # The point is to keep the useful part, not to throw the field away -
+        # which is what the first attempt at this did.
+        payload = json.loads(self.result("x" * 20_000).content_within(3_000))
+        self.assertGreater(len(payload["text"]), 2_000)
+
+    def test_the_longest_field_is_the_one_cut(self):
+        result = ToolResult(
+            "read_text_file",
+            {"success": True, "path": "a" * 200, "content": "x" * 20_000},
+        )
+        payload = json.loads(result.content_within(3_000))
+        self.assertEqual(len(payload["path"]), 200)
+        self.assertLess(len(payload["content"]), 20_000)
+
+    def test_a_result_that_is_all_metadata_still_returns_json(self):
+        result = ToolResult("odd", {"success": True, "n": 1, "m": 2})
+        self.assertTrue(json.loads(result.content_within(10))["success"])
+
+    def test_an_unserialisable_payload_is_reported_not_raised(self):
+        result = ToolResult("odd", {"success": True, "thing": object()})
+        # default=str handles it; the contract is that it never raises.
+        self.assertIsInstance(result.content_within(3_000), str)
+
+
+class ToolResultBudgetTests(unittest.TestCase):
+    """The cap is a share of the model's own context, not a fixed number."""
+
+    def test_the_budget_scales_with_the_context(self):
+        small = dataclasses.replace(Config(), model_context=4096)
+        large = dataclasses.replace(Config(), model_context=32768)
+        self.assertLess(small.max_tool_result_chars, large.max_tool_result_chars)
+
+    def test_a_quarter_of_the_context_by_default(self):
+        config = dataclasses.replace(Config(), model_context=4096)
+        # 4096 / 4 = 1024 tokens, at the measured 3.27 characters per token.
+        self.assertEqual(config.max_tool_result_chars, int(1024 * 3.27))
+
+    def test_a_tiny_context_still_leaves_a_usable_floor(self):
+        config = dataclasses.replace(Config(), model_context=512)
+        self.assertGreaterEqual(config.max_tool_result_chars, 256)
+
+    def test_the_share_is_configurable(self):
+        half = dataclasses.replace(Config(), model_context=4096, tool_result_share=0.5)
+        quarter = dataclasses.replace(Config(), model_context=4096)
+        self.assertGreater(half.max_tool_result_chars, quarter.max_tool_result_chars)

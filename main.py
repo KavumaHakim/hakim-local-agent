@@ -12,7 +12,12 @@ import dataclasses
 
 from agent.loop import Agent, AgentError, ToolEvent
 from config import load_config
-from models.manager import ModelManager, ModelManagerError, ModelState
+from models.manager import (
+    ModelManager,
+    ModelManagerError,
+    ModelState,
+    available_ram_mb,
+)
 from models.qwen import QwenClient, QwenError
 from tools.registry import build_default_registry
 
@@ -21,6 +26,8 @@ HELP = """Commands:
   /tools         list the tools the agent can use
   /models        list models and which one is loaded
   /model <key>   switch to a model (unloads the current one)
+  /primary <key> set the model everything defaults to (remembered)
+  /rescan        re-read the models folder after copying a file in
   /unload        unload the current model and free its RAM
   /clear         reset the conversation
   /quit          quit  (/exit also works)
@@ -57,15 +64,91 @@ def _print_models(manager: ModelManager, current: str) -> None:
     for status in manager.statuses():
         spec = status.spec
         marks = []
+        if spec.key == manager.default_key:
+            marks.append("primary")
         if spec.key == current:
             marks.append("selected")
         if status.state is ModelState.READY:
             marks.append("loaded (external)" if status.adopted else "loaded")
+        if manager.is_discovered(spec.key):
+            marks.append("found on disk")
+        if manager.is_hidden(spec.key):
+            marks.append("hidden")
         if not spec.available:
             marks.append("FILE MISSING")
         suffix = f"   [{', '.join(marks)}]" if marks else ""
-        print(f"  {spec.key:<10} {spec.label:<18} :{spec.port}{suffix}")
-    print("\nSwitch with /model <key>. Only one model stays in RAM.\n")
+        print(f"  {spec.key:<24} {spec.label:<26} :{spec.port}{suffix}")
+
+    print(f"\nModels folder: {manager.models_dir}")
+    print("Drop a .gguf in there and run /rescan to pick it up.")
+    print("Switch with /model <key>, set the default with /primary <key>.")
+    print("Only one model stays in RAM.\n")
+
+
+def _choose_primary(manager: ModelManager) -> bool:
+    """Ask which model to use, on first launch only.
+
+    Shown when the models folder holds more than one usable chat model and
+    nobody has chosen between them. One model is not a choice, so a
+    single-model install is never interrupted to make one.
+
+    Answering writes the choice to data/models.local.json, so it is asked once
+    rather than every start. Declining is allowed - the default stands, and the
+    question comes back next time.
+    """
+    candidates = [
+        status.spec
+        for status in manager.statuses()
+        if status.spec.role == "chat" and status.spec.available
+        and not status.spec.remote
+    ]
+    if not candidates:
+        return False
+
+    print("\nWhich model should be the primary?")
+    print("Everything defaults to it. You can change it later with /primary.\n")
+    for position, spec in enumerate(candidates, start=1):
+        marks = []
+        if manager.is_discovered(spec.key):
+            marks.append("found in the models folder")
+        size = _model_size_mb(spec)
+        if size:
+            marks.append(f"{size:,} MB")
+        marks.append(f"needs {spec.min_free_mb:,} MB free")
+        print(f"  {position}. {spec.label}  ({', '.join(marks)})")
+
+    free = available_ram_mb()
+    if free is not None:
+        print(f"\n  This machine has {free:,} MB free right now.")
+
+    try:
+        answer = input("\nNumber, or Enter to decide later: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if not answer:
+        return False
+
+    try:
+        spec = candidates[int(answer) - 1]
+    except (ValueError, IndexError):
+        print("That was not one of the numbers; leaving it for now.\n")
+        return False
+
+    try:
+        manager.set_primary(spec.key)
+    except ModelManagerError as exc:
+        print(f"{exc}\n", file=sys.stderr)
+        return False
+    print(f"\nPrimary model set to {spec.label}. Change it with /primary.\n")
+    return True
+
+
+def _model_size_mb(spec) -> int:
+    try:
+        return int(spec.path.stat().st_size / (1024 * 1024))
+    except (OSError, AttributeError):
+        return 0
 
 
 def main() -> int:
@@ -80,6 +163,9 @@ def main() -> int:
     except ModelManagerError as exc:
         print(f"Model registry error: {exc}", file=sys.stderr)
         return 1
+
+    if manager.setup_required:
+        _choose_primary(manager)
 
     state: dict = {"key": manager.active_key() or manager.default_key}
 
@@ -150,6 +236,29 @@ def main() -> int:
             state["key"] = key
             rebuild()
             print(f"Now using {spec.label} on {spec.url}\n")
+            continue
+        if user_input.startswith("/primary"):
+            parts = user_input.split(maxsplit=1)
+            if len(parts) < 2:
+                print(f"Primary is {manager.default_key}. Usage: /primary <key>\n")
+                continue
+            try:
+                manager.set_primary(parts[1].strip())
+            except ModelManagerError as exc:
+                print(f"{exc}\n", file=sys.stderr)
+                continue
+            print(f"Primary model is now {manager.default_key}.\n")
+            continue
+        if user_input == "/rescan":
+            try:
+                added = manager.rescan()
+            except ModelManagerError as exc:
+                print(f"{exc}\n", file=sys.stderr)
+                continue
+            if added:
+                print(f"Found: {', '.join(added)}\n")
+            else:
+                print(f"Nothing new in {manager.models_dir}.\n")
             continue
         if user_input == "/unload":
             if manager.stop(state["key"]):

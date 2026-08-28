@@ -1,0 +1,29 @@
+# Document search (the `documents` tool) and persistent memory. Optional,
+# and separate from requirements.txt on purpose.
+#
+# Both subsystems share this file because they share the machinery: memory
+# embeds with the same BGE worker and searches with the same flat-float32
+# index the document collection uses. Installing it once enables both.
+#
+# sentence-transformers pulls in torch and transformers, which together are
+# larger than everything else in this project combined - a few hundred
+# megabytes against a handful. Making that the price of `pip install -r
+# requirements.txt` for someone who only wants to chat would be the wrong
+# trade, so it is its own file and its own decision.
+#
+#     .venv\Scripts\pip install -r requirements-rag.txt
+#
+# Nothing in the application imports any of this until AGENT_ENABLE_RAG=1 and
+# something actually searches, so the CLI and the API both start without it.
+
+# The embedding model: BAAI/bge-small-en-v1.5, 384 dimensions, 134 MB.
+# Downloaded on first use into the Hugging Face cache.
+sentence-transformers>=3,<6
+
+# Reading PDFs. Pure Python, so there is no wheel to fail on Windows.
+pypdf>=5,<7
+
+# The vector index is a flat float32 file searched with numpy - no FAISS, no
+# vector database. numpy arrives with sentence-transformers anyway; it is
+# listed because rag/index.py depends on it directly.
+numpy>=1.26
