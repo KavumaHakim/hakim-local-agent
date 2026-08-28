@@ -182,7 +182,7 @@ class PathConfinementTests(unittest.TestCase):
 
     def test_backslash_windows_path_refused(self):
         with self.assertRaises(ShellToolError):
-            self.check(r"git show C:\Users\SHAMI\secrets.txt")
+            self.check(r"git show C:\elsewhere\secrets.txt")
 
     def test_absolute_posix_path_refused(self):
         with self.assertRaises(ShellToolError):
