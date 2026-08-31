@@ -17,6 +17,7 @@ and running OCR on it would cost time and produce nothing.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from rag.elements import DocumentElement, ExtractedDocument, render_table
@@ -30,6 +31,28 @@ MIN_PAGE_CHARACTERS = 48
 # An image covering less of the page than this is a logo or a figure, not the
 # page's content, so its presence does not make the page a scan.
 MIN_IMAGE_COVERAGE = 0.35
+
+# A raster image smaller than this in either direction is furniture - a bullet,
+# a rule, a logo, an icon in a running header. Extracting them would bury the
+# real figures in noise.
+MIN_FIGURE_PIXELS = 120
+
+# And one covering less of the page than this is decoration rather than a
+# figure someone would refer to.
+MIN_FIGURE_COVERAGE = 0.02
+
+# How far below an image to look for its caption, as a fraction of page height.
+# Captions sit directly under the figure; body text further down belongs to the
+# page, not to the picture.
+CAPTION_GAP = 0.08
+
+# What a caption looks like. Deliberately narrow: claiming a paragraph of body
+# prose is a figure's caption would be worse than admitting there is none.
+CAPTION_PATTERN = re.compile(
+    r"^\s*(figure|fig\.?|chart|graph|diagram|illustration|plate|exhibit|scheme)"
+    r"\s*[\d.:\-]*\s*\S",
+    re.IGNORECASE,
+)
 
 
 class PdfError(Exception):
@@ -109,11 +132,21 @@ def page_needs_ocr(page, text: str) -> bool:
     return False
 
 
-def extract_pdf(path: Path, *, want_tables: bool = True) -> ExtractedDocument:
+def extract_pdf(
+    path: Path,
+    *,
+    want_tables: bool = True,
+    figure_dir: Path | None = None,
+) -> ExtractedDocument:
     """Read a PDF into elements, one group per page.
 
     Pages whose text layer is missing come back with no text element and are
     listed in `ocr_pages`; the caller decides whether to run OCR over them.
+
+    With `figure_dir`, embedded raster images large enough to be figures are
+    written there as PNG and reported as `image` elements carrying their
+    caption. Without it no images are touched, which is what every caller that
+    only wants text should pass.
     """
     document = open_document(path)
     elements: list[DocumentElement] = []
@@ -161,6 +194,9 @@ def extract_pdf(path: Path, *, want_tables: bool = True) -> ExtractedDocument:
                 elements.append(
                     DocumentElement(type="table", content=rendered, page=number)
                 )
+
+            if figure_dir is not None:
+                elements.extend(_figures(document, page, number, figure_dir))
     finally:
         document.close()
 
@@ -207,6 +243,120 @@ def _outline(document) -> dict[int, list[tuple[int, str]]]:
             continue
         found.setdefault(page, []).append((max(1, level), title))
     return found
+
+
+def _figures(document, page, number: int, figure_dir: Path) -> list[DocumentElement]:
+    """Raster images on one page that are big enough to be figures.
+
+    Each is written as a PNG and returned as an `image` element whose content
+    is its caption, when one can be found. A figure with no caption still gets
+    an element - the file is what a vision model would later read - but its
+    empty content means it contributes nothing to the index, which is correct:
+    there is nothing yet to search for.
+
+    Vector artwork is not covered. A chart drawn as lines and rectangles is not
+    an image at all as far as the file is concerned, and pulling one out means
+    rendering a region of the page rather than extracting an object.
+    """
+    try:
+        rect = page.rect
+        page_area = float(rect.width) * float(rect.height)
+        images = page.get_images(full=True)
+    except Exception:
+        return []
+    if page_area <= 0 or not images:
+        return []
+
+    blocks = _text_blocks(page)
+    found: list[DocumentElement] = []
+
+    for index, image in enumerate(images):
+        xref = image[0]
+        try:
+            boxes = page.get_image_rects(xref)
+        except Exception:
+            continue
+        if not boxes:
+            continue
+        box = boxes[0]
+
+        covered = float(box.width) * float(box.height)
+        if covered / page_area < MIN_FIGURE_COVERAGE:
+            continue
+
+        try:
+            pixmap = _fitz().Pixmap(document, xref)
+        except Exception:
+            continue
+        try:
+            if pixmap.width < MIN_FIGURE_PIXELS or pixmap.height < MIN_FIGURE_PIXELS:
+                continue
+            # CMYK and other exotic colour spaces cannot be written as PNG
+            # directly; converting is cheaper than losing the figure.
+            if pixmap.n - pixmap.alpha >= 4:
+                pixmap = _fitz().Pixmap(_fitz().csRGB, pixmap)
+            target = figure_dir / f"page{number:04d}-{index}.png"
+            try:
+                figure_dir.mkdir(parents=True, exist_ok=True)
+                pixmap.save(str(target))
+            except Exception:
+                continue
+        finally:
+            pixmap = None
+
+        found.append(
+            DocumentElement(
+                type="image",
+                content=_caption(box, blocks, float(rect.height)),
+                page=number,
+                path=str(target),
+            )
+        )
+    return found
+
+
+def _text_blocks(page) -> list[tuple[float, float, float, float, str]]:
+    """(x0, y0, x1, y1, text) for the page's text blocks."""
+    try:
+        raw = page.get_text("blocks") or []
+    except Exception:
+        return []
+    blocks = []
+    for entry in raw:
+        try:
+            x0, y0, x1, y1, body = entry[0], entry[1], entry[2], entry[3], entry[4]
+        except (IndexError, TypeError):
+            continue
+        if isinstance(body, str) and body.strip():
+            blocks.append((float(x0), float(y0), float(x1), float(y1), body.strip()))
+    return blocks
+
+
+def _caption(box, blocks, page_height: float) -> str:
+    """The caption below an image, if there is one that looks like a caption.
+
+    Below rather than above because that is where captions overwhelmingly sit,
+    and horizontally overlapping the figure so a caption in the next column is
+    not stolen. Only text matching `CAPTION_PATTERN` is accepted: an empty
+    caption is honest, and calling a paragraph of body prose one is not.
+    """
+    limit = float(box.y1) + page_height * CAPTION_GAP
+    best: tuple[float, str] | None = None
+
+    for x0, y0, x1, y1, body in blocks:
+        if y0 < float(box.y1) or y0 > limit:
+            continue
+        # Some horizontal overlap with the figure, or it belongs to something
+        # else on the page.
+        if x1 < float(box.x0) or x0 > float(box.x1):
+            continue
+        if not CAPTION_PATTERN.match(body):
+            continue
+        distance = y0 - float(box.y1)
+        if best is None or distance < best[0]:
+            best = (distance, " ".join(body.split()))
+
+    return best[1] if best else ""
 
 
 def _may_hold_table(page) -> bool:

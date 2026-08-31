@@ -94,6 +94,7 @@ def _manager(runtime: Runtime):
             min_score=config.rag_min_score,
             max_file_bytes=config.rag_max_file_bytes,
             hybrid=config.rag_hybrid,
+            figures=config.rag_figures,
         )
     except RagError as exc:
         # The store directory could not be created, which is a server problem

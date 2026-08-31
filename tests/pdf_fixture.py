@@ -162,3 +162,33 @@ def add_ruled_table(path: str | Path, page_number: int = 1) -> Path:
     finally:
         document.close()
     return target
+
+
+def add_raster_figure(
+    path: str | Path,
+    page_number: int = 1,
+    *,
+    size: int = 300,
+    box: tuple[float, float, float, float] = (72, 110, 372, 310),
+) -> Path:
+    """Embed a raster image on one page of an existing PDF.
+
+    A generated gradient rather than a real photograph: what the tests care
+    about is that an image object of a given pixel size is present, so the
+    extractor can be asked whether it treats it as a figure or as furniture.
+    """
+    import fitz
+
+    target = Path(path)
+    document = fitz.open(target)
+    try:
+        page = document[page_number - 1]
+        pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, size, size), False)
+        for x in range(size):
+            for y in range(size):
+                pixmap.set_pixel(x, y, (x % 256, y % 256, (x + y) % 256))
+        page.insert_image(fitz.Rect(*box), pixmap=pixmap)
+        document.save(str(target), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    finally:
+        document.close()
+    return target

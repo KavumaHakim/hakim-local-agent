@@ -76,6 +76,20 @@ CREATE TABLE IF NOT EXISTS index_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Raster figures pulled out of a document. Not chunks: a picture has no text
+-- to embed, and its caption is already indexed as part of the page. This is
+-- the record of what was extracted and where the file went, so a figure can
+-- be listed, and later read by something that can see.
+CREATE TABLE IF NOT EXISTS figures (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    page        INTEGER,
+    path        TEXT    NOT NULL,
+    caption     TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_figures_document ON figures(document_id);
 """
 
 # The keyword half of search, kept apart because it is optional: FTS5 is
@@ -350,6 +364,7 @@ class MetadataStore:
         sha256: str,
         pages: int | None,
         chunks: list[tuple[int, int | None, str | None, str, int]],
+        figures: list[tuple[int | None, str, str]] | None = None,
         kind: str = "",
         characters: int = 0,
         ocr_used: bool = False,
@@ -358,9 +373,10 @@ class MetadataStore:
     ) -> tuple[int, list[int]]:
         """Store a document and its chunks, replacing any earlier version.
 
-        `chunks` is (ordinal, page, section, text, vector_row). Returns the
-        document id and the vector rows the previous version released, which
-        the caller has already accounted for.
+        `chunks` is (ordinal, page, section, text, vector_row), and `figures`
+        is (page, path, caption). Returns the document id and the vector rows
+        the previous version released, which the caller has already accounted
+        for.
 
         One transaction: a half-replaced document would leave chunks pointing
         at vectors that describe the old text.
@@ -380,6 +396,9 @@ class MetadataStore:
                 freed = [int(row["vector_row"]) for row in rows]
                 connection.execute(
                     "DELETE FROM chunks WHERE document_id = ?", (document_id,)
+                )
+                connection.execute(
+                    "DELETE FROM figures WHERE document_id = ?", (document_id,)
                 )
                 connection.execute(
                     "UPDATE documents SET name = ?, suffix = ?, size_bytes = ?,"
@@ -415,6 +434,16 @@ class MetadataStore:
                     for ordinal, page, section, text, vector_row in chunks
                 ],
             )
+
+            if figures:
+                connection.executemany(
+                    "INSERT INTO figures (document_id, page, path, caption)"
+                    " VALUES (?, ?, ?, ?)",
+                    [
+                        (document_id, page, path, caption)
+                        for page, path, caption in figures
+                    ],
+                )
 
         return document_id, freed
 
@@ -492,6 +521,23 @@ class MetadataStore:
                 "last_page": row["last_page"],
                 "chunks": int(row["chunks"]),
                 "characters": int(row["characters"] or 0),
+            }
+            for row in rows
+        ]
+
+    def figures_for(self, document_id: int) -> list[dict]:
+        """The figures pulled out of one document, in page order."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT page, path, caption FROM figures"
+                " WHERE document_id = ? ORDER BY page, id",
+                (document_id,),
+            ).fetchall()
+        return [
+            {
+                "page": row["page"],
+                "path": row["path"],
+                "caption": row["caption"],
             }
             for row in rows
         ]

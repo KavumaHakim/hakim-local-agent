@@ -282,6 +282,16 @@ class RagSectionOut(BaseModel):
     characters: int = 0
 
 
+class RagFigureOut(BaseModel):
+    """One raster figure pulled out of a document."""
+
+    page: int | None = None
+    path: str
+    # Empty when nothing near the picture looked like a caption. Honest: this
+    # only claims a caption when the text says it is one.
+    caption: str = ""
+
+
 class RagOutlineResult(BaseModel):
     """What one document is made of, rather than what matches a question."""
 
@@ -292,6 +302,7 @@ class RagOutlineResult(BaseModel):
     chunks: int = 0
     count: int = 0
     sections: list[RagSectionOut] = []
+    figures: list[RagFigureOut] = []
     note: str = ""
 
 

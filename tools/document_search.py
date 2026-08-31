@@ -200,6 +200,7 @@ def build_document_tools(
     top_k: int,
     min_score: float,
     hybrid: bool = True,
+    figures: bool = True,
     max_file_bytes: int,
     context_budget: int = DEFAULT_CONTEXT_BUDGET,
     threads: int = 2,
@@ -232,5 +233,6 @@ def build_document_tools(
         min_score=min_score,
         max_file_bytes=max_file_bytes,
         hybrid=hybrid,
+        figures=figures,
     )
     return DocumentSearchTools(manager, context_budget=context_budget).tools()

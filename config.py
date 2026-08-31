@@ -253,6 +253,14 @@ class Config:
     #
     # Set RAG_HYBRID=0 to measure what it is actually buying on your documents.
     rag_hybrid: bool = True
+    # Pull embedded raster figures out of PDFs while indexing.
+    #
+    # On, because it costs a PNG write per figure and no model time. What it
+    # buys is a figure's caption tied to the page it is on, and the picture
+    # itself kept somewhere findable - which is the groundwork for anything
+    # that can actually look at a chart. Vector artwork is not covered: a chart
+    # drawn as lines is not an image as far as the file is concerned.
+    rag_figures: bool = True
     # Total characters of retrieved text returned in one tool call.
     rag_context_chars: int = 6000
     # Two cores, shared with llama-server. Taking both makes the model this is
@@ -449,6 +457,7 @@ class Config:
             rag_top_k=_env_int("RAG_TOP_K", defaults.rag_top_k),
             rag_min_score=_env_float("RAG_MIN_SCORE", defaults.rag_min_score),
             rag_hybrid=_env_bool("RAG_HYBRID", defaults.rag_hybrid),
+            rag_figures=_env_bool("RAG_FIGURES", defaults.rag_figures),
             rag_context_chars=_env_int(
                 "RAG_CONTEXT_CHARS", defaults.rag_context_chars
             ),

@@ -47,6 +47,11 @@ from rag.metadata import ChunkRecord, Document, MetadataStore, SCHEMA_VERSION
 # File names inside the store directory.
 VECTORS_FILE = "vectors.f32"
 METADATA_FILE = "chunks.db"
+# Raster figures pulled out of documents, one directory per document, named by
+# the content hash that already identifies it. Keyed by hash rather than by id
+# so re-indexing a changed file writes somewhere new instead of mixing a new
+# document's figures with an old one's.
+FIGURES_DIR = "figures"
 
 # Read in blocks when hashing, so a large PDF is not loaded to check whether it
 # changed.
@@ -129,6 +134,7 @@ class RagManager:
         min_score: float = 0.3,
         max_file_bytes: int = 20_000_000,
         hybrid: bool = True,
+        figures: bool = True,
         ocr=None,
     ) -> None:
         self.store_dir = Path(store_dir).expanduser()
@@ -143,6 +149,10 @@ class RagManager:
         # and off is here for measuring what it is worth rather than for
         # normal use.
         self.hybrid = bool(hybrid)
+        # Pulling raster figures out of PDFs. On by default: it costs a PNG
+        # write per figure and no model time, and it is what makes a figure's
+        # caption searchable and the figure itself available to look at later.
+        self.figures = bool(figures)
 
         try:
             self.store_dir.mkdir(parents=True, exist_ok=True)
@@ -275,8 +285,20 @@ class RagManager:
         else:
             digest = self._hash(path)
 
+        # Written before the document row exists, so the directory is named by
+        # the file's hash rather than its id. A re-index of changed content
+        # lands in a new directory and the old one is swept below.
+        figure_dir = self._figure_dir(digest) if self.figures else None
+        if figure_dir is not None:
+            shutil.rmtree(figure_dir, ignore_errors=True)
+
         try:
-            document = extract(path, max_bytes=self.max_file_bytes, ocr=self.ocr)
+            document = extract(
+                path,
+                max_bytes=self.max_file_bytes,
+                ocr=self.ocr,
+                figure_dir=figure_dir,
+            )
         except ExtractionError as exc:
             raise RagError(str(exc)) from None
 
@@ -300,6 +322,14 @@ class RagManager:
             self.store.release_rows(rows)
             raise RagError(str(exc)) from None
 
+        # The figures extraction wrote, recorded so the files on disk are
+        # findable rather than orphans nothing refers to.
+        figures = [
+            (element.page, element.path, element.content)
+            for element in document.elements
+            if element.type == "image" and element.path
+        ]
+
         _, freed = self.store.replace_document(
             path=str(path),
             name=path.name,
@@ -312,6 +342,7 @@ class RagManager:
                 (chunk.ordinal, chunk.page, chunk.section, chunk.text, row)
                 for chunk, row in zip(chunks, rows)
             ],
+            figures=figures,
             kind=document.kind,
             characters=document.characters,
             ocr_used=document.ocr_used,
@@ -342,6 +373,7 @@ class RagManager:
         """
         record = self._resolve_document(document)
         sections = self.store.outline(record.id)
+        figures = self.store.figures_for(record.id)
         payload: dict[str, Any] = {
             "success": True,
             "document": record.name,
@@ -350,6 +382,7 @@ class RagManager:
             "chunks": record.chunk_count,
             "sections": sections,
             "count": len(sections),
+            "figures": figures,
         }
         if not sections:
             payload["note"] = (
@@ -573,11 +606,18 @@ class RagManager:
         """Remove one document from the index, by id, name or path."""
         target = self._resolve_document(document)
         name, freed = self.store.delete_document(target.id)
+        # Its figures go with it. They are derived data and nothing else
+        # refers to them, so leaving them would be a directory of orphans that
+        # only grows.
+        shutil.rmtree(self._figure_dir(target.sha256), ignore_errors=True)
         return {
             "success": True,
             "document": name,
             "removed_chunks": len(freed),
         }
+
+    def _figure_dir(self, digest: str) -> Path:
+        return self.store_dir / FIGURES_DIR / digest[:16]
 
     def compact(self) -> dict[str, Any]:
         """Squeeze deleted rows out of the vector file, without re-embedding.
@@ -627,6 +667,10 @@ class RagManager:
             self.index.clear()
         except VectorIndexError as exc:
             raise RagError(str(exc)) from None
+        # Every figure is about to be extracted again from its source file, so
+        # the old ones are not stale so much as duplicated - and a rebuild that
+        # left them would grow the store on every run.
+        shutil.rmtree(self.store_dir / FIGURES_DIR, ignore_errors=True)
         self._save_settings()
 
         rebuilt: list[dict[str, Any]] = []

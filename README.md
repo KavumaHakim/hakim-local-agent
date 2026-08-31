@@ -413,7 +413,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               895 tests, no server required
+└── tests/               903 tests, no server required
 ```
 
 ---
@@ -1378,6 +1378,39 @@ its text is extracted and indexed as text either way.
 For a 1,247-page book that is the difference between about **2.8 minutes and
 3.5 seconds** of extraction.
 
+#### Figures
+
+Embedded raster images large enough to be figures are pulled out while
+indexing, written under the store as PNG, and recorded with the page they came
+from and their caption.
+
+The caption is the searchable part, and it is found by looking at the text
+blocks **directly below** the picture and horizontally overlapping it — where
+captions overwhelmingly sit — and accepting only text that actually looks like
+one (`Figure 3.4 …`, `Fig. 2`, `Chart 1`, `Diagram …`). Body prose under a
+picture is left alone: an empty caption is honest, and calling a paragraph a
+caption is not.
+
+Furniture is filtered out. An image under 120 px on either side, or covering
+less than 2% of the page, is a bullet or a logo in a running header, and
+extracting them would bury the real figures in noise.
+
+The pictures are kept because a caption tells you a figure exists and nothing
+about what it shows — they are what something that can *see* would read later.
+`get_document_outline` lists them, and they are removed with their document and
+on a rebuild, so the store does not accumulate orphans.
+
+**What this does not do is read a chart.** Two limits, both real:
+
+- **Vector artwork is not a figure as far as the file is concerned.** A chart
+  drawn as lines and rectangles is not an image object, so it is not extracted.
+  Its axis labels and caption are still indexed as page text; the data is not.
+- **Nothing looks inside the picture.** A caption is text near the image, not
+  text in it. Reading the contents needs a vision model over the extracted
+  PNGs — which is exactly what keeping them makes possible.
+
+`RAG_FIGURES=0` turns extraction off.
+
 #### What indexing a book actually costs
 
 Measured on this machine — i5-6300U, two cores — against the real BGE model,
@@ -1955,6 +1988,7 @@ a connection failure.
 | `RAG_TOP_K` | `5` | Passages per search |
 | `RAG_MIN_SCORE` | `0.3` | Cosine similarity floor, for semantic hits only |
 | `RAG_HYBRID` | `1` | Keyword matching beside the embeddings, fused by rank |
+| `RAG_FIGURES` | `1` | Pull raster figures out of PDFs while indexing |
 | `RAG_CONTEXT_CHARS` | `6000` | Retrieved text handed to the model per call |
 | `RAG_THREADS` | `2` | Shared with llama-server |
 | `RAG_BATCH_SIZE` | `8` | Bigger costs RAM, not speed |
@@ -1972,7 +2006,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**895 tests, no model server needed, and none of them touch the network.**
+**903 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2123,7 +2157,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 895 tests
+- 903 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

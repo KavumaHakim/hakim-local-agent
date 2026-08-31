@@ -33,7 +33,12 @@ from rag.extract.pdf import extract_pdf
 from rag.index import VectorIndex, VectorIndexError
 from rag.manager import RagError, RagManager
 from rag.metadata import MetadataStore
-from tests.pdf_fixture import add_outline, add_ruled_table, write_pdf
+from tests.pdf_fixture import (
+    add_outline,
+    add_raster_figure,
+    add_ruled_table,
+    write_pdf,
+)
 from tools.base import ToolRegistry
 from tools.document_search import DocumentSearchError, DocumentSearchTools
 from tools.registry import build_default_registry
@@ -264,6 +269,114 @@ class TableDetectionTests(TempCase):
         self.assertEqual(
             [element.type for element in document.elements], ["text", "text"]
         )
+
+
+class FigureTests(TempCase):
+    """Raster figures: captions become searchable, pictures become findable."""
+
+    def book(self, *, caption: str = "Figure 3.4 Infrared spectrum of ethene"):
+        path = self.docs / "spectroscopy.pdf"
+        write_pdf(
+            path,
+            [
+                [
+                    "3.4 Spectroscopy of alkenes",
+                    "The absorption band is diagnostic of the double bond.",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    caption,
+                    "Body text continues after the figure here.",
+                ]
+            ],
+        )
+        # write_pdf lays text out in PDF coordinates (y upwards from the
+        # bottom) while an image box is in fitz coordinates (y downwards from
+        # the top). Line 14 lands at y=268 from the top, so the picture has to
+        # end just above it for the caption to be *below* the figure.
+        add_raster_figure(path, box=(72, 100, 372, 250))
+        return path
+
+    def test_a_figure_is_written_out_and_recorded(self):
+        self.book()
+        manager = self.manager()
+        manager.index_path(self.docs)
+
+        figures = manager.outline("spectroscopy.pdf")["figures"]
+        self.assertEqual(len(figures), 1)
+        self.assertEqual(figures[0]["page"], 1)
+        self.assertTrue(Path(figures[0]["path"]).is_file())
+
+    def test_the_caption_is_found_and_attached(self):
+        self.book()
+        manager = self.manager()
+        manager.index_path(self.docs)
+
+        figure = manager.outline("spectroscopy.pdf")["figures"][0]
+        self.assertIn("Infrared spectrum of ethene", figure["caption"])
+
+    def test_body_text_is_never_mistaken_for_a_caption(self):
+        """An empty caption is honest; calling a paragraph of prose one is
+        not."""
+        self.book(caption="The following discussion concerns bond vibration.")
+        manager = self.manager()
+        manager.index_path(self.docs)
+
+        figure = manager.outline("spectroscopy.pdf")["figures"][0]
+        self.assertEqual(figure["caption"], "")
+
+    def test_furniture_is_not_a_figure(self):
+        """A logo in a running header would bury the real figures."""
+        path = self.docs / "letterhead.pdf"
+        write_pdf(path, [["Some text on the page."]])
+        add_raster_figure(path, size=20, box=(520, 40, 540, 60))
+
+        manager = self.manager()
+        manager.index_path(self.docs)
+        self.assertEqual(manager.outline("letterhead.pdf")["figures"], [])
+
+    def test_removing_a_document_removes_its_figures(self):
+        """They are derived data nothing else refers to, so leaving them
+        behind is a directory of orphans that only grows."""
+        self.book()
+        manager = self.manager()
+        manager.index_path(self.docs)
+        stored = Path(manager.outline("spectroscopy.pdf")["figures"][0]["path"])
+        self.assertTrue(stored.is_file())
+
+        manager.remove("spectroscopy.pdf")
+        self.assertFalse(stored.exists())
+
+    def test_reindexing_does_not_accumulate_figures(self):
+        self.book()
+        manager = self.manager()
+        manager.index_path(self.docs)
+        manager.index_path(self.docs, force=True)
+
+        self.assertEqual(len(manager.outline("spectroscopy.pdf")["figures"]), 1)
+
+    def test_it_can_be_turned_off(self):
+        self.book()
+        manager = self.manager(figures=False)
+        manager.index_path(self.docs)
+
+        self.assertEqual(manager.outline("spectroscopy.pdf")["figures"], [])
+        self.assertFalse((self.tmp / "store" / "figures").exists())
+
+    def test_a_document_with_no_figures_reports_none(self):
+        self.write("plain.txt", "Nothing but text in this file.")
+        manager = self.manager()
+        manager.index_path(self.docs)
+        self.assertEqual(manager.outline("plain.txt")["figures"], [])
 
 
 class CleaningTests(unittest.TestCase):

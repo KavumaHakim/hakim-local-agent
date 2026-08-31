@@ -68,6 +68,7 @@ def extract(
     *,
     max_bytes: int = 20_000_000,
     ocr=None,
+    figure_dir: Path | None = None,
 ) -> ExtractedDocument:
     """Read `path` into a normalised document.
 
@@ -75,6 +76,10 @@ def extract(
     `{page: text}`. When it is None a scanned PDF still succeeds, but comes
     back with `ocr_note` explaining why it is empty rather than pretending the
     file had no content.
+
+    `figure_dir` is where embedded raster figures are written, for the formats
+    that have them. None means none are extracted, which is what a caller that
+    only wants text should pass.
     """
     target = Path(path)
 
@@ -105,7 +110,7 @@ def extract(
 
     try:
         if suffix in PDF_EXTENSIONS:
-            document = extract_pdf(target)
+            document = extract_pdf(target, figure_dir=figure_dir)
             document = _fill_scanned_pages(target, document, ocr)
         elif suffix in DOCX_EXTENSIONS:
             document = extract_docx(target)
