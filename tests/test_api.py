@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from api.main import create_app
 from api.runtime import Runtime
-from api.turns import Turn, TurnRequest
+from api.turns import Turn, TurnQueueFull, TurnRequest
 from config import Config
 from tests.fake_client import tool_call_message
 from tests.test_manager import ManagerHarness
@@ -936,6 +936,99 @@ class StoppingTurnTests(ApiTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["state"], "queued")
         self.assertEqual(self.runtime.queue.depth(), 0)
+
+
+class BacklogTests(ApiTestCase):
+    """The queue is bounded, and a refusal has to reach the person asking."""
+
+    def test_a_refused_backlog_is_a_429_that_says_why(self):
+        def full(turn):
+            raise TurnQueueFull(
+                "8 turns are already waiting. On this hardware that is well "
+                "over an hour of work."
+            )
+
+        self.runtime.queue.submit = full  # type: ignore[method-assign]
+        response = self.client.post("/api/chat", json={"prompt": "one more"})
+
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("already waiting", response.json()["detail"])
+
+
+class QueuedTurnHistoryTests(ApiTestCase):
+    """What a turn sees when it was queued behind another one.
+
+    Rows are written in an order that is not conversation order: a queued
+    turn's question is stored when it is accepted, which is *before* the
+    running turn's answer is stored. Selecting history by id alone therefore
+    drops the answer the user is most likely replying to.
+    """
+
+    def run_directly(self, turn: Turn) -> None:
+        """Run one turn on this thread, bypassing the queue.
+
+        The queue is not what is under test here, and driving it through the
+        endpoint would mean two overlapping SSE streams in a synchronous test
+        client - which tests the test, not the code.
+        """
+        self.runtime.run_turn(turn)
+
+    def test_a_queued_turn_sees_the_answer_that_came_before_it(self):
+        conversation = self.runtime.store.create_conversation(title="t")
+        store = self.runtime.store
+        first_question = store.add_message(conversation, "user", "what is 2+2?")
+        # Accepted while the first turn is still running, so its row lands
+        # before the answer to the question ahead of it.
+        second_question = store.add_message(conversation, "user", "and times 3?")
+        store.add_message(conversation, "assistant", "4")
+
+        self.runtime.responses = [{"role": "assistant", "content": "12"}]
+        self.run_directly(
+            Turn(
+                request=TurnRequest(
+                    conversation_id=conversation,
+                    prompt="and times 3?",
+                    user_message_id=second_question,
+                    model_key="fast",
+                )
+            )
+        )
+
+        sent = self.runtime.clients[-1].seen[0]
+        self.assertEqual(
+            [(m["role"], m.get("content")) for m in sent[1:]],
+            [
+                ("user", "what is 2+2?"),
+                ("assistant", "4"),
+                ("user", "and times 3?"),
+            ],
+        )
+        self.assertNotEqual(first_question, second_question)
+
+    def test_it_does_not_see_questions_still_waiting_behind_it(self):
+        """A prompt queued after this one has no answer yet, and putting it in
+        the history would have the model answering the wrong question."""
+        conversation = self.runtime.store.create_conversation(title="t")
+        store = self.runtime.store
+        mine = store.add_message(conversation, "user", "mine")
+        store.add_message(conversation, "user", "queued behind me")
+
+        self.runtime.responses = [{"role": "assistant", "content": "ok"}]
+        self.run_directly(
+            Turn(
+                request=TurnRequest(
+                    conversation_id=conversation,
+                    prompt="mine",
+                    user_message_id=mine,
+                    model_key="fast",
+                )
+            )
+        )
+
+        sent = self.runtime.clients[-1].seen[0]
+        self.assertEqual(
+            [m.get("content") for m in sent[1:]], ["mine"]
+        )
 
 
 class WorkspaceRouteTests(ApiTestCase):

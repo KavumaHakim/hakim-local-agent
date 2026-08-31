@@ -524,12 +524,25 @@ class Runtime:
 
         try:
             stored = self.store.get_messages(request.conversation_id)
-            # Everything before this turn's own user message. Comparing ids is
-            # exact even when several turns for one conversation are queued.
+            # The conversation as it stands, minus this turn's own question -
+            # the agent appends that itself - and minus any question queued
+            # behind this one.
+            #
+            # Not simply "everything with a lower id". Rows are not written in
+            # conversation order: a queued turn's question is stored the moment
+            # it is accepted, which is before the answer to the turn ahead of
+            # it exists. Selecting by id alone therefore drops exactly the
+            # answer the user is most likely replying to. Ids still settle the
+            # other direction, because a question queued behind this one has no
+            # answer yet and would have the model replying to the wrong thing.
             history = [
                 {"role": message.role, "content": message.content}
                 for message in stored
-                if message.id < request.user_message_id
+                if message.id != request.user_message_id
+                and not (
+                    message.role == "user"
+                    and message.id > request.user_message_id
+                )
             ]
 
             # Already decided, and agreed to, before this was queued.

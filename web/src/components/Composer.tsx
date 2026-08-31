@@ -46,6 +46,10 @@ interface Props {
   onToggleThinking: () => void
   workspace: WorkspaceInfo | null
   onOpenWorkspace: () => void
+  /** Turns already waiting. Shown so a queue cannot build up unnoticed. */
+  queued: number
+  /** True when nothing more may be queued until one of them finishes. */
+  atCapacity: boolean
 }
 
 export function Composer({
@@ -67,6 +71,8 @@ export function Composer({
   onToggleThinking,
   workspace,
   onOpenWorkspace,
+  queued,
+  atCapacity,
 }: Props) {
   const box = useRef<HTMLTextAreaElement>(null)
   const picker = useRef<HTMLInputElement>(null)
@@ -75,7 +81,11 @@ export function Composer({
 
   const suggestions = matchCommands(value)
   const showing = suggestions.length > 0 && !value.includes('\n')
-  const sendable = Boolean(value.trim()) || attachments.length > 0
+  // Drafting stays possible at capacity - it is sending that has to wait, and
+  // taking the textarea away would lose what someone was in the middle of
+  // typing.
+  const sendable =
+    (Boolean(value.trim()) || attachments.length > 0) && !atCapacity
 
   useLayoutEffect(() => {
     const element = box.current
@@ -316,8 +326,24 @@ export function Composer({
       </div>
 
       <p className="mt-[7px] px-0.5 text-[11px] text-faint">
-        Enter to send · Shift+Enter for a newline · drop an image to read it
-        {model && !model.remote && ' · this turn stays on your machine'}
+        {atCapacity ? (
+          <span className="text-warn">
+            That is as many as this machine will usefully hold. One has to
+            finish before the next can be asked.
+          </span>
+        ) : queued > 0 ? (
+          <>
+            <span className="text-accent-soft">
+              {queued} {queued === 1 ? 'question is' : 'questions are'} waiting
+            </span>{' '}
+            · they run one at a time, in the order you asked
+          </>
+        ) : (
+          <>
+            Enter to send · Shift+Enter for a newline · drop an image to read it
+            {model && !model.remote && ' · this turn stays on your machine'}
+          </>
+        )}
       </p>
     </div>
   )

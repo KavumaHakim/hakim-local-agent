@@ -6,6 +6,13 @@
  * different durations - a model load can be 130 s and generation minutes - and
  * "thinking..." for all of them tells the user nothing about whether anything
  * is wrong.
+ *
+ * Several turns can be in flight at once, and this tracks all of them. Not
+ * because they run at once - the server runs exactly one at a time, on two
+ * cores that cannot do better - but because a question thought of while the
+ * last one is still generating should not have to be held in the user's head
+ * for five minutes. Each turn is its own SSE stream and its own entry here;
+ * the phases keep them apart, since only one can ever be past `queued`.
  */
 
 import { useCallback, useRef, useState } from 'react'
@@ -48,6 +55,22 @@ export interface TurnState {
   error: { kind: string; message: string; canEscalate: boolean } | null
 }
 
+/**
+ * One turn in flight, as the UI needs it.
+ *
+ * `key` is ours and exists from the moment the request leaves; `id` is the
+ * server's and only arrives with `accepted`. Both are needed: the key routes
+ * events and React keys, the id is what the stop endpoint takes.
+ */
+export interface Turn extends TurnState {
+  key: string
+  id: string | null
+  /** What was asked, so a queued turn can say which one it is. */
+  prompt: string
+  /** True between asking this turn to stop and it actually stopping. */
+  stopping: boolean
+}
+
 const IDLE: TurnState = {
   phase: 'idle',
   position: 0,
@@ -72,34 +95,76 @@ export interface ChatOptions {
   onConversationChanged: (id: number) => void
 }
 
+let counter = 0
+
+/**
+ * How many turns this client will have in flight at once.
+ *
+ * Not a guess, and not the server's limit - the server holds eight, which is
+ * the right number for several tabs. This is the browser's: every turn in
+ * flight is an open SSE connection, and browsers allow six per origin over
+ * HTTP/1.1. Reach that and *every* other request queues behind them, so the
+ * page stops being able to ask anything - `/health` included - and looks
+ * hung. Four leaves room for the rest of the app to keep working.
+ *
+ * It is also about the right number on its own terms: at under a token a
+ * second, three questions waiting is already the best part of an hour.
+ */
+export const MAX_IN_FLIGHT = 4
+
 export function useChat(options: ChatOptions) {
   const [conversationId, setConversationId] = useState<number | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
-  const [turn, setTurn] = useState<TurnState>(IDLE)
+  const [turns, setTurns] = useState<Turn[]>([])
   // A turn the router wanted to send off this machine, waiting on a yes.
   const [consent, setConsent] = useState<{
     request: RemoteConfirmation
     prompt: string
   } | null>(null)
-  const abort = useRef<AbortController | null>(null)
-  // The id the stop endpoint needs, and whether one has been asked for. Both
-  // refs rather than state: they are read inside the stream callback, which
-  // closes over the render that started the turn.
-  const turnId = useRef<string | null>(null)
-  const [stopping, setStopping] = useState(false)
+  // One controller per turn in flight, so hanging up on one - or on all of
+  // them, when the conversation changes - never touches the others.
+  const aborts = useRef(new Map<string, AbortController>())
+  // The same set, counted before React has committed the new state: two
+  // sends in one tick would both read a stale `turns` and both think there
+  // was room.
+  const inFlight = useRef(new Set<string>())
 
   // Read inside the stream callback, which would otherwise close over the
   // options from the render that started the turn.
   const latest = useRef(options)
   latest.current = options
 
+  /** Apply a change to one turn, leaving the rest alone. */
+  const patch = useCallback(
+    (key: string, change: Partial<Turn> | ((turn: Turn) => Partial<Turn>)) => {
+      setTurns((current) =>
+        current.map((turn) =>
+          turn.key === key
+            ? {
+                ...turn,
+                ...(typeof change === 'function' ? change(turn) : change),
+              }
+            : turn,
+        ),
+      )
+    },
+    [],
+  )
+
+  const drop = useCallback((key: string) => {
+    aborts.current.delete(key)
+    inFlight.current.delete(key)
+    setTurns((current) => current.filter((turn) => turn.key !== key))
+  }, [])
+
   const openConversation = useCallback(async (id: number | null) => {
-    // Stops watching, and deliberately does not end the turn: a turn that has
+    // Stops watching, and deliberately does not end the turns: one that has
     // cost minutes is worth finishing even if nobody is looking, and its
     // answer is stored either way.
-    abort.current?.abort()
-    turnId.current = null
-    setTurn(IDLE)
+    for (const controller of aborts.current.values()) controller.abort()
+    aborts.current.clear()
+    inFlight.current.clear()
+    setTurns([])
     if (id === null) {
       setConversationId(null)
       setMessages([])
@@ -120,12 +185,15 @@ export function useChat(options: ChatOptions) {
       const trimmed = prompt.trim()
       // An attachment with no text is a valid turn.
       if (!trimmed && attachments.length === 0) return
+      // Guarded here as well as in the composer, because `send` is also
+      // reached from the palette, the slash commands and the retry buttons.
+      if (inFlight.current.size >= MAX_IN_FLIGHT) return
 
       // Shown immediately. The real row exists server-side the moment the
       // request is accepted; this is only so the message does not appear to
       // vanish for however long the queue is.
       const optimistic: Message = {
-        id: -Date.now(),
+        id: -Date.now() - counter,
         role: 'user',
         content: trimmed || '(image)',
         tools: [],
@@ -145,21 +213,39 @@ export function useChat(options: ChatOptions) {
         attachments,
       }
 
-      setTurn({ ...IDLE, phase: 'queued' })
-      // Cleared before the new id arrives, so a stop pressed in the gap
-      // cannot reach the turn that just finished.
-      turnId.current = null
+      const key = `turn-${(counter += 1)}`
+      inFlight.current.add(key)
+      setTurns((current) => [
+        ...current,
+        {
+          ...IDLE,
+          phase: 'queued',
+          key,
+          id: null,
+          prompt: trimmed || '(image)',
+          stopping: false,
+        },
+      ])
+
       const controller = new AbortController()
-      abort.current = controller
+      aborts.current.set(key, controller)
       // Kept alongside the state copy so `done` can attach the finished trace
       // to the message without reading state it may not have committed yet.
       let thinking = ''
+      // Whether this turn reached an end of its own. Errors are an end that
+      // stays on screen, so the tidy-up below must not sweep them away the
+      // moment the stream closes behind them.
+      let settled = false
 
       try {
         await streamChat(body, {
           signal: controller.signal,
           onEvent: (event) => apply(event),
         })
+        // A stream that ends without `done`, `error` or `stopped` has nothing
+        // left to say. Leaving the entry behind would show a turn that is
+        // permanently about to start.
+        if (!settled) drop(key)
       } catch (error) {
         if (controller.signal.aborted) return
 
@@ -172,20 +258,28 @@ export function useChat(options: ChatOptions) {
           setMessages((current) =>
             current.filter((message) => message.id !== optimistic.id),
           )
-          setTurn(IDLE)
+          drop(key)
           setConsent({ request: confirmation, prompt: trimmed })
           return
         }
 
-        setTurn((current) => ({
-          ...current,
+        // Anything else - a refused backlog, a server that went away - stays
+        // on screen as this turn's own error, next to the question it belongs
+        // to rather than replacing whatever else is running.
+        patch(key, {
           phase: 'error',
           error: {
             kind: 'transport',
             message: error instanceof Error ? error.message : String(error),
             canEscalate: false,
           },
-        }))
+        })
+      } finally {
+        // The stream is closed either way, so its connection is back whatever
+        // became of the turn - an errored entry stays on screen but no longer
+        // holds one, and must not go on counting against the limit.
+        aborts.current.delete(key)
+        inFlight.current.delete(key)
       }
 
       function apply(event: TurnEvent) {
@@ -200,79 +294,59 @@ export function useChat(options: ChatOptions) {
                   : message,
               ),
             )
-            turnId.current = event.turn_id
-            setTurn((current) => ({
-              ...current,
-              position: event.position,
-              phase: event.position > 0 ? 'queued' : current.phase,
-            }))
+            patch(key, { id: event.turn_id, position: event.position })
             break
 
           case 'queued':
-            setTurn((current) => ({
-              ...current,
-              phase: 'queued',
-              position: event.position,
-            }))
+            patch(key, { phase: 'queued', position: event.position })
             break
 
           case 'route':
-            setTurn((current) => ({
-              ...current,
+            patch(key, {
               routeReason: event.reason,
               modelKey: event.key,
               modelLabel: event.label,
               remote: event.remote,
-            }))
+            })
             break
 
           case 'fallback':
-            setTurn((current) => ({
-              ...current,
+            patch(key, {
               fallback: { from: event.from, to: event.to, reason: event.reason },
               remote: false,
-            }))
+            })
             break
 
           case 'model':
-            setTurn((current) => ({
-              ...current,
-              phase: event.state === 'loading' ? 'loading' : current.phase,
+            patch(key, (turn) => ({
+              phase: event.state === 'loading' ? 'loading' : turn.phase,
               modelKey: event.key,
               modelLabel: event.label,
               remote: event.remote,
               provider: event.provider,
-              ramWarning: event.warning || current.ramWarning,
+              ramWarning: event.warning || turn.ramWarning,
             }))
             break
 
           case 'start':
-            setTurn((current) => ({
-              ...current,
-              phase: 'generating',
-              startedAt: Date.now(),
-            }))
+            patch(key, { phase: 'generating', startedAt: Date.now() })
             break
 
           case 'token':
-            setTurn((current) => ({ ...current, text: current.text + event.text }))
+            patch(key, (turn) => ({ text: turn.text + event.text }))
             break
 
           case 'reasoning':
             thinking += event.text
-            setTurn((current) => ({
-              ...current,
-              reasoning: current.reasoning + event.text,
-            }))
+            patch(key, (turn) => ({ reasoning: turn.reasoning + event.text }))
             break
 
           case 'tool':
             // A tool round produces no prose, so the streamed text is cleared
             // rather than glued to whatever the next round writes.
-            setTurn((current) => ({
-              ...current,
+            patch(key, (turn) => ({
               text: '',
-              tools: [...current.tools, event],
+              tools: [...turn.tools, event],
             }))
             break
 
@@ -289,7 +363,8 @@ export function useChat(options: ChatOptions) {
               reasoning: thinking || undefined,
             }
             setMessages((current) => [...current, answer])
-            setTurn(IDLE)
+            settled = true
+            drop(key)
             break
           }
 
@@ -313,13 +388,14 @@ export function useChat(options: ChatOptions) {
                 },
               ])
             }
-            setTurn(IDLE)
+            settled = true
+            drop(key)
             break
           }
 
           case 'error':
-            setTurn((current) => ({
-              ...current,
+            settled = true
+            patch(key, {
               phase: 'error',
               text: '',
               error: {
@@ -327,15 +403,15 @@ export function useChat(options: ChatOptions) {
                 message: event.message,
                 canEscalate: Boolean(event.can_escalate),
               },
-            }))
+            })
             break
         }
       }
     },
-    [conversationId],
+    [conversationId, drop, patch],
   )
 
-  const dismissError = useCallback(() => setTurn(IDLE), [])
+  const dismissError = useCallback((key: string) => drop(key), [drop])
 
   /** Agree to send the waiting turn to the hosted provider. */
   const approveRemote = useCallback(() => {
@@ -359,7 +435,7 @@ export function useChat(options: ChatOptions) {
   const dismissConsent = useCallback(() => setConsent(null), [])
 
   /**
-   * End the turn for real.
+   * End one turn for real.
    *
    * The stream is deliberately left open. The server answers the stop request
    * immediately but the turn ends at its next checkpoint, and it is the
@@ -369,37 +445,45 @@ export function useChat(options: ChatOptions) {
    * If the request itself fails there is nothing left to wait for, so it falls
    * back to what this used to do: stop watching.
    */
-  const stop = useCallback(async () => {
-    const id = turnId.current
-    if (!id) {
-      abort.current?.abort()
-      setTurn(IDLE)
-      return
-    }
-    setStopping(true)
-    try {
-      await api.stopTurn(id)
-    } catch {
-      abort.current?.abort()
-      setTurn(IDLE)
-    } finally {
-      setStopping(false)
-    }
-  }, [])
+  const stop = useCallback(
+    async (key: string) => {
+      const turn = turns.find((entry) => entry.key === key)
+      const hangUp = () => {
+        aborts.current.get(key)?.abort()
+        drop(key)
+      }
+      if (!turn?.id) {
+        hangUp()
+        return
+      }
+      patch(key, { stopping: true })
+      try {
+        await api.stopTurn(turn.id)
+      } catch {
+        hangUp()
+      }
+    },
+    [turns, patch, drop],
+  )
 
   return {
     conversationId,
     messages,
-    turn,
+    turns,
     consent,
     approveRemote,
     declineRemote,
     dismissConsent,
-    busy: turn.phase !== 'idle' && turn.phase !== 'error',
+    /** True while anything is queued or running - errors are not work. */
+    busy: turns.some((turn) => turn.phase !== 'error'),
+    /** How many are waiting behind whatever is running. */
+    waiting: turns.filter((turn) => turn.phase === 'queued').length,
+    /** True when no more may be queued from here until one finishes. */
+    atCapacity: turns.filter((turn) => turn.phase !== 'error').length
+      >= MAX_IN_FLIGHT,
     send,
     openConversation,
     dismissError,
     stop,
-    stopping,
   }
 }

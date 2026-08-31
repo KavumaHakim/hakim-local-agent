@@ -9,27 +9,20 @@
 
 import { Markdown } from '../lib/markdown'
 import { useElapsed } from '../hooks/useResources'
-import type { TurnState } from '../hooks/useChat'
+import type { Turn } from '../hooks/useChat'
 import { formatDuration, ReasoningPanel, ToolPills } from './Messages'
 import { AlertIcon, ChipIcon, CloudIcon, HomeIcon, StopIcon } from './Icons'
 
 interface Props {
-  turn: TurnState
+  turn: Turn
   onEscalate: () => void
   onDismiss: () => void
   onStop: () => void
-  /** True between asking and the turn actually reaching a checkpoint. */
-  stopping: boolean
 }
 
-export function TurnStatus({
-  turn,
-  onEscalate,
-  onDismiss,
-  onStop,
-  stopping,
-}: Props) {
+export function TurnStatus({ turn, onEscalate, onDismiss, onStop }: Props) {
   const generating = useElapsed(turn.startedAt)
+  const stopping = turn.stopping
 
   if (turn.phase === 'idle') return null
 
@@ -114,7 +107,11 @@ export function TurnStatus({
               ? `Queued — ${turn.position} turn${turn.position === 1 ? '' : 's'} ahead`
               : 'Queued'
           }
-          detail="Turns run one at a time: this machine has two cores and room for one model."
+          detail={
+            turn.prompt
+              ? `“${turn.prompt}” · turns run one at a time: two cores, room for one model.`
+              : 'Turns run one at a time: this machine has two cores and room for one model.'
+          }
           onStop={onStop}
           stopping={stopping}
         />

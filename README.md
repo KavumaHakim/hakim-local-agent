@@ -413,7 +413,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               852 tests, no server required
+└── tests/               855 tests, no server required
 ```
 
 ---
@@ -1450,6 +1450,8 @@ gzipped, because the dependency list stops at those four.
   generating — with a live elapsed timer. One spinner for all three says
   nothing on a machine where each takes minutes, and telling slow progress
   from a hang is the entire difficulty
+- **Ask the next question while one is still running** — it queues, with its
+  position, and runs in order. See [Queueing questions](#queueing-questions)
 - The model's **reasoning** streams into a collapsible panel — see below
 - **A turn can be ended**, at any stage, from the Stop control beside it - see
   [Ending a turn](#ending-a-turn)
@@ -1470,6 +1472,39 @@ It builds React elements, never HTML, so there is no `dangerouslySetInnerHTML`
 anywhere in the app and no sanitiser to get wrong. A model that emits
 `<script>` emits eight harmless characters. Links are restricted to `http(s)`,
 so a `javascript:` URL renders as text.
+
+### Queueing questions
+
+The composer used to lock while a turn ran. On a machine where a turn is
+minutes, that means holding the next question in your head until the last one
+lands - so it does not lock any more. Send it and it queues.
+
+The queue was already there and already tested; what was missing was any way
+to reach it from the UI. Each question is a POST of its own, stored server-side
+the moment it is accepted, and its stream reports its position while it waits.
+So a queued question survives a reload, and the position it shows is the
+server's, not a guess.
+
+**At most four in flight from one tab**, and that number is the browser's, not
+the server's. Every turn in flight holds an open SSE connection, and browsers
+allow six per origin over HTTP/1.1; reach that and every other request queues
+behind them, so the page cannot even fetch `/health` and looks hung. Four
+leaves room for the rest of the app. It is also about right on its own terms:
+at under a token a second, three questions waiting is the best part of an
+hour. Past that the send button greys out and says so - the draft is kept, and
+the textarea stays editable. The server keeps its own, larger bound (eight
+waiting, refused with a 429), which is what covers several tabs at once.
+
+**Any of them can be stopped**, running or waiting, from its own control - see
+[Ending a turn](#ending-a-turn).
+
+**What a queued turn sees when it runs** was a real bug this exposed. Rows are
+not written in conversation order: a queued question is stored when it is
+accepted, which is *before* the answer to the turn ahead of it exists. History
+had been selected as "everything with a lower id", which therefore dropped
+exactly the answer the user was most likely replying to. It now takes the
+conversation as it stands, minus this turn's own question and minus any
+question queued behind it.
 
 ### Ending a turn
 
@@ -1739,7 +1774,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**852 tests, no model server needed, and none of them touch the network.**
+**855 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -1769,7 +1804,7 @@ They take about 140 s, almost all of it importing torch.
 | `test_port_reclaim.py` | Reclaiming a port from a llama-server we did not start |
 | `test_turns.py` | The queue: serialisation, positions, bounded backlog, a runner that raises, stopping a queued or running turn |
 | `test_remote.py` | Hosted models: registry shape, key handling, connectivity cache, error hints |
-| `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches, the workspace and its picker, ending a turn, remote consent, uploads |
+| `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches, the workspace and its picker, ending a turn, what a queued turn sees, a refused backlog, remote consent, uploads |
 
 The API tests use the same manager harness as the model tests and a scripted
 chat client, so none of them depend on whether something happens to be
@@ -1886,7 +1921,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 852 tests
+- 855 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

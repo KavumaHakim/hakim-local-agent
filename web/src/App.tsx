@@ -108,9 +108,13 @@ export default function App() {
   useHotkey('k', () => setPaletteOpen((open) => !open), { meta: true })
 
   const bottom = useRef<HTMLDivElement>(null)
+  // Follows the streamed text of whichever turn is running, and the arrival
+  // of any new one - so queueing a question scrolls to it rather than
+  // leaving it below the fold.
+  const streamed = chat.turns.map((turn) => turn.text).join('').length
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
-  }, [chat.messages.length, chat.turn.phase, chat.turn.text])
+  }, [chat.messages.length, chat.turns.length, streamed])
 
   const newConversation = useCallback(() => {
     void chat.openConversation(null)
@@ -231,7 +235,18 @@ export default function App() {
 
   const selectedModel =
     models.models?.models.find((model) => model.key === modelKey) ?? null
-  const empty = chat.messages.length === 0 && chat.turn.phase === 'idle'
+  // The one turn that is actually being worked on, if any. The rest are
+  // waiting, and the server guarantees there is never more than one.
+  const running = chat.turns.find(
+    (turn) => turn.phase !== 'queued' && turn.phase !== 'error',
+  )
+  const runningPhase =
+    running?.phase === 'loading'
+      ? 'loading'
+      : running?.phase === 'generating'
+        ? 'streaming'
+        : 'queued'
+  const empty = chat.messages.length === 0 && chat.turns.length === 0
   const title =
     conversations.conversations.find(
       (conversation) => conversation.id === chat.conversationId,
@@ -306,11 +321,8 @@ export default function App() {
           {chat.busy && (
             <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-accent-tint px-2 py-0.5 text-[11px] text-accent-soft">
               <span className="size-[5px] animate-breathe rounded-full bg-accent" />
-              {chat.turn.phase === 'queued'
-                ? 'queued'
-                : chat.turn.phase === 'loading'
-                  ? 'loading'
-                  : 'streaming'}
+              {runningPhase}
+              {chat.waiting > 0 && ` · ${chat.waiting} waiting`}
             </span>
           )}
 
@@ -339,22 +351,26 @@ export default function App() {
                   }
                 />
               ))}
-              <TurnStatus
-                turn={chat.turn}
-                onEscalate={() => {
-                  const strong = models.models?.router_strong
-                  if (!strong) return
-                  setModelKey(strong)
-                  const last = [...chat.messages]
-                    .reverse()
-                    .find((message) => message.role === 'user')
-                  chat.dismissError()
-                  if (last) void chat.send(last.content, strong)
-                }}
-                onDismiss={chat.dismissError}
-                onStop={() => void chat.stop()}
-                stopping={chat.stopping}
-              />
+              {/* One per turn in flight, in the order they were asked. At
+                  most one is past `queued` - the server runs them one at a
+                  time - so this reads as the running turn followed by the
+                  questions waiting behind it. */}
+              {chat.turns.map((turn) => (
+                <TurnStatus
+                  key={turn.key}
+                  turn={turn}
+                  onEscalate={() => {
+                    const strong = models.models?.router_strong
+                    if (!strong) return
+                    setModelKey(strong)
+                    const prompt = turn.prompt
+                    chat.dismissError(turn.key)
+                    if (prompt) void chat.send(prompt, strong)
+                  }}
+                  onDismiss={() => chat.dismissError(turn.key)}
+                  onStop={() => void chat.stop(turn.key)}
+                />
+              ))}
               <div ref={bottom} />
             </div>
           )}
@@ -380,10 +396,14 @@ export default function App() {
               value={draft}
               onChange={setDraft}
               onSubmit={submit}
-              disabled={chat.busy}
+              disabled={false}
               placeholder={
-                chat.busy ? 'Waiting for the current turn…' : 'Message Hakim…'
+                chat.busy
+                  ? 'Ask the next one — it queues behind this turn…'
+                  : 'Message Hakim…'
               }
+              queued={chat.waiting}
+              atCapacity={chat.atCapacity}
               attachments={attachments}
               onAttach={attach}
               onRemoveAttachment={(path) =>
