@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from agent.loop import Agent, AgentError, IterationLimitError, ToolEvent
+from agent.loop import Agent, AgentError, IterationLimitError, ToolEvent, TurnStopped
 from agent.router import TaskRouter
 from chat_store import ChatStore
 from config import Config, load_config
@@ -169,6 +169,22 @@ def _clip(text: str, limit: int = TOOL_DISPLAY_LIMIT) -> tuple[str, bool]:
     if len(text) <= limit:
         return text, False
     return text[:limit], True
+
+
+def stopped_text(partial: str) -> str:
+    """What a stopped turn stores as its assistant message.
+
+    The marker is not decoration. A partial answer with nothing to say so
+    reads, on reload, as an answer that simply ended - which is the same
+    reason a clipped tool result says it was clipped rather than trailing
+    off and looking complete.
+
+    Asterisks rather than underscores because that is the italic the UI's
+    markdown subset actually renders - underscores would show as themselves,
+    which is a scruffier way of saying the same thing.
+    """
+    marker = "*(stopped before finishing)*"
+    return f"{partial}\n\n{marker}" if partial else marker
 
 
 def tool_entry(event: ToolEvent) -> dict[str, Any]:
@@ -564,7 +580,15 @@ class Runtime:
             )
             agent.load_history(history)
 
+            # Kept so a stopped turn can save what it had. The client
+            # assembles the same text, but a stop means never getting its
+            # return value - and on a machine this slow, throwing away two
+            # minutes of generated prose because the last word was missing
+            # would be the wrong trade.
+            streamed: list[str] = []
+
             def on_token(text: str) -> None:
+                streamed.append(text)
                 turn.emit("token", text=text)
 
             def on_reasoning(text: str) -> None:
@@ -579,7 +603,9 @@ class Runtime:
                 calls.append(entry)
                 # A tool round produces no prose, so the client clears whatever
                 # it has streamed on seeing this - otherwise two rounds of text
-                # are glued together.
+                # are glued together. The saved copy is cleared for the same
+                # reason and at the same moment, so the two cannot disagree.
+                streamed.clear()
                 turn.emit("tool", **entry)
 
             turn.emit("start", model_key=target)
@@ -588,6 +614,7 @@ class Runtime:
                 observer=on_tool,
                 on_token=on_token,
                 on_reasoning=on_reasoning,
+                should_stop=turn.is_stopped,
             )
             elapsed = round(time.time() - started, 1)
 
@@ -632,6 +659,41 @@ class Runtime:
                 context=agent.context_report,
             )
 
+        except TurnStopped:
+            # Asked for, not a failure - so it is reported as its own thing
+            # rather than as an error someone has to dismiss.
+            #
+            # Whatever prose had arrived is saved, marked so the transcript
+            # does not show a truncated answer as a finished one. Nothing is
+            # stored when nothing was generated: an empty assistant message
+            # would be a row that says only "this happened".
+            partial = "".join(streamed).strip()
+            elapsed = round(time.time() - started, 1)
+            message_id = None
+            content = ""
+            if partial or calls:
+                content = stopped_text(partial)
+                message_id = self.store.add_message(
+                    request.conversation_id,
+                    "assistant",
+                    content,
+                    tools=calls,
+                    elapsed=elapsed,
+                    model_key=target,
+                )
+            # The event carries what was *stored*, marker and all, rather than
+            # the raw partial. Otherwise the client would have to append the
+            # same note itself, and the wording would live in two places and
+            # drift apart.
+            turn.emit(
+                "stopped",
+                state="running",
+                message_id=message_id,
+                content=content,
+                tools=calls,
+                elapsed=elapsed,
+                model_key=target,
+            )
         except IterationLimitError as exc:
             # The clearest signal the small model is out of its depth. The
             # client decides whether to retry on the strong one; the server

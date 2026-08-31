@@ -12,6 +12,8 @@ import dataclasses
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any, Iterable
@@ -20,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from api.main import create_app
 from api.runtime import Runtime
+from api.turns import Turn, TurnRequest
 from config import Config
 from tests.fake_client import tool_call_message
 from tests.test_manager import ManagerHarness
@@ -80,7 +83,9 @@ class ScriptedClient:
     def chat(self, messages, *, tools=None):
         return self._next(messages, tools)
 
-    def chat_stream(self, messages, *, tools=None, on_token=None, on_reasoning=None):
+    def chat_stream(
+        self, messages, *, tools=None, on_token=None, on_reasoning=None, should_stop=None
+    ):
         message = dict(self._next(messages, tools))
         # `_reasoning` stands in for llama.cpp's reasoning_content deltas. The
         # real client never puts them in the assembled message either, so it is
@@ -131,6 +136,18 @@ class HarnessRuntime(Runtime):
         client = ScriptedClient(self.responses)
         self.clients.append(client)
         return client
+
+
+def make_turn_request(prompt: str) -> Turn:
+    """A turn that can be handed straight to the queue, bypassing the route."""
+    return Turn(
+        request=TurnRequest(
+            conversation_id=1,
+            prompt=prompt,
+            user_message_id=1,
+            model_key="fast",
+        )
+    )
 
 
 def parse_sse(body: str) -> list[tuple[str, dict[str, Any]]]:
@@ -337,7 +354,10 @@ class ChatStreamTests(ApiTestCase):
         from models.qwen import QwenConnectionError
 
         class Broken(ScriptedClient):
-            def chat_stream(self, messages, *, tools=None, on_token=None, on_reasoning=None):
+            def chat_stream(
+                self, messages, *, tools=None, on_token=None, on_reasoning=None,
+                should_stop=None,
+            ):
                 raise QwenConnectionError("server went away")
 
         self.runtime.make_client = lambda config, spec: Broken([])
@@ -788,6 +808,134 @@ class UploadTests(ApiTestCase):
         conversation_id = first(events, "accepted")["conversation_id"]
         stored = self.client.get(f"/api/conversations/{conversation_id}").json()
         self.assertEqual(stored["messages"][0]["content"], "plain question")
+
+
+class StoppingTurnTests(ApiTestCase):
+    """Ending a turn for real, rather than only stopping watching it."""
+
+    def stop_midway(self, after: int = 1):
+        """A client that asks the queue to stop this turn while it generates.
+
+        Standing in for the click: the request thread cannot reach the running
+        turn while the test is blocked reading its stream, so the stop is asked
+        for from inside - through the same `stop_turn` the endpoint calls.
+        """
+        runtime = self.runtime
+
+        class StopsItself(ScriptedClient):
+            def chat_stream(
+                self, messages, *, tools=None, on_token=None, on_reasoning=None,
+                should_stop=None,
+            ):
+                message = dict(self._next(messages, tools))
+                content = message.get("content") or ""
+                for index, word in enumerate(content.split(" ")):
+                    if should_stop is not None and should_stop():
+                        return {"role": "assistant", "content": " ".join(
+                            content.split(" ")[:index]
+                        )}
+                    if on_token:
+                        on_token(word + " ")
+                    if index + 1 >= after:
+                        current = runtime.queue._current
+                        if current is not None:
+                            runtime.queue.stop_turn(current.id)
+                return message
+
+        self.runtime.make_client = lambda config, spec: StopsItself(
+            self.runtime.responses
+        )
+
+    def test_a_running_turn_ends_and_says_so(self):
+        self.stop_midway()
+        self.runtime.responses = [
+            {"role": "assistant", "content": "one two three four five"}
+        ]
+        events = self.say("go on for a while")
+
+        self.assertIn("stopped", kinds(events))
+        self.assertNotIn("done", kinds(events))
+        # Not an error: it did exactly what it was told.
+        self.assertNotIn("error", kinds(events))
+
+    def test_what_had_been_generated_is_kept(self):
+        """Two minutes of prose is not worth throwing away over a missing
+        last word, on a machine this slow."""
+        self.stop_midway(after=2)
+        self.runtime.responses = [
+            {"role": "assistant", "content": "one two three four five"}
+        ]
+        events = self.say("go on")
+
+        stopped = first(events, "stopped")
+        self.assertTrue(stopped["content"].startswith("one two"))
+        self.assertIsNotNone(stopped["message_id"])
+
+    def test_the_stored_message_admits_it_was_cut_short(self):
+        """Otherwise a reload shows a truncated answer as a finished one."""
+        self.stop_midway()
+        self.runtime.responses = [
+            {"role": "assistant", "content": "one two three four five"}
+        ]
+        events = self.say("go on")
+
+        conversation_id = first(events, "accepted")["conversation_id"]
+        stored = self.client.get(f"/api/conversations/{conversation_id}").json()
+        answer = stored["messages"][-1]
+        self.assertEqual(answer["role"], "assistant")
+        self.assertIn("stopped before finishing", answer["content"])
+
+    def test_the_queue_is_free_afterwards(self):
+        """The reason for stopping at all: the next turn can start."""
+        self.stop_midway()
+        self.runtime.responses = [{"role": "assistant", "content": "one two three"}]
+        self.say("stop me")
+
+        self.assertFalse(self.client.get("/api/health").json()["busy"])
+
+        self.runtime.make_client = HarnessRuntime.make_client.__get__(
+            self.runtime, HarnessRuntime
+        )
+        self.runtime.responses = [{"role": "assistant", "content": "second turn"}]
+        self.assertEqual(first(self.say("and now?"), "done")["content"], "second turn")
+
+    def test_stopping_a_finished_turn_is_not_an_error(self):
+        """By the time anyone clicks, the turn may have got there first."""
+        self.runtime.responses = [{"role": "assistant", "content": "quick"}]
+        turn_id = first(self.say("hello"), "accepted")["turn_id"]
+
+        response = self.client.post(f"/api/chat/{turn_id}/stop")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["state"], "unknown")
+
+    def test_a_queued_turn_is_dropped_through_the_endpoint(self):
+        """Proves the route is wired to the queue, not only that it answers.
+
+        The worker is held on a turn that will not finish until the test lets
+        it, so the second one is genuinely queued rather than queued-if-the-
+        scheduler-cooperates.
+        """
+        held = threading.Event()
+        self.addCleanup(held.set)
+
+        class Blocking(ScriptedClient):
+            def chat_stream(self, messages, *, tools=None, **_):
+                held.wait(timeout=5)
+                return {"role": "assistant", "content": "let go"}
+
+        self.runtime.make_client = lambda config, spec: Blocking([])
+        self.runtime.queue.submit(make_turn_request("blocker"))
+        for _ in range(200):
+            if self.runtime.queue.busy():
+                break
+            time.sleep(0.01)
+
+        waiting = self.runtime.queue.submit(make_turn_request("waiting"))
+        response = self.client.post(f"/api/chat/{waiting.id}/stop")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["state"], "queued")
+        self.assertEqual(self.runtime.queue.depth(), 0)
 
 
 class WorkspaceRouteTests(ApiTestCase):

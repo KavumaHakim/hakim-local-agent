@@ -352,7 +352,8 @@ export default function App() {
                   if (last) void chat.send(last.content, strong)
                 }}
                 onDismiss={chat.dismissError}
-                onCancel={chat.cancel}
+                onStop={() => void chat.stop()}
+                stopping={chat.stopping}
               />
               <div ref={bottom} />
             </div>

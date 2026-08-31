@@ -250,6 +250,18 @@ export type TurnEvent =
   | { type: 'tool'; name: string; ok: boolean; summary: string }
   | { type: 'done'; message_id: number; content: string; tools: ToolCall[]; elapsed: number; model_key: string }
   | {
+      type: 'stopped'
+      /** Where it was when it was ended: 'queued' or 'running'. */
+      state: 'queued' | 'running'
+      /** Null when nothing had been generated, so nothing was stored. */
+      message_id: number | null
+      /** What was stored, marker and all. Empty when there was nothing. */
+      content: string
+      tools: ToolCall[]
+      elapsed: number
+      model_key?: string
+    }
+  | {
       type: 'error'
       kind: 'iteration_limit' | 'model' | 'agent' | 'internal'
       message: string
@@ -257,6 +269,12 @@ export type TurnEvent =
       /** Only on iteration_limit: whether the strong model is still untried. */
       can_escalate?: boolean
     }
+
+/** What asking a turn to stop actually did. */
+export interface StopTurnResult {
+  state: 'queued' | 'running' | 'unknown'
+  message: string
+}
 
 export interface ChatRequest {
   prompt: string

@@ -470,6 +470,16 @@ class MemoryProcessResult(BaseModel):
     pending: int = 0
 
 
+class StopTurnOut(BaseModel):
+    """What asking a turn to stop actually did."""
+
+    # "queued"  - it never started, and has been dropped
+    # "running" - it was asked to stop and will at its next checkpoint
+    # "unknown" - already finished, or never here
+    state: str
+    message: str
+
+
 # --- workspace ---
 
 

@@ -30,6 +30,15 @@ class IterationLimitError(AgentError):
     """The model kept calling tools past the configured limit."""
 
 
+class TurnStopped(AgentError):
+    """Someone asked for this turn to stop, and it did.
+
+    Not a failure - it is the loop doing as it was told - but it travels the
+    same path as one, because in both cases the turn ends without an answer
+    and the caller has to hear about it before it can report anything.
+    """
+
+
 @dataclass(frozen=True)
 class ToolEvent:
     """Reported to the CLI so it can show progress. Not sent to the model."""
@@ -40,6 +49,13 @@ class ToolEvent:
 
 # The CLI passes one of these in to display tool activity as it happens.
 Observer = Callable[[ToolEvent], None]
+
+# Asked at every checkpoint: "has someone asked for this turn to stop?"
+#
+# A predicate rather than a flag the loop owns, because the answer belongs to
+# whoever is running the turn - the queue, in the API's case - and the loop
+# should not have to know how that is stored.
+StopCheck = Callable[[], bool]
 
 
 class Agent:
@@ -91,6 +107,7 @@ class Agent:
         observer: Observer | None = None,
         on_token: TokenCallback | None = None,
         on_reasoning: TokenCallback | None = None,
+        should_stop: StopCheck | None = None,
     ) -> AssistantTurn:
         """Run one user turn to completion and return the final assistant turn.
 
@@ -102,18 +119,32 @@ class Agent:
         is never added to history: `_assistant_entry` stores the answer and the
         tool calls only, and that has to stay true however the trace is
         displayed.
+
+        `should_stop` is asked at every checkpoint, and `TurnStopped` is raised
+        the first time it says yes. Checkpoints are the only honest way to do
+        this: a Python thread cannot be interrupted from outside, so stopping
+        means the loop noticing between one piece of work and the next. In
+        practice that is per streamed token, which on this hardware is at most
+        a second or so - except while the model is reading the prompt, where
+        nothing comes back and the wait is however long that takes.
         """
         self._history.append({"role": "user", "content": user_input})
 
         definitions = self._tools.get_tool_definitions()
 
         for _ in range(max(1, self._config.max_iterations)):
+            self._check_stop(should_stop)
             # Trim before sending, not after. Trimming afterwards leaves the
             # history within budget but says nothing about the request just
             # made - the newly appended message is exactly what pushes it over,
             # and that request is the one that fails.
             self._trim_history()
-            message = self._chat(definitions, on_token, on_reasoning)
+            message = self._chat(definitions, on_token, on_reasoning, should_stop)
+            # The client returns what it had when it stopped, so the check has
+            # to be here rather than inside it: a partial message is not an
+            # answer, and parsing it as one would put a truncated tool call
+            # into the history.
+            self._check_stop(should_stop)
 
             try:
                 turn = parse_assistant_message(message)
@@ -145,6 +176,10 @@ class Agent:
                 )
                 if observer is not None:
                     observer(ToolEvent(call=call, result=result))
+                # Between tools, not only between rounds: a round of four
+                # tool calls is minutes of work, and stopping after the first
+                # is the point.
+                self._check_stop(should_stop)
 
             self._trim_history()
 
@@ -156,11 +191,18 @@ class Agent:
 
     # --- internals ---
 
+    @staticmethod
+    def _check_stop(should_stop: StopCheck | None) -> None:
+        """Raise if a stop has been asked for. The only place that decides."""
+        if should_stop is not None and should_stop():
+            raise TurnStopped("Stopped on request.")
+
     def _chat(
         self,
         definitions: list[dict[str, Any]],
         on_token: TokenCallback | None,
         on_reasoning: TokenCallback | None = None,
+        should_stop: StopCheck | None = None,
     ) -> dict[str, Any]:
         """One model round, streaming when the caller asked for it."""
         if on_token is not None or on_reasoning is not None:
@@ -171,7 +213,11 @@ class Agent:
                     tools=definitions,
                     on_token=on_token,
                     on_reasoning=on_reasoning,
+                    should_stop=should_stop,
                 )
+        # Not streaming: there is nothing to interrupt, because the whole
+        # answer arrives in one blocking call. The checkpoint either side of
+        # this is all a non-streaming client can offer.
         return self._client.chat(self._messages(), tools=definitions)
 
     def _messages(self) -> list[dict[str, Any]]:

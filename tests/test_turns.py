@@ -192,5 +192,80 @@ class TurnQueueTests(unittest.TestCase):
             self.queue.submit(make_turn())
 
 
+class StoppingTests(unittest.TestCase):
+    """Ending a turn, which is two different things wearing one button."""
+
+    def tearDown(self) -> None:
+        queue = getattr(self, "queue", None)
+        if queue is not None:
+            queue.stop(timeout=2)
+
+    def test_a_queued_turn_is_dropped_and_never_runs(self):
+        """Nothing would pick it up to close its stream, so the queue does."""
+        release = threading.Event()
+        ran = []
+
+        def runner(turn: Turn) -> None:
+            ran.append(turn.request.prompt)
+            release.wait(timeout=2)
+
+        self.queue = TurnQueue(runner)
+        self.queue.start()
+        first = self.queue.submit(make_turn("first"))
+        waiting = self.queue.submit(make_turn("second"))
+
+        # Wait until the first is actually running, or "queued" would be a
+        # race rather than the state under test.
+        for _ in range(200):
+            if self.queue.busy():
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(self.queue.stop_turn(waiting.id), "queued")
+
+        # Its stream ends on its own, without a worker ever touching it.
+        events = [event for event in drain(waiting, timeout=0.05) if event]
+        self.assertEqual([e["type"] for e in events], ["stopped"])
+        self.assertEqual(events[0]["state"], "queued")
+
+        release.set()
+        list(drain(first, timeout=0.05))
+        self.assertEqual(ran, ["first"])
+        self.assertEqual(self.queue.depth(), 0)
+
+    def test_a_running_turn_is_asked_rather_than_killed(self):
+        """A thread cannot be cut off mid-write, so it is told and it agrees."""
+        seen: list[bool] = []
+        started = threading.Event()
+
+        def runner(turn: Turn) -> None:
+            started.set()
+            for _ in range(200):
+                if turn.is_stopped():
+                    seen.append(True)
+                    return
+                time.sleep(0.01)
+            seen.append(False)
+
+        self.queue = TurnQueue(runner)
+        self.queue.start()
+        turn = self.queue.submit(make_turn())
+        self.assertTrue(started.wait(timeout=2))
+
+        self.assertEqual(self.queue.stop_turn(turn.id), "running")
+        list(drain(turn, timeout=0.05))
+        self.assertEqual(seen, [True])
+
+    def test_stopping_something_that_already_finished_is_not_an_error(self):
+        """By the time anyone clicks, the turn may have got there first."""
+        self.queue = TurnQueue(lambda turn: None)
+        self.queue.start()
+        turn = self.queue.submit(make_turn())
+        list(drain(turn, timeout=0.05))
+
+        self.assertEqual(self.queue.stop_turn(turn.id), "unknown")
+        self.assertEqual(self.queue.stop_turn("never-existed"), "unknown")
+
+
 if __name__ == "__main__":
     unittest.main()

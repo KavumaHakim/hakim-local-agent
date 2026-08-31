@@ -38,6 +38,7 @@ from models.qwen import (
     QwenError,
     QwenResponseError,
     QwenTimeoutError,
+    StopCheck,
     TokenCallback,
     _merge_tool_call,
 )
@@ -179,6 +180,7 @@ class RemoteClient:
         tools: list[dict[str, Any]] | None = None,
         on_token: TokenCallback | None = None,
         on_reasoning: TokenCallback | None = None,
+        should_stop: StopCheck | None = None,
     ) -> Message:
         """Stream a reply, assembling the same message `chat` would return."""
         payload = self._payload(messages, tools)
@@ -189,6 +191,13 @@ class RemoteClient:
         reasoning_chars = 0
 
         for chunk in self._stream(payload):
+            if should_stop is not None and should_stop():
+                # Dropping the connection matters less here than locally - the
+                # provider's GPU is not this machine's problem - but it still
+                # stops the tokens being billed for, and it is the same
+                # contract the local client keeps.
+                break
+
             choices = chunk.get("choices")
             if not isinstance(choices, list) or not choices:
                 continue

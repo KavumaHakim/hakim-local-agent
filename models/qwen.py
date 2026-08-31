@@ -28,6 +28,10 @@ from config import Config
 # Called with each content fragment as it streams in.
 TokenCallback = Callable[[str], None]
 
+# Asked between chunks: "should this stream be abandoned?" Returning True ends
+# it, and the client returns whatever it had assembled so far.
+StopCheck = Callable[[], bool]
+
 
 class QwenError(Exception):
     """Base class for all Qwen client failures."""
@@ -69,6 +73,11 @@ class ChatClient(Protocol):
         *,
         tools: list[dict[str, Any]] | None = ...,
     ) -> Message: ...
+
+    # Optional, and the loop checks for it before calling: a client that
+    # cannot stream is used through `chat` instead. A client that can stream
+    # must accept `should_stop`, because that is the only handle the loop has
+    # on a model round once it has started.
 
 
 class QwenClient:
@@ -120,6 +129,7 @@ class QwenClient:
         tools: list[dict[str, Any]] | None = None,
         on_token: TokenCallback | None = None,
         on_reasoning: TokenCallback | None = None,
+        should_stop: StopCheck | None = None,
     ) -> Message:
         """Stream a reply, then return the same assembled message `chat` would.
 
@@ -143,6 +153,13 @@ class QwenClient:
         reasoning_chars = 0
 
         for chunk in self._stream("/v1/chat/completions", payload):
+            if should_stop is not None and should_stop():
+                # Leaving the loop closes the generator, which closes the
+                # response, which drops the connection - and llama-server
+                # stops generating when its client goes away. That is what
+                # actually gives the CPU back; the flag alone would not.
+                break
+
             choices = chunk.get("choices")
             if not isinstance(choices, list) or not choices:
                 continue
@@ -166,6 +183,9 @@ class QwenClient:
                 if isinstance(fragment, dict):
                     _merge_tool_call(partial_calls, fragment)
 
+        # Whatever arrived before the stop, assembled the same way a finished
+        # reply is. It is the caller that knows a partial answer is not an
+        # answer; this returns what it has and says nothing about why.
         message: Message = {"role": "assistant", "content": "".join(content)}
         if partial_calls:
             message["tool_calls"] = [

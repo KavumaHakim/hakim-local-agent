@@ -26,6 +26,10 @@ class FakeResponse:
         self._lines = lines
         self.status_code = 200
         self.text = ""
+        # Whether the response was left. Worth recording: dropping the
+        # connection is what actually makes llama-server stop generating, so
+        # a stop that did not close it would have freed nothing.
+        self.exited = False
 
     def iter_lines(self, decode_unicode=False):
         return iter(self._lines)
@@ -34,6 +38,7 @@ class FakeResponse:
         return self
 
     def __exit__(self, *exc):
+        self.exited = True
         return False
 
 
@@ -41,10 +46,13 @@ class FakeSession:
     def __init__(self, lines: list[str]) -> None:
         self._lines = lines
         self.payloads: list[dict] = []
+        self.responses: list[FakeResponse] = []
 
     def post(self, url, json=None, timeout=None, stream=False):
         self.payloads.append(json)
-        return FakeResponse(self._lines)
+        response = FakeResponse(self._lines)
+        self.responses.append(response)
+        return response
 
 
 class FakeStreamClient(QwenClient):
@@ -57,6 +65,10 @@ class FakeStreamClient(QwenClient):
     @property
     def sent(self) -> list[dict]:
         return self._session.payloads
+
+    @property
+    def responses(self) -> list[FakeResponse]:
+        return self._session.responses
 
 
 class TokenStreamTests(unittest.TestCase):
@@ -88,6 +100,34 @@ class TokenStreamTests(unittest.TestCase):
     def test_works_without_a_callback(self):
         client = FakeStreamClient(sse(delta(content="quiet")))
         self.assertEqual(client.chat_stream([])["content"], "quiet")
+
+
+class StoppingAStreamTests(unittest.TestCase):
+    """Ending a model round part-way, which is where a turn's minutes go."""
+
+    def test_it_stops_and_returns_what_it_had(self):
+        client = FakeStreamClient(
+            sse(delta(content="one "), delta(content="two "), delta(content="three"))
+        )
+        seen: list[str] = []
+        message = client.chat_stream(
+            [], on_token=seen.append, should_stop=lambda: len(seen) >= 2
+        )
+
+        self.assertEqual(seen, ["one ", "two "])
+        self.assertEqual(message["content"], "one two ")
+
+    def test_it_drops_the_connection(self):
+        """The flag alone frees nothing; llama-server stops when we leave."""
+        client = FakeStreamClient(sse(delta(content="a"), delta(content="b")))
+        client.chat_stream([], should_stop=lambda: True)
+
+        self.assertTrue(client.responses[0].exited)
+
+    def test_a_stop_that_never_fires_changes_nothing(self):
+        client = FakeStreamClient(sse(delta(content="all"), delta(content=" of it")))
+        message = client.chat_stream([], should_stop=lambda: False)
+        self.assertEqual(message["content"], "all of it")
 
 
 class ToolCallAssemblyTests(unittest.TestCase):
@@ -250,7 +290,10 @@ class AgentStreamingTests(unittest.TestCase):
             def chat(self, messages, *, tools=None):
                 return {"role": "assistant", "content": "non-streamed"}
 
-            def chat_stream(self, messages, *, tools=None, on_token=None, on_reasoning=None):
+            def chat_stream(
+                self, messages, *, tools=None, on_token=None, on_reasoning=None,
+                should_stop=None,
+            ):
                 self.streamed = True
                 if on_token:
                     on_token("streamed")
@@ -277,7 +320,10 @@ class AgentStreamingTests(unittest.TestCase):
             def chat(self, messages, *, tools=None):
                 return {"role": "assistant", "content": "non-streamed"}
 
-            def chat_stream(self, messages, *, tools=None, on_token=None, on_reasoning=None):
+            def chat_stream(
+                self, messages, *, tools=None, on_token=None, on_reasoning=None,
+                should_stop=None,
+            ):
                 self.streamed = True
                 return {"role": "assistant", "content": "streamed"}
 

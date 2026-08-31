@@ -82,6 +82,11 @@ export function useChat(options: ChatOptions) {
     prompt: string
   } | null>(null)
   const abort = useRef<AbortController | null>(null)
+  // The id the stop endpoint needs, and whether one has been asked for. Both
+  // refs rather than state: they are read inside the stream callback, which
+  // closes over the render that started the turn.
+  const turnId = useRef<string | null>(null)
+  const [stopping, setStopping] = useState(false)
 
   // Read inside the stream callback, which would otherwise close over the
   // options from the render that started the turn.
@@ -89,7 +94,11 @@ export function useChat(options: ChatOptions) {
   latest.current = options
 
   const openConversation = useCallback(async (id: number | null) => {
+    // Stops watching, and deliberately does not end the turn: a turn that has
+    // cost minutes is worth finishing even if nobody is looking, and its
+    // answer is stored either way.
     abort.current?.abort()
+    turnId.current = null
     setTurn(IDLE)
     if (id === null) {
       setConversationId(null)
@@ -137,6 +146,9 @@ export function useChat(options: ChatOptions) {
       }
 
       setTurn({ ...IDLE, phase: 'queued' })
+      // Cleared before the new id arrives, so a stop pressed in the gap
+      // cannot reach the turn that just finished.
+      turnId.current = null
       const controller = new AbortController()
       abort.current = controller
       // Kept alongside the state copy so `done` can attach the finished trace
@@ -188,6 +200,7 @@ export function useChat(options: ChatOptions) {
                   : message,
               ),
             )
+            turnId.current = event.turn_id
             setTurn((current) => ({
               ...current,
               position: event.position,
@@ -280,6 +293,30 @@ export function useChat(options: ChatOptions) {
             break
           }
 
+          case 'stopped': {
+            // Whatever had been generated is kept, and the server has already
+            // stored it with a note saying it was cut short. Nothing is added
+            // to the transcript when nothing was produced - an empty bubble
+            // would be a row that says only "this happened".
+            if (event.message_id !== null) {
+              setMessages((current) => [
+                ...current,
+                {
+                  id: event.message_id as number,
+                  role: 'assistant',
+                  content: event.content,
+                  tools: event.tools,
+                  elapsed: event.elapsed,
+                  model_key: event.model_key ?? null,
+                  created_at: '',
+                  reasoning: thinking || undefined,
+                },
+              ])
+            }
+            setTurn(IDLE)
+            break
+          }
+
           case 'error':
             setTurn((current) => ({
               ...current,
@@ -321,11 +358,33 @@ export function useChat(options: ChatOptions) {
 
   const dismissConsent = useCallback(() => setConsent(null), [])
 
-  const cancel = useCallback(() => {
-    // Stops watching, not the turn itself. The server finishes and stores the
-    // answer, which is the right trade when a turn has cost minutes already.
-    abort.current?.abort()
-    setTurn(IDLE)
+  /**
+   * End the turn for real.
+   *
+   * The stream is deliberately left open. The server answers the stop request
+   * immediately but the turn ends at its next checkpoint, and it is the
+   * `stopped` event that carries whatever had been generated - so hanging up
+   * here would throw away the very thing the stop was meant to preserve.
+   *
+   * If the request itself fails there is nothing left to wait for, so it falls
+   * back to what this used to do: stop watching.
+   */
+  const stop = useCallback(async () => {
+    const id = turnId.current
+    if (!id) {
+      abort.current?.abort()
+      setTurn(IDLE)
+      return
+    }
+    setStopping(true)
+    try {
+      await api.stopTurn(id)
+    } catch {
+      abort.current?.abort()
+      setTurn(IDLE)
+    } finally {
+      setStopping(false)
+    }
   }, [])
 
   return {
@@ -340,6 +399,7 @@ export function useChat(options: ChatOptions) {
     send,
     openConversation,
     dismissError,
-    cancel,
+    stop,
+    stopping,
   }
 }

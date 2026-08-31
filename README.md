@@ -413,7 +413,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               836 tests, no server required
+└── tests/               852 tests, no server required
 ```
 
 ---
@@ -1451,6 +1451,8 @@ gzipped, because the dependency list stops at those four.
   nothing on a machine where each takes minutes, and telling slow progress
   from a hang is the entire difficulty
 - The model's **reasoning** streams into a collapsible panel — see below
+- **A turn can be ended**, at any stage, from the Stop control beside it - see
+  [Ending a turn](#ending-a-turn)
 - **Tool switches** in the sidebar, with each tool's own risk text
 - **The workspace is chosen here**, from the folder pill in the composer or
   the Workspace panel - see below
@@ -1468,6 +1470,47 @@ It builds React elements, never HTML, so there is no `dangerouslySetInnerHTML`
 anywhere in the app and no sanitiser to get wrong. A model that emits
 `<script>` emits eight harmless characters. Links are restricted to `http(s)`,
 so a `javascript:` URL renders as text.
+
+### Ending a turn
+
+A turn used to be unstoppable. The Stop control ended the *watching* - the
+server carried on, finished, and stored the answer - which is the right
+default for a closed tab and the wrong one for a five-minute turn that is
+visibly going nowhere.
+
+Stop now ends the turn. Two different things share the button, and which one
+applies is an accident of timing:
+
+| Where it was | What happens |
+|---|---|
+| Waiting in the queue | Dropped. It never runs, and its stream is closed by the queue, because no worker will ever pick it up to do that |
+| Running | Asked to stop, and it does at its next checkpoint |
+
+**Checkpoints, because there is no other honest mechanism.** A Python thread
+cannot be interrupted from outside, so stopping means the loop noticing
+between one piece of work and the next. It checks before each model round,
+after every tool call, and - the one that matters - between streamed chunks.
+In practice that is under a second while text is arriving. The exception is
+the silent stretch where the model is reading the prompt and nothing is coming
+back: there is no chunk to check between, so a stop asked for then waits for
+the first token.
+
+Leaving the chunk loop closes the response, which drops the connection, and
+**that** is what makes llama-server stop generating. The flag alone would free
+nothing - it would only stop this end listening while the CPU carried on.
+
+**Whatever was written is kept.** At under a token per second, throwing away
+two minutes of prose because the last word never arrived is the wrong trade.
+The partial answer is stored with a note - *(stopped before finishing)* - for
+the same reason a clipped tool result says it was clipped: a truncated answer
+with nothing to say so reads, on reload, as one that simply ended. Nothing is
+stored when nothing was generated.
+
+Ending a turn is a deliberate request (`POST /api/chat/{turn_id}/stop`), not
+something a closed tab does by accident. Disconnecting and ending are
+different intentions, and this is the one place the difference is visible. A
+turn that finished before the click is reported as `unknown` rather than a
+404: that is the outcome that was asked for, not an error.
 
 ### Choosing a workspace
 
@@ -1696,7 +1739,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**836 tests, no model server needed, and none of them touch the network.**
+**852 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -1713,10 +1756,10 @@ set RAG_MODEL_TESTS=1
 They take about 140 s, almost all of it importing torch.
 
 ---|---|
-| `test_agent.py` | Loop: plain replies, one call, several calls, tool errors, iteration limit, malformed replies |
+| `test_agent.py` | Loop: plain replies, one call, several calls, tool errors, iteration limit, malformed replies, stopping at each checkpoint |
 | `test_tools.py` | Calculator, workspace jail, OCR validation, registry |
 | `test_python_tool.py` | Restricted execution; spawns real child processes |
-| `test_streaming.py` | SSE parsing, tool-call fragment assembly, reasoning suppression |
+| `test_streaming.py` | SSE parsing, tool-call fragment assembly, reasoning suppression, abandoning a stream part-way |
 | `test_manager.py` | Start, stop, switch, adopt, crash recovery, idle unload |
 | `test_router.py` | Routing decisions, no-downgrade rule, scoring |
 | `test_chat_store.py` | History round-trip, ordering, deletion, corrupt JSON |
@@ -1724,9 +1767,9 @@ They take about 140 s, almost all of it importing torch.
 | `test_shell_tool.py` | Allowlist, chaining, dangerous options, path confinement |
 | `test_http_tool.py` | Host/scheme allowlist, redirect refusal, method gating |
 | `test_port_reclaim.py` | Reclaiming a port from a llama-server we did not start |
-| `test_turns.py` | The queue: serialisation, positions, bounded backlog, a runner that raises |
+| `test_turns.py` | The queue: serialisation, positions, bounded backlog, a runner that raises, stopping a queued or running turn |
 | `test_remote.py` | Hosted models: registry shape, key handling, connectivity cache, error hints |
-| `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches, the workspace and its picker, remote consent, uploads |
+| `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches, the workspace and its picker, ending a turn, remote consent, uploads |
 
 The API tests use the same manager harness as the model tests and a scripted
 chat client, so none of them depend on whether something happens to be
@@ -1843,7 +1886,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 836 tests
+- 852 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

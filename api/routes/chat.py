@@ -18,12 +18,18 @@ Event types, in the order a healthy turn produces them:
     token     one fragment of the answer
     tool      a tool ran; the client clears its streamed text on this
     done      final content, tools used, elapsed seconds
+    stopped   someone ended the turn; carries whatever had been generated
     error     kind, message, and whether escalating could help
 
-A turn that is running is not cancelled when the client disconnects. It
-finishes and its answer is stored, so a reload shows it. On a machine where a
-turn costs minutes, throwing that away because a tab closed would be worse
-than the stray CPU.
+A turn that is running is not stopped when the client disconnects. It finishes
+and its answer is stored, so a reload shows it. On a machine where a turn costs
+minutes, throwing that away because a tab closed would be worse than the stray
+CPU.
+
+Ending one is therefore a separate, deliberate request - `POST
+/api/chat/{turn_id}/stop` - rather than something a closed tab does by
+accident. Disconnecting and ending are different intentions and this is the
+one place the difference is visible.
 """
 
 from __future__ import annotations
@@ -37,7 +43,7 @@ from fastapi.responses import StreamingResponse
 
 from api.deps import get_runtime
 from api.runtime import ModelChoice, Runtime, open_conversation
-from api.schemas import ChatRequest
+from api.schemas import ChatRequest, StopTurnOut
 from api.turns import Turn, TurnQueueFull, TurnRequest, drain
 
 router = APIRouter(tags=["chat"])
@@ -161,6 +167,29 @@ def chat(body: ChatRequest, runtime: Runtime = Depends(get_runtime)):
             # exactly like the hang streaming exists to prevent.
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.post("/chat/{turn_id}/stop", response_model=StopTurnOut)
+def stop_turn(turn_id: str, runtime: Runtime = Depends(get_runtime)):
+    """End a turn: drop it if it is waiting, stop it if it is running.
+
+    Not a 404 when the turn is unknown. By the time someone clicks stop the
+    turn may have finished on its own, and that is the same outcome they asked
+    for - reporting it as an error would be telling them their click failed
+    when it got exactly what it wanted.
+    """
+    state = runtime.queue.stop_turn(turn_id)
+    return StopTurnOut(
+        state=state,
+        message={
+            "queued": "Dropped before it started.",
+            "running": (
+                "Stopping. It ends at the next token, tool result or model "
+                "round - a thread cannot be cut off mid-write."
+            ),
+            "unknown": "That turn had already finished.",
+        }[state],
     )
 
 

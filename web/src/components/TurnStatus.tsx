@@ -17,10 +17,18 @@ interface Props {
   turn: TurnState
   onEscalate: () => void
   onDismiss: () => void
-  onCancel: () => void
+  onStop: () => void
+  /** True between asking and the turn actually reaching a checkpoint. */
+  stopping: boolean
 }
 
-export function TurnStatus({ turn, onEscalate, onDismiss, onCancel }: Props) {
+export function TurnStatus({
+  turn,
+  onEscalate,
+  onDismiss,
+  onStop,
+  stopping,
+}: Props) {
   const generating = useElapsed(turn.startedAt)
 
   if (turn.phase === 'idle') return null
@@ -107,7 +115,8 @@ export function TurnStatus({ turn, onEscalate, onDismiss, onCancel }: Props) {
               : 'Queued'
           }
           detail="Turns run one at a time: this machine has two cores and room for one model."
-          onCancel={onCancel}
+          onStop={onStop}
+          stopping={stopping}
         />
       )}
 
@@ -115,7 +124,8 @@ export function TurnStatus({ turn, onEscalate, onDismiss, onCancel }: Props) {
         <StatusLine
           label={`Loading ${turn.modelLabel ?? 'the model'}…`}
           detail="Cold starts take a few minutes here. The weights are read from disk."
-          onCancel={onCancel}
+          onStop={onStop}
+          stopping={stopping}
         />
       )}
 
@@ -130,6 +140,12 @@ export function TurnStatus({ turn, onEscalate, onDismiss, onCancel }: Props) {
             <div className="text-[15px] text-fg">
               <Markdown text={turn.text} />
               <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 animate-blink bg-accent align-middle" />
+              {/* Once prose is arriving there is no status line to hang the
+                  control off, and this is exactly when someone can see the
+                  answer going the wrong way and want it stopped. */}
+              <div className="mt-2">
+                <StopButton onStop={onStop} stopping={stopping} withLabel />
+              </div>
             </div>
           ) : (
             <StatusLine
@@ -139,7 +155,8 @@ export function TurnStatus({ turn, onEscalate, onDismiss, onCancel }: Props) {
                   : 'Generating…'
               }
               detail={`${turn.modelLabel ?? ''} · under one token per second on this CPU`}
-              onCancel={onCancel}
+              onStop={onStop}
+          stopping={stopping}
             />
           )}
           {generating > 0 && (
@@ -156,11 +173,13 @@ export function TurnStatus({ turn, onEscalate, onDismiss, onCancel }: Props) {
 function StatusLine({
   label,
   detail,
-  onCancel,
+  onStop,
+  stopping,
 }: {
   label: string
   detail: string
-  onCancel: () => void
+  onStop: () => void
+  stopping: boolean
 }) {
   return (
     <div className="flex items-start gap-3 rounded-xl border border-line bg-surface px-4 py-3">
@@ -177,14 +196,39 @@ function StatusLine({
         <p className="text-sm text-fg">{label}</p>
         <p className="mt-0.5 text-xs text-faint">{detail}</p>
       </div>
-      <button
-        type="button"
-        onClick={onCancel}
-        title="Stop watching. The turn finishes and its answer is saved."
-        className="rounded-lg border border-line p-1.5 text-faint transition hover:text-fg"
-      >
-        <StopIcon className="size-3.5" />
-      </button>
+      <StopButton onStop={onStop} stopping={stopping} />
     </div>
+  )
+}
+
+/**
+ * Ends the turn, rather than only stopping watching it.
+ *
+ * It stays enabled while stopping. The turn ends at its next checkpoint - the
+ * next token, tool result or model round - and during the one silent stretch
+ * where that can take a while, the model reading the prompt, a control that
+ * greyed itself out would look like the click had been swallowed.
+ */
+function StopButton({
+  onStop,
+  stopping,
+  withLabel = false,
+}: {
+  onStop: () => void
+  stopping: boolean
+  withLabel?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onStop}
+      title="End this turn. Anything already written is kept."
+      className={`flex shrink-0 items-center gap-1.5 rounded-lg border border-line text-faint transition hover:border-danger/50 hover:text-danger ${
+        withLabel ? 'px-2 py-1 text-[11px]' : 'p-1.5'
+      }`}
+    >
+      <StopIcon className={`size-3.5 ${stopping ? 'animate-breathe' : ''}`} />
+      {withLabel && (stopping ? 'Stopping…' : 'Stop')}
+    </button>
   )
 }

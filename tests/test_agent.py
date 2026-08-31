@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from agent.loop import Agent, IterationLimitError
+from agent.loop import Agent, IterationLimitError, TurnStopped
 from agent.prompts import SYSTEM_PROMPT
 from config import Config
 from tests.fake_client import FakeQwenClient, text_message, tool_call_message
@@ -377,3 +377,80 @@ class HistorySizeTrimmingTests(unittest.TestCase):
             len(tool_message["content"]), config.max_tool_result_chars
         )
         self.assertIn("truncated", tool_message["content"])
+
+
+class StoppingTests(unittest.TestCase):
+    """Ending a turn part-way. Checkpoints are the only honest mechanism: a
+    Python thread cannot be interrupted from outside, so the loop has to
+    notice between one piece of work and the next."""
+
+    def test_it_stops_before_asking_the_model_anything(self):
+        agent, client = build_agent([text_message("never sent")])
+
+        with self.assertRaises(TurnStopped):
+            agent.send("hello", should_stop=lambda: True)
+
+        self.assertEqual(client.calls, [])
+
+    def test_it_stops_between_tool_calls_rather_than_finishing_the_round(self):
+        """A round of several tools is minutes of work; stopping after the
+        first is the entire point."""
+        ran: list[str] = []
+
+        def counted(**arguments: object) -> dict:
+            ran.append("call")
+            return {"ok": True}
+
+        counter = Tool(
+            name="count",
+            category="test",
+            description="Records that it ran.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            run=counted,
+        )
+        agent, _ = build_agent(
+            [tool_call_message(("count", {}), ("count", {}), ("count", {}))],
+            extra_tools=(counter,),
+        )
+
+        with self.assertRaises(TurnStopped):
+            agent.send("go", should_stop=lambda: len(ran) >= 1)
+
+        self.assertEqual(len(ran), 1)
+
+    def test_a_partial_reply_is_never_parsed_as_an_answer(self):
+        """The client returns what it had; a truncated tool call must not
+        reach the history as though the model had finished it."""
+
+        class Stopping:
+            def __init__(self) -> None:
+                self.stopped = False
+
+            def chat(self, messages, *, tools=None):
+                raise AssertionError("should have streamed")
+
+            def chat_stream(
+                self, messages, *, tools=None, on_token=None, on_reasoning=None,
+                should_stop=None,
+            ):
+                if on_token:
+                    on_token("half an ans")
+                self.stopped = True
+                return {"role": "assistant", "content": "half an ans"}
+
+        client = Stopping()
+        agent = Agent(client, Config(), ToolRegistry([CALCULATOR_TOOL]))
+
+        with self.assertRaises(TurnStopped):
+            agent.send(
+                "go", on_token=lambda text: None, should_stop=lambda: client.stopped
+            )
+
+        self.assertEqual(
+            [m["role"] for m in agent.history], ["user"]
+        )
+
+    def test_a_check_that_never_fires_changes_nothing(self):
+        agent, _ = build_agent([text_message("finished normally")])
+        turn = agent.send("hello", should_stop=lambda: False)
+        self.assertEqual(turn.content, "finished normally")

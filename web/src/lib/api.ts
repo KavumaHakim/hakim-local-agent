@@ -15,6 +15,7 @@ import type {
   ModelsResponse,
   RescanResponse,
   OcrBackend,
+  StopTurnResult,
   ToolsResponse,
   UploadResult,
   WorkspaceInfo,
@@ -104,6 +105,18 @@ export const api = {
     request<ToolsResponse>('/ocr-backend', {
       method: 'POST',
       body: JSON.stringify({ backend }),
+    }),
+
+  /**
+   * End a turn.
+   *
+   * Answers at once; the turn itself ends at its next checkpoint, and the
+   * stream reports that with a `stopped` event. Never a 404 - a turn that
+   * finished first is the outcome that was asked for.
+   */
+  stopTurn: (turnId: string) =>
+    request<StopTurnResult>(`/chat/${encodeURIComponent(turnId)}/stop`, {
+      method: 'POST',
     }),
 
   workspace: () => request<WorkspaceInfo>('/workspace'),

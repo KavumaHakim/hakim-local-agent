@@ -54,10 +54,23 @@ class Turn:
     # consumer, which is exactly the shape here: the worker thread writes, the
     # streaming response reads.
     events: queue.SimpleQueue = field(default_factory=queue.SimpleQueue)
+    # Set when someone asked for this turn to stop. An Event rather than a
+    # bool because it is written from the request thread and read from the
+    # worker, and it is the flag itself - not a lock around it - that has to
+    # be safe to share.
+    stopped: threading.Event = field(default_factory=threading.Event)
 
     def emit(self, type: str, **data: Any) -> None:
         """Publish one event to whoever is streaming this turn."""
         self.events.put({"type": type, **data})
+
+    def stop(self) -> None:
+        """Ask this turn to stop at its next checkpoint."""
+        self.stopped.set()
+
+    def is_stopped(self) -> bool:
+        """Whether a stop has been asked for. Passed to the agent as a callable."""
+        return self.stopped.is_set()
 
     def close(self) -> None:
         """Signal that no further events will arrive."""
@@ -157,6 +170,46 @@ class TurnQueue:
         """Turns waiting, not counting the one running."""
         with self._condition:
             return len(self._waiting)
+
+    # --- stopping ---
+
+    def stop_turn(self, turn_id: str) -> str:
+        """Ask one turn to stop, wherever it is. Returns what was found.
+
+        Two quite different things share one entry point, because from outside
+        they are the same request and which one applies is an accident of
+        timing:
+
+        "queued"  - it had not started. It is dropped from the backlog and its
+                    stream is closed here, because no worker will ever pick it
+                    up to do that.
+        "running" - the flag is set and the worker stops at its next
+                    checkpoint: the next token, the end of a tool call, or the
+                    end of a model round. Nothing is killed. A thread cannot
+                    be safely interrupted mid-write, and a half-written
+                    conversation would be a worse outcome than a few more
+                    seconds of CPU.
+        "unknown" - finished, never submitted, or already stopped and gone.
+        """
+        with self._condition:
+            if self._current is not None and self._current.id == turn_id:
+                self._current.stop()
+                return "running"
+
+            for index, waiting in enumerate(self._waiting):
+                if waiting.id == turn_id:
+                    self._waiting.pop(index)
+                    waiting.stop()
+                    break
+            else:
+                return "unknown"
+
+        # Outside the lock: emitting and closing touch the turn's own queue,
+        # not the backlog, and holding the condition while doing it would put
+        # the reader's wake-up behind a lock the reader does not need.
+        waiting.emit("stopped", state="queued", content="", tools=[], elapsed=0.0)
+        waiting.close()
+        return "queued"
 
     def busy(self) -> bool:
         with self._condition:
