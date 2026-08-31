@@ -413,6 +413,38 @@ export function useChat(options: ChatOptions) {
 
   const dismissError = useCallback((key: string) => drop(key), [drop])
 
+  /**
+   * Change a question that was already asked, and ask it again.
+   *
+   * The old question and everything that answered it are deleted first,
+   * because they were a reply to something that is no longer what was asked -
+   * so what is left is the conversation up to that point, and the edited text
+   * is simply the next thing said. That also means the model sees exactly the
+   * history the transcript shows, which is the whole reason for deleting
+   * rather than appending a correction.
+   *
+   * The rewind is server-side and the local copy follows it, rather than the
+   * other way round: if the server refuses - a turn is still running - nothing
+   * should have vanished from the screen.
+   */
+  const editAndResend = useCallback(
+    async (messageId: number, text: string) => {
+      const trimmed = text.trim()
+      if (!trimmed || conversationId === null) return
+      // Never stored, so there is nothing to rewind to; it is in flight and
+      // the server would refuse anyway.
+      if (messageId < 0) return
+
+      await api.rewind(conversationId, messageId)
+      setMessages((current) => {
+        const at = current.findIndex((message) => message.id === messageId)
+        return at === -1 ? current : current.slice(0, at)
+      })
+      await send(trimmed)
+    },
+    [conversationId, send],
+  )
+
   /** Agree to send the waiting turn to the hosted provider. */
   const approveRemote = useCallback(() => {
     if (!consent) return
@@ -484,6 +516,7 @@ export function useChat(options: ChatOptions) {
     send,
     openConversation,
     dismissError,
+    editAndResend,
     stop,
   }
 }

@@ -225,6 +225,25 @@ export default function App() {
     }
   }, [])
 
+  /**
+   * Replace an already-asked question and ask it again.
+   *
+   * The refusal worth surfacing is the 409: the server will not rewind a
+   * conversation while a turn is in flight, and silently doing nothing would
+   * look like the edit had been lost.
+   */
+  const editQuestion = useCallback(
+    async (messageId: number, text: string) => {
+      try {
+        await chat.editAndResend(messageId, text)
+        setNote(null)
+      } catch (failure) {
+        setNote(failure instanceof Error ? failure.message : String(failure))
+      }
+    },
+    [chat],
+  )
+
   /** Re-ask the last question, which is the one before the last answer. */
   const retryLast = useCallback(() => {
     const lastUser = [...chat.messages]
@@ -348,6 +367,14 @@ export default function App() {
                     index === lastIndex && message.role === 'assistant'
                       ? retryLast
                       : undefined
+                  }
+                  onEdit={(text) => void editQuestion(message.id, text)}
+                  editingBlocked={
+                    chat.busy
+                      ? 'Editing rewinds the conversation, so it waits for the running turn to finish or be stopped.'
+                      : message.id < 0
+                        ? 'Still being sent.'
+                        : undefined
                   }
                 />
               ))}

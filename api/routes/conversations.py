@@ -1,4 +1,4 @@
-"""Saved conversations: list, read, rename, delete."""
+"""Saved conversations: list, read, rename, delete, rewind."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from api.schemas import (
     ConversationOut,
     MessageOut,
     RenameRequest,
+    TruncateOut,
 )
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -49,6 +50,52 @@ def rename_conversation(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such conversation.")
     runtime.store.rename_conversation(conversation_id, body.title.strip())
     return ConversationOut(**vars(runtime.store.get_conversation(conversation_id)))
+
+
+@router.delete(
+    "/{conversation_id}/messages/{message_id}", response_model=TruncateOut
+)
+def rewind(
+    conversation_id: int,
+    message_id: int,
+    runtime: Runtime = Depends(get_runtime),
+):
+    """Delete a message and everything after it.
+
+    What editing a question is built on. The old question, the answer it got
+    and anything that followed all go, because they were a reply to something
+    that is no longer what was asked; leaving them would make a transcript of
+    a conversation nobody had.
+
+    Refused while any turn is in flight. A queued turn's history is read when
+    it runs and is identified by the id of its own user message - so deleting
+    rows underneath it would either change what it is answering or delete the
+    question itself.
+
+    It does not reach memory. Anything already extracted from the old messages
+    stays in the memory store, which has its own lifecycle and its own way of
+    being corrected; silently deleting from it here would be a second,
+    invisible deletion nobody asked for.
+    """
+    if runtime.store.get_conversation(conversation_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such conversation.")
+
+    if runtime.queue.busy() or runtime.queue.depth():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "A turn is still running or waiting. Editing a question would "
+            "pull the ground out from under it - stop it first.",
+        )
+
+    removed = runtime.store.truncate_from(conversation_id, message_id)
+    if not removed:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "No such message in this conversation."
+        )
+    return TruncateOut(
+        removed=removed,
+        emptied=runtime.store.message_count(conversation_id) == 0,
+    )
 
 
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)

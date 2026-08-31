@@ -480,6 +480,15 @@ class StopTurnOut(BaseModel):
     message: str
 
 
+class TruncateOut(BaseModel):
+    """What rewinding a conversation removed."""
+
+    removed: int
+    # True when nothing is left, so the next question is effectively the
+    # conversation's first - which is what its title should come from.
+    emptied: bool
+
+
 # --- workspace ---
 
 

@@ -14,6 +14,7 @@ import type {
   ModelOverride,
   ModelsResponse,
   RescanResponse,
+  RewindResult,
   OcrBackend,
   StopTurnResult,
   ToolsResponse,
@@ -218,4 +219,17 @@ export const api = {
 
   deleteConversation: (id: number) =>
     request<void>(`/conversations/${id}`, { method: 'DELETE' }),
+
+  /**
+   * Delete a message and everything after it.
+   *
+   * What editing a question is built on: the old question and every reply to
+   * it go, then the edited text is sent as a new turn. Refused with a 409
+   * while any turn is in flight.
+   */
+  rewind: (conversationId: number, messageId: number) =>
+    request<RewindResult>(
+      `/conversations/${conversationId}/messages/${messageId}`,
+      { method: 'DELETE' },
+    ),
 }

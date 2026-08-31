@@ -732,10 +732,17 @@ def open_conversation(
 
     Conversations are created on the first message rather than on page load,
     so an idle session never litters the database.
+
+    An existing conversation with nothing in it is retitled from this prompt.
+    That happens when the first question was edited: the old one is gone, and
+    a title still quoting it would name a question the conversation no longer
+    contains.
     """
     from chat_store import make_title
 
     if conversation_id is not None:
+        if runtime.store.message_count(conversation_id) == 0:
+            runtime.store.rename_conversation(conversation_id, make_title(prompt))
         return conversation_id
     return runtime.store.create_conversation(
         title=make_title(prompt), model_key=model_key

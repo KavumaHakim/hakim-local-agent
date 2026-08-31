@@ -2,6 +2,7 @@
  * The transcript: messages, the tools each turn ran, and the empty state.
  */
 
+import { useEffect, useRef, useState } from 'react'
 import { Markdown } from '../lib/markdown'
 import type { Message, ToolCall } from '../lib/types'
 import {
@@ -9,6 +10,7 @@ import {
   BrainIcon,
   CheckIcon,
   ChevronIcon,
+  PencilIcon,
   RetryIcon,
   SparkIcon,
   ToolIcon,
@@ -144,26 +146,24 @@ export function ReasoningPanel({
 export function MessageView({
   message,
   onRetry,
+  onEdit,
+  editingBlocked,
 }: {
   message: Message
   /** Only on the last assistant message: re-ask the preceding question. */
   onRetry?: () => void
+  /** Rewind to this question, replace it, and ask again. */
+  onEdit?: (text: string) => void
+  /** Why editing is unavailable right now, if it is. */
+  editingBlocked?: string
 }) {
   if (message.role === 'user') {
     return (
-      <div className="group flex animate-rise justify-end gap-1">
-        <div className="self-end opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
-          <CopyButton text={message.content} label="" />
-        </div>
-        {/* A raised surface, not an accent flood. The system uses the accent
-            as a line and a glow; a solid violet bubble was the one large
-            saturated fill in the old build. */}
-        <div className="max-w-[82%] rounded-[14px_14px_4px_14px] bg-raised px-3.5 py-2.5 shadow-[var(--shadow-sm)]">
-          <p className="text-[14.5px] leading-relaxed break-words whitespace-pre-wrap">
-            {message.content}
-          </p>
-        </div>
-      </div>
+      <UserMessage
+        message={message}
+        onEdit={onEdit}
+        editingBlocked={editingBlocked}
+      />
     )
   }
 
@@ -192,6 +192,123 @@ export function MessageView({
             </button>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * A question, and the ability to change it.
+ *
+ * Editing rewinds: this question and everything that answered it are deleted,
+ * and the new text is asked in their place. That is destructive, and worth
+ * being plain about in the UI - the alternative, appending a correction, would
+ * leave the model reading a conversation where the same thing is asked twice.
+ */
+function UserMessage({
+  message,
+  onEdit,
+  editingBlocked,
+}: {
+  message: Message
+  onEdit?: (text: string) => void
+  editingBlocked?: string
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(message.content)
+  const box = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    if (!editing) return
+    const element = box.current
+    if (!element) return
+    element.focus()
+    element.setSelectionRange(element.value.length, element.value.length)
+    element.style.height = 'auto'
+    element.style.height = `${Math.min(element.scrollHeight, 260)}px`
+  }, [editing, draft])
+
+  function cancel() {
+    setEditing(false)
+    setDraft(message.content)
+  }
+
+  function save() {
+    const trimmed = draft.trim()
+    if (!trimmed || trimmed === message.content) {
+      cancel()
+      return
+    }
+    setEditing(false)
+    onEdit?.(trimmed)
+  }
+
+  if (editing) {
+    return (
+      <div className="animate-rise">
+        <div className="ml-auto w-[82%] rounded-[14px] border border-accent-line bg-raised p-2.5">
+          <textarea
+            ref={box}
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') cancel()
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                save()
+              }
+            }}
+            className="max-h-[260px] w-full resize-none bg-transparent text-[14.5px] leading-relaxed outline-none"
+          />
+          <div className="mt-2 flex items-center gap-2">
+            <p className="min-w-0 flex-1 text-[11px] leading-snug text-faint">
+              This replaces the question. The answer it got, and everything
+              after, are deleted.
+            </p>
+            <button
+              type="button"
+              onClick={cancel}
+              className="h-7 shrink-0 rounded-md px-2 text-[12px] text-faint transition hover:text-fg"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={save}
+              disabled={!draft.trim()}
+              className="h-7 shrink-0 rounded-md border border-accent px-2.5 text-[12px] text-accent transition hover:bg-accent-tint disabled:opacity-30"
+            >
+              Ask again
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="group flex animate-rise justify-end gap-1">
+      <div className="flex self-end opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+        {onEdit && (
+          <button
+            type="button"
+            onClick={() => !editingBlocked && setEditing(true)}
+            disabled={Boolean(editingBlocked)}
+            title={editingBlocked || 'Edit and ask again'}
+            className="grid size-[22px] place-items-center rounded-sm text-faint transition hover:bg-tint hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <PencilIcon className="size-3.5" />
+          </button>
+        )}
+        <CopyButton text={message.content} label="" />
+      </div>
+      {/* A raised surface, not an accent flood. The system uses the accent
+          as a line and a glow; a solid violet bubble was the one large
+          saturated fill in the old build. */}
+      <div className="max-w-[82%] rounded-[14px_14px_4px_14px] bg-raised px-3.5 py-2.5 shadow-[var(--shadow-sm)]">
+        <p className="text-[14.5px] leading-relaxed break-words whitespace-pre-wrap">
+          {message.content}
+        </p>
       </div>
     </div>
   )

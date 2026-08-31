@@ -270,6 +270,13 @@ export type TurnEvent =
       can_escalate?: boolean
     }
 
+/** What rewinding a conversation removed. */
+export interface RewindResult {
+  removed: number
+  /** True when nothing is left, so the next question is the first again. */
+  emptied: boolean
+}
+
 /** What asking a turn to stop actually did. */
 export interface StopTurnResult {
   state: 'queued' | 'running' | 'unknown'

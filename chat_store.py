@@ -256,6 +256,36 @@ class ChatStore:
             )
         return messages
 
+    def truncate_from(self, conversation_id: int, message_id: int) -> int:
+        """Delete a message and everything after it. Returns how many went.
+
+        The rewind behind editing a question: the old question, the answer it
+        got, and anything that followed all have to go, because they were a
+        reply to something that is no longer what was asked. Keeping them
+        would leave a transcript that reads as a conversation nobody had.
+
+        Ids are monotonic within a conversation, so "after" is "greater id" -
+        the one place in this file where that is true without qualification,
+        because unlike a queued turn's history there is nothing in flight to
+        confuse the order.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM messages WHERE id = ? AND conversation_id = ?",
+                (message_id, conversation_id),
+            ).fetchone()
+            if row is None:
+                return 0
+            cursor = connection.execute(
+                "DELETE FROM messages WHERE conversation_id = ? AND id >= ?",
+                (conversation_id, message_id),
+            )
+            connection.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (_now(), conversation_id),
+            )
+            return int(cursor.rowcount)
+
     def message_count(self, conversation_id: int) -> int:
         with self._connect() as connection:
             row = connection.execute(

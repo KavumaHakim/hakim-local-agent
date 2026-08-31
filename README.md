@@ -413,7 +413,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               855 tests, no server required
+└── tests/               863 tests, no server required
 ```
 
 ---
@@ -1429,6 +1429,34 @@ litter the database.
 Loading a saved conversation restores the **agent's** transcript too — otherwise
 the model would answer against a conversation you cannot see.
 
+### Editing a question
+
+Hover any question and there is a pencil: change it, and it is asked again.
+
+The important part is what happens to what came after. `DELETE
+/api/conversations/{id}/messages/{message_id}` removes that message **and every
+one after it**, and only then is the edited text sent as a new turn. The old
+question, the answer it got and everything that followed are all a reply to
+something that is no longer what was asked — keeping them would leave a
+transcript of a conversation nobody had, and would show the model the same
+question twice.
+
+So it is destructive, and the editor says so before you commit to it.
+
+Two consequences worth stating:
+
+- **It is refused with a 409 while any turn is running or queued.** A queued
+  turn is identified by the id of its own user message and reads its history
+  when it runs, so deleting rows underneath it would either change what it is
+  answering or delete the question itself. The pencil is disabled and says why.
+- **It does not reach memory.** Anything already extracted into the memory store
+  from the old messages stays there. That store has its own lifecycle and its
+  own way of being corrected, and quietly deleting from it here would be a
+  second, invisible deletion nobody asked for.
+
+Editing the *first* question retitles the conversation, since the title was
+taken from a question that no longer exists.
+
 Stored at `data/chat_history.db`; `AGENT_DB_PATH` moves it.
 
 ---
@@ -1455,6 +1483,8 @@ gzipped, because the dependency list stops at those four.
 - The model's **reasoning** streams into a collapsible panel — see below
 - **A turn can be ended**, at any stage, from the Stop control beside it - see
   [Ending a turn](#ending-a-turn)
+- **Any question can be edited and asked again**, which rewinds the
+  conversation to that point — see above
 - **Tool switches** in the sidebar, with each tool's own risk text
 - **The workspace is chosen here**, from the folder pill in the composer or
   the Workspace panel - see below
@@ -1774,7 +1804,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**855 tests, no model server needed, and none of them touch the network.**
+**863 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -1804,7 +1834,7 @@ They take about 140 s, almost all of it importing torch.
 | `test_port_reclaim.py` | Reclaiming a port from a llama-server we did not start |
 | `test_turns.py` | The queue: serialisation, positions, bounded backlog, a runner that raises, stopping a queued or running turn |
 | `test_remote.py` | Hosted models: registry shape, key handling, connectivity cache, error hints |
-| `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches, the workspace and its picker, ending a turn, what a queued turn sees, a refused backlog, remote consent, uploads |
+| `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches, the workspace and its picker, ending a turn, what a queued turn sees, a refused backlog, remote consent, uploads, editing a question |
 
 The API tests use the same manager harness as the model tests and a scripted
 chat client, so none of them depend on whether something happens to be
@@ -1921,7 +1951,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 855 tests
+- 863 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

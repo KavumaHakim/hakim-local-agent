@@ -938,6 +938,109 @@ class StoppingTurnTests(ApiTestCase):
         self.assertEqual(self.runtime.queue.depth(), 0)
 
 
+class RewindTests(ApiTestCase):
+    """Editing a question is built on deleting from it onwards."""
+
+    def conversation_with(self, *contents: str) -> tuple[int, list[int]]:
+        conversation = self.runtime.store.create_conversation(title="Old title")
+        ids = []
+        for index, content in enumerate(contents):
+            ids.append(
+                self.runtime.store.add_message(
+                    conversation,
+                    "user" if index % 2 == 0 else "assistant",
+                    content,
+                )
+            )
+        return conversation, ids
+
+    def rewind(self, conversation: int, message_id: int):
+        return self.client.delete(
+            f"/api/conversations/{conversation}/messages/{message_id}"
+        )
+
+    def test_it_takes_the_message_and_everything_after_it(self):
+        """The answers were a reply to a question that is about to change."""
+        conversation, ids = self.conversation_with("one", "first", "two", "second")
+
+        response = self.rewind(conversation, ids[2])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"removed": 2, "emptied": False})
+
+        left = self.client.get(f"/api/conversations/{conversation}").json()
+        self.assertEqual([m["content"] for m in left["messages"]], ["one", "first"])
+
+    def test_it_says_when_nothing_is_left(self):
+        conversation, ids = self.conversation_with("only", "answer")
+        self.assertEqual(self.rewind(conversation, ids[0]).json()["emptied"], True)
+
+    def test_a_conversation_left_empty_is_retitled_by_the_next_question(self):
+        """Otherwise the history list goes on naming a question that is gone."""
+        conversation, ids = self.conversation_with("what is 2+2?", "4")
+        self.rewind(conversation, ids[0])
+
+        self.runtime.responses = [{"role": "assistant", "content": "8"}]
+        self.say("what is 4+4?", conversation_id=conversation)
+
+        listed = self.client.get("/api/conversations").json()
+        titles = {item["id"]: item["title"] for item in listed}
+        self.assertEqual(titles[conversation], "what is 4+4?")
+
+    def test_another_conversation_is_untouched(self):
+        """Ids are global, so "every id from here up" has to be scoped."""
+        first, _ = self.conversation_with("keep", "me")
+        second, second_ids = self.conversation_with("drop", "me")
+
+        self.assertEqual(self.rewind(second, second_ids[0]).json()["removed"], 2)
+
+        left = self.client.get(f"/api/conversations/{first}").json()
+        self.assertEqual([m["content"] for m in left["messages"]], ["keep", "me"])
+
+    def test_a_message_from_another_conversation_is_a_404(self):
+        first, first_ids = self.conversation_with("mine", "answer")
+        second, _ = self.conversation_with("theirs")
+
+        response = self.rewind(second, first_ids[0])
+        self.assertEqual(response.status_code, 404)
+        # And nothing was taken from either one.
+        kept = self.client.get(f"/api/conversations/{first}").json()
+        self.assertEqual(len(kept["messages"]), 2)
+
+    def test_an_unknown_conversation_is_a_404(self):
+        self.assertEqual(self.rewind(9999, 1).status_code, 404)
+
+    def test_it_is_refused_while_a_turn_is_in_flight(self):
+        """A queued turn is identified by its own user message id, and reads
+        its history when it runs. Deleting underneath it breaks both."""
+        conversation, ids = self.conversation_with("one", "first")
+        self.runtime.queue.busy = lambda: True  # type: ignore[method-assign]
+
+        response = self.rewind(conversation, ids[0])
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("stop it first", response.json()["detail"])
+
+    def test_the_rewound_history_is_what_the_next_turn_sees(self):
+        """The point of all of it: the model must not be told about the
+        question that was replaced."""
+        conversation, ids = self.conversation_with(
+            "what is 2+2?", "4", "and times 3?", "12"
+        )
+        self.rewind(conversation, ids[2])
+
+        self.runtime.responses = [{"role": "assistant", "content": "2"}]
+        self.say("and minus 2?", conversation_id=conversation)
+
+        sent = self.runtime.clients[-1].seen[0]
+        self.assertEqual(
+            [(m["role"], m.get("content")) for m in sent[1:]],
+            [
+                ("user", "what is 2+2?"),
+                ("assistant", "4"),
+                ("user", "and minus 2?"),
+            ],
+        )
+
+
 class BacklogTests(ApiTestCase):
     """The queue is bounded, and a refusal has to reach the person asking."""
 

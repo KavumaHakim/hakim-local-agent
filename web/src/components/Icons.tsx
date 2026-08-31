@@ -155,6 +155,13 @@ export const CollapseIcon = svg(<path d="M14 7l-5 5 5 5" />)
 
 export const ExpandIcon = svg(<path d="M10 7l5 5-5 5" />)
 
+export const PencilIcon = svg(
+  <>
+    <path d="M4 20h4l10-10a2.8 2.8 0 0 0-4-4L4 16z" />
+    <path d="M13.5 6.5 17.5 10.5" />
+  </>,
+)
+
 export const FolderIcon = svg(
   <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />,
 )
