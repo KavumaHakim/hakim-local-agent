@@ -102,3 +102,27 @@ def write_pdf(path: str | Path, pages: list[list[str]]) -> Path:
 
     target.write_bytes(bytes(out))
     return target
+
+
+def add_outline(path: str | Path, entries: list[tuple[int, str, int]]) -> Path:
+    """Attach a table of contents to a PDF written by `write_pdf`.
+
+    `entries` is (level, title, page), the shape PyMuPDF uses.
+
+    Built with fitz rather than by hand, unlike the rest of this file. An
+    outline is a linked tree of objects with /First, /Last, /Count and /Parent
+    all having to agree, which is a great deal of fragile plumbing to write in
+    order to test the code that *reads* one. Letting fitz write it still leaves
+    the part under test - turning a table of contents into headings, and
+    headings into chunk sections - entirely ours.
+    """
+    import fitz
+
+    target = Path(path)
+    document = fitz.open(target)
+    try:
+        document.set_toc([[level, title, page] for level, title, page in entries])
+        document.save(str(target), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    finally:
+        document.close()
+    return target

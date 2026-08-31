@@ -464,7 +464,78 @@ class MetadataStore:
 
     # --- reading ---
 
-    def search_text(self, query: str, limit: int) -> list[int]:
+    def outline(self, document_id: int) -> list[dict]:
+        """The sections of one document, in the order they appear.
+
+        Derived from the chunks rather than stored separately. The section a
+        chunk belongs to is already recorded at ingestion, so a second table
+        would be a copy that could disagree with it - and a document has tens
+        of sections, not thousands, so grouping them on demand costs nothing.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT section,"
+                "       MIN(ordinal) AS first_ordinal,"
+                "       MIN(page)    AS first_page,"
+                "       MAX(page)    AS last_page,"
+                "       COUNT(*)     AS chunks,"
+                "       SUM(LENGTH(text)) AS characters"
+                " FROM chunks WHERE document_id = ? AND section IS NOT NULL"
+                " GROUP BY section ORDER BY first_ordinal",
+                (document_id,),
+            ).fetchall()
+
+        return [
+            {
+                "section": row["section"],
+                "first_page": row["first_page"],
+                "last_page": row["last_page"],
+                "chunks": int(row["chunks"]),
+                "characters": int(row["characters"] or 0),
+            }
+            for row in rows
+        ]
+
+    def rows_in(
+        self, *, document_id: int | None = None, section: str | None = None
+    ) -> list[int]:
+        """Vector rows for the chunks matching a filter, in document order.
+
+        The allowlist a scoped search works from: rather than searching
+        everything and discarding, the candidates are chosen first and only
+        those are scored.
+        """
+        clauses: list[str] = []
+        values: list[object] = []
+        if document_id is not None:
+            clauses.append("document_id = ?")
+            values.append(int(document_id))
+        if section is not None:
+            # Matched loosely on purpose. A section is named by a person
+            # asking for "chapter 3", not by pasting "Chapter 3 Alkenes"
+            # exactly as the bookmark spells it.
+            clauses.append("section LIKE ?")
+            values.append(f"%{section}%")
+        if not clauses:
+            return []
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT vector_row FROM chunks WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY document_id, ordinal",
+                values,
+            ).fetchall()
+        return [int(row["vector_row"]) for row in rows]
+
+    def search_text(
+        self,
+        query: str,
+        limit: int,
+        *,
+        document_id: int | None = None,
+        section: str | None = None,
+    ) -> list[int]:
         """Vector rows whose chunk text best matches `query`, best first.
 
         BM25, which is what FTS5 ranks with, and it is good at exactly what
@@ -483,15 +554,26 @@ class MetadataStore:
         expression = _fts_query(query)
         if not expression:
             return []
+
+        clauses = ["chunk_search MATCH ?"]
+        values: list[object] = [expression]
+        if document_id is not None:
+            clauses.append("c.document_id = ?")
+            values.append(int(document_id))
+        if section is not None:
+            clauses.append("c.section LIKE ?")
+            values.append(f"%{section}%")
+        values.append(int(limit))
+
         try:
             with self._connect() as connection:
                 rows = connection.execute(
                     "SELECT c.vector_row AS vector_row"
                     " FROM chunk_search s"
                     " JOIN chunks c ON c.id = s.rowid"
-                    " WHERE chunk_search MATCH ?"
+                    " WHERE " + " AND ".join(clauses) +
                     " ORDER BY bm25(chunk_search) LIMIT ?",
-                    (expression, int(limit)),
+                    values,
                 ).fetchall()
         except sqlite3.OperationalError:
             # A query FTS5 could not parse. The terms are quoted before they

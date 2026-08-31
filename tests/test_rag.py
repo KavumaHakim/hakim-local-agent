@@ -32,7 +32,7 @@ from rag.extract import ExtractionError, clean_text, extract, is_supported
 from rag.index import VectorIndex, VectorIndexError
 from rag.manager import RagError, RagManager
 from rag.metadata import MetadataStore
-from tests.pdf_fixture import write_pdf
+from tests.pdf_fixture import add_outline, write_pdf
 from tools.base import ToolRegistry
 from tools.document_search import DocumentSearchError, DocumentSearchTools
 from tools.registry import build_default_registry
@@ -1058,6 +1058,133 @@ class HybridSearchTests(TempCase):
         self.assertAlmostEqual(hit["score"], round(expected, 4), places=4)
 
 
+class OutlineTests(TempCase):
+    """Structure: what a document is made of, rather than what matches."""
+
+    def book(self) -> Path:
+        path = self.docs / "chemistry.pdf"
+        write_pdf(
+            path,
+            [
+                ["Contents"],
+                ["Alkanes are saturated hydrocarbons with single bonds only"],
+                ["Alkenes contain a carbon carbon double bond"],
+                ["Dehydration of an alcohol follows the Zaitsev rule"],
+            ],
+        )
+        add_outline(
+            path,
+            [
+                (1, "Chapter 2 Alkanes", 2),
+                (1, "Chapter 3 Alkenes", 3),
+                (2, "3.7 Dehydration", 4),
+            ],
+        )
+        return path
+
+    def indexed(self) -> RagManager:
+        self.book()
+        manager = self.manager(min_score=0.0)
+        manager.index_path(self.docs)
+        return manager
+
+    def test_a_pdf_gets_its_sections_from_its_own_bookmarks(self):
+        """Without this a PDF is the one format producing no structure at all,
+        which is backwards: a textbook is where the chapter matters most."""
+        manager = self.indexed()
+        outline = manager.outline("chemistry.pdf")
+
+        self.assertEqual(
+            [section["section"] for section in outline["sections"]],
+            ["Chapter 2 Alkanes", "Chapter 3 Alkenes", "3.7 Dehydration"],
+        )
+
+    def test_the_outline_says_where_each_section_starts(self):
+        outline = self.indexed().outline("chemistry.pdf")
+        pages = {s["section"]: s["first_page"] for s in outline["sections"]}
+        self.assertEqual(pages["Chapter 2 Alkanes"], 2)
+        self.assertEqual(pages["3.7 Dehydration"], 4)
+
+    def test_sections_come_back_in_document_order_not_alphabetical(self):
+        outline = self.indexed().outline("chemistry.pdf")
+        first = [s["section"] for s in outline["sections"]][0]
+        self.assertEqual(first, "Chapter 2 Alkanes")
+
+    def test_a_document_without_headings_says_so_rather_than_looking_empty(self):
+        self.write("plain.txt", "Just a paragraph with no headings at all.")
+        manager = self.manager()
+        manager.index_path(self.docs)
+
+        outline = manager.outline("plain.txt")
+        self.assertEqual(outline["count"], 0)
+        self.assertIn("no headings", outline["note"])
+
+    def test_an_unknown_document_is_an_error_not_an_empty_outline(self):
+        manager = self.indexed()
+        with self.assertRaises(RagError):
+            manager.outline("nothing.pdf")
+
+    def test_a_search_can_be_narrowed_to_one_section(self):
+        """The difference between the best passages in a chapter and whichever
+        of the best overall happened to land in it."""
+        manager = self.indexed()
+
+        anywhere = manager.search("double bond")
+        self.assertIn("Alkenes", anywhere["results"][0]["text"])
+
+        scoped = manager.search("double bond", section="Alkanes")
+        self.assertEqual(scoped["count"], 1)
+        self.assertIn("Alkanes are saturated", scoped["results"][0]["text"])
+        self.assertEqual(scoped["scope"], "Alkanes")
+
+    def test_a_section_is_matched_loosely_because_people_do_not_paste_headings(self):
+        manager = self.indexed()
+        self.assertEqual(manager.search("alcohol", section="Dehydration")["count"], 1)
+
+    def test_a_search_can_be_narrowed_to_one_document(self):
+        self.book()
+        self.write("biology.txt", "Alkenes are never mentioned in this file at all.")
+        manager = self.manager(min_score=0.0)
+        manager.index_path(self.docs)
+
+        scoped = manager.search("alkenes", document="biology.txt")
+        self.assertEqual(scoped["count"], 1)
+        self.assertEqual(scoped["results"][0]["document"], "biology.txt")
+
+    def test_a_scope_that_matches_nothing_says_what_to_do(self):
+        manager = self.indexed()
+        empty = manager.search("anything", section="Chapter 99")
+        self.assertEqual(empty["count"], 0)
+        self.assertIn("get_document_outline", empty["note"])
+
+    def test_an_unknown_document_in_a_search_fails_before_the_model_runs(self):
+        manager = self.indexed()
+        encoded = self.embedder.queries_encoded
+        with self.assertRaises(RagError):
+            manager.search("anything", document="nothing.pdf")
+        self.assertEqual(self.embedder.queries_encoded, encoded)
+
+    def test_keyword_matching_still_applies_inside_a_scope(self):
+        manager = self.indexed()
+        found = manager.search("Zaitsev", section="Dehydration", )
+        self.assertEqual(found["count"], 1)
+        self.assertIn(found["results"][0]["match"], ("keyword", "both"))
+
+    def test_markdown_headings_produce_an_outline_too(self):
+        """PDFs are the new part; the other formats already had structure and
+        must keep it."""
+        self.write(
+            "notes.md",
+            "# Photosynthesis\n\nLight reactions occur in the thylakoid.\n\n"
+            "# Respiration\n\nGlycolysis happens in the cytosol.\n",
+        )
+        manager = self.manager()
+        manager.index_path(self.docs)
+
+        sections = [s["section"] for s in manager.outline("notes.md")["sections"]]
+        self.assertEqual(sections, ["Photosynthesis", "Respiration"])
+
+
 class DocumentToolTests(TempCase):
     def tools(self, **overrides) -> ToolRegistry:
         manager = self.manager()
@@ -1067,7 +1194,10 @@ class DocumentToolTests(TempCase):
     def test_the_tools_are_registered_with_a_schema_the_model_can_read(self):
         self.write("a.txt", "Alpha text.")
         registry = self.tools()
-        self.assertEqual(registry.names(), ["list_documents", "search_documents"])
+        self.assertEqual(
+            registry.names(),
+            ["get_document_outline", "list_documents", "search_documents"],
+        )
         definition = registry.get_tool("search_documents").definition()
         self.assertEqual(definition["type"], "function")
         self.assertIn("query", definition["function"]["parameters"]["properties"])
@@ -1403,6 +1533,50 @@ class RagApiTests(TempCase):
         )
         self.assertEqual(found.status_code, 200)
         self.assertEqual(found.json()["results"][0]["document"], "biology.txt")
+
+    def test_the_outline_of_a_document_over_http(self):
+        self.write(
+            "notes.md",
+            "# Photosynthesis\n\nLight reactions occur in the thylakoid.\n",
+        )
+        self.client.post("/api/rag/index", json={"path": str(self.docs)})
+
+        response = self.client.get("/api/rag/documents/notes.md/outline")
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["document"], "notes.md")
+        self.assertEqual(
+            [section["section"] for section in body["sections"]], ["Photosynthesis"]
+        )
+
+    def test_an_outline_for_a_document_that_is_not_there_is_a_404(self):
+        response = self.client.get("/api/rag/documents/nothing.md/outline")
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_search_can_be_scoped_over_http(self):
+        self.write(
+            "notes.md",
+            "# Alkanes\n\nSaturated hydrocarbons with single bonds.\n\n"
+            "# Alkenes\n\nContain a carbon carbon double bond.\n",
+        )
+        self.client.post("/api/rag/index", json={"path": str(self.docs)})
+
+        scoped = self.client.post(
+            "/api/rag/search", json={"query": "bond", "section": "Alkanes"}
+        )
+        self.assertEqual(scoped.status_code, 200, scoped.text)
+        body = scoped.json()
+        self.assertEqual(body["scope"], "Alkanes")
+        self.assertTrue(
+            all("Alkanes" in hit["text"] for hit in body["results"]), body["results"]
+        )
+
+    def test_a_hit_reports_how_it_was_found_over_http(self):
+        self.write("notes.md", "The Zaitsev rule predicts the major product.")
+        self.client.post("/api/rag/index", json={"path": str(self.docs)})
+
+        found = self.client.post("/api/rag/search", json={"query": "Zaitsev"})
+        self.assertIn(found.json()["results"][0]["match"], ("keyword", "both"))
 
     def test_listing_and_deleting_a_document(self):
         self.write("a.txt", "Alpha text.")

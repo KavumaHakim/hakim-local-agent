@@ -32,6 +32,7 @@ from api.schemas import (
     RagIndexResult,
     RagRemoveResult,
     RagSearchRequest,
+    RagOutlineResult,
     RagSearchResult,
     RagStatsOut,
 )
@@ -159,11 +160,42 @@ def index(body: RagIndexRequest, runtime: Runtime = Depends(get_runtime)):
 
 @router.post("/search", response_model=RagSearchResult)
 def search(body: RagSearchRequest, runtime: Runtime = Depends(get_runtime)):
-    """Semantic search, the same call the agent's tool makes."""
+    """Search, the same call the agent's tool makes.
+
+    By meaning and by exact wording at once, optionally narrowed to one
+    document or section.
+    """
     return RagSearchResult(
         **_run(
             runtime,
-            lambda m: m.search(body.query, top_k=body.top_k, min_score=body.min_score),
+            lambda m: m.search(
+                body.query,
+                top_k=body.top_k,
+                min_score=body.min_score,
+                document=body.document,
+                section=body.section,
+            ),
+        )
+    )
+
+
+@router.get("/documents/{document}/outline", response_model=RagOutlineResult)
+def outline(document: str, runtime: Runtime = Depends(get_runtime)):
+    """The sections of one document, in order.
+
+    By name or id, because this is the call you make when you know what a
+    document is called and not what number it was given. Answers the question
+    retrieval cannot: what is in here, before you have thought of a question
+    to ask about it.
+    """
+    # 404, like deleting one: an unknown document is not found, not a bad
+    # request. The default here is 400 because most failures in this router
+    # are "that path is not indexable", which is a different thing.
+    return RagOutlineResult(
+        **_run(
+            runtime,
+            lambda m: m.outline(document),
+            missing=status.HTTP_404_NOT_FOUND,
         )
     )
 

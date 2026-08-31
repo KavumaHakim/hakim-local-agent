@@ -332,14 +332,50 @@ class RagManager:
 
     # --- searching ---
 
+    def outline(self, document: str | int) -> dict[str, Any]:
+        """The sections of one document, in the order they appear.
+
+        The answer to "what does this book cover", which no amount of
+        retrieval gives you: search returns passages that match a question,
+        and cannot tell you what is in a document you have not thought of a
+        question about yet.
+        """
+        record = self._resolve_document(document)
+        sections = self.store.outline(record.id)
+        payload: dict[str, Any] = {
+            "success": True,
+            "document": record.name,
+            "path": record.path,
+            "pages": record.pages,
+            "chunks": record.chunk_count,
+            "sections": sections,
+            "count": len(sections),
+        }
+        if not sections:
+            payload["note"] = (
+                f"{record.name} has no headings, so there is nothing to "
+                f"outline - search it instead. PDFs get their structure from "
+                f"the file's own bookmarks, and not every PDF has any; "
+                f"Markdown and Word documents get theirs from real headings."
+            )
+        return payload
+
     def search(
         self,
         query: str,
         *,
         top_k: int | None = None,
         min_score: float | None = None,
+        document: str | int | None = None,
+        section: str | None = None,
     ) -> dict[str, Any]:
-        """Find the chunks closest in meaning to `query`."""
+        """Find the chunks closest in meaning to `query`.
+
+        `document` and `section` narrow the search before it runs rather than
+        filtering afterwards, which is the difference between "the best five
+        passages in this chapter" and "whichever of the best five overall
+        happened to be in it".
+        """
         if not isinstance(query, str) or not query.strip():
             raise RagError("The search query must be a non-empty string.")
         query = query.strip()
@@ -367,6 +403,35 @@ class RagManager:
 
         self._check_compatible()
 
+        # Resolved before anything is embedded, so a mistyped document name
+        # fails immediately rather than after the model has run.
+        document_id: int | None = None
+        scope = ""
+        if document is not None:
+            record = self._resolve_document(document)
+            document_id = record.id
+            scope = record.name
+        if section is not None:
+            section = section.strip() or None
+            if section:
+                scope = f"{scope} / {section}" if scope else section
+
+        allowed: list[int] | None = None
+        if document_id is not None or section is not None:
+            allowed = self.store.rows_in(document_id=document_id, section=section)
+            if not allowed:
+                return {
+                    "success": True,
+                    "query": query,
+                    "count": 0,
+                    "results": [],
+                    "scope": scope,
+                    "note": (
+                        f"Nothing is indexed under {scope!r}. Use "
+                        f"get_document_outline to see the sections that exist."
+                    ),
+                }
+
         free = self.store.free_row_set()
         try:
             self.index.verify(total_chunks)
@@ -382,7 +447,16 @@ class RagManager:
             # other can be the best answer. Truncating each to `limit` first
             # would throw away exactly those.
             depth = min(limit * CANDIDATE_DEPTH + margin, 100)
-            hits = self.index.search(vector, top_k=depth, skip=free)
+            if allowed is None:
+                hits = self.index.search(vector, top_k=depth, skip=free)
+            else:
+                # A scope is tens of chunks, not thousands, so every candidate
+                # is scored outright. Exact, and cheaper than scanning the
+                # whole index to throw most of it away.
+                scored = self.index.score_rows(
+                    vector, [row for row in allowed if row not in free]
+                )
+                hits = sorted(scored.items(), key=lambda pair: -pair[1])[:depth]
         except EmbeddingError as exc:
             raise RagError(str(exc)) from None
         except VectorIndexError as exc:
@@ -393,10 +467,14 @@ class RagManager:
 
         keyword: list[int] = []
         if self.hybrid:
+            permitted = set(allowed) if allowed is not None else None
             keyword = [
                 row
-                for row in self.store.search_text(query, depth)
+                for row in self.store.search_text(
+                    query, depth, document_id=document_id, section=section
+                )
                 if row not in free
+                and (permitted is None or row in permitted)
             ]
             # The keyword half found these by their words and has no cosine
             # for them, so they are measured the same way a semantic hit was.
@@ -450,6 +528,8 @@ class RagManager:
             "count": len(results),
             "results": [hit.as_dict() for hit in results],
         }
+        if scope:
+            payload["scope"] = scope
         if not results:
             best = max((score for _, score in hits), default=0.0)
             keyword_note = (

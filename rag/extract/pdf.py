@@ -121,8 +121,17 @@ def extract_pdf(path: Path, *, want_tables: bool = True) -> ExtractedDocument:
 
     try:
         total = document.page_count
+        outline = _outline(document)
         for index in range(total):
             number = index + 1
+            # The book's own table of contents, turned into headings the
+            # chunker already knows what to do with. Without this a PDF is the
+            # one format that produces no structure at all, which is backwards:
+            # a textbook is exactly where knowing the chapter matters most.
+            for level, title in outline.get(number, ()):
+                elements.append(
+                    DocumentElement(type="heading", content=title, page=number, level=level)
+                )
             try:
                 page = document.load_page(index)
             except Exception:
@@ -161,6 +170,43 @@ def extract_pdf(path: Path, *, want_tables: bool = True) -> ExtractedDocument:
         page_count=total,
         ocr_pages=tuple(scanned),
     )
+
+
+def _outline(document) -> dict[int, list[tuple[int, str]]]:
+    """The PDF's own table of contents, keyed by the page each entry starts on.
+
+    PyMuPDF returns `[level, title, page]` rows straight from the file's
+    bookmarks, so this is the author's structure rather than a guess made from
+    font sizes.
+
+    The limitation is worth stating: a bookmark points at a *page*, not at a
+    position on it. A section therefore begins at the top of its page, and a
+    page holding the end of one section and the start of the next is credited
+    entirely to the new one. Getting that exactly right means reasoning about
+    text coordinates, which is a great deal of work to move a boundary by a
+    paragraph.
+
+    Not every PDF has bookmarks. One without simply gets no headings, exactly
+    as before.
+    """
+    try:
+        rows = document.get_toc(simple=True)
+    except Exception:
+        # get_toc is not universally implemented across the formats fitz will
+        # open, and a missing outline costs structure rather than content.
+        return {}
+
+    found: dict[int, list[tuple[int, str]]] = {}
+    for row in rows or ():
+        try:
+            level, title, page = int(row[0]), str(row[1]).strip(), int(row[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        # Page 0 or -1 means the entry points at nothing resolvable.
+        if page < 1 or not title:
+            continue
+        found.setdefault(page, []).append((max(1, level), title))
+    return found
 
 
 def _tables(page) -> list[str]:

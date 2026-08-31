@@ -48,9 +48,17 @@ class DocumentSearchTools:
 
     # --- operations ---
 
-    def search_documents(self, query: str, top_k: int | None = None) -> dict[str, Any]:
+    def search_documents(
+        self,
+        query: str,
+        top_k: int | None = None,
+        document: str | None = None,
+        section: str | None = None,
+    ) -> dict[str, Any]:
         try:
-            payload = self._manager.search(query, top_k=top_k)
+            payload = self._manager.search(
+                query, top_k=top_k, document=document, section=section
+            )
         except RagError as exc:
             raise DocumentSearchError(str(exc)) from None
 
@@ -68,6 +76,12 @@ class DocumentSearchTools:
     def list_documents(self) -> dict[str, Any]:
         try:
             return self._manager.list_documents()
+        except RagError as exc:
+            raise DocumentSearchError(str(exc)) from None
+
+    def get_document_outline(self, document: str) -> dict[str, Any]:
+        try:
+            return self._manager.outline(document)
         except RagError as exc:
             raise DocumentSearchError(str(exc)) from None
 
@@ -119,10 +133,47 @@ class DocumentSearchTools:
                             "type": "integer",
                             "description": "How many passages to return.",
                         },
+                        "document": {
+                            "type": "string",
+                            "description": (
+                                "Restrict the search to one document, by name. "
+                                "Use when the question names it."
+                            ),
+                        },
+                        "section": {
+                            "type": "string",
+                            "description": (
+                                "Restrict the search to sections whose heading "
+                                "contains this, e.g. 'Chapter 3'. Call "
+                                "get_document_outline first to see what exists."
+                            ),
+                        },
                     },
                     "required": ["query"],
                 },
                 run=self.search_documents,
+            ),
+            Tool(
+                name="get_document_outline",
+                category="documents",
+                description=(
+                    "List the sections of one indexed document, in order, with "
+                    "their pages. Use to answer 'what does this cover' or to "
+                    "find the right section to search - questions about a "
+                    "document as a whole, which searching passages cannot "
+                    "answer. Not every document has headings."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "document": {
+                            "type": "string",
+                            "description": "The document name, as list_documents gives it.",
+                        },
+                    },
+                    "required": ["document"],
+                },
+                run=self.get_document_outline,
             ),
             Tool(
                 name="list_documents",

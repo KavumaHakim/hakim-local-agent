@@ -413,7 +413,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               876 tests, no server required
+└── tests/               892 tests, no server required
 ```
 
 ---
@@ -780,7 +780,7 @@ turn; guessing big wastes minutes on every simple question.
 | memory background processing | memory | needs a second flag |
 | `http_request` | http | **off by default** |
 | `ocr_image` | ocr | **off by default** — Tesseract or the GLM-OCR model |
-| `search_documents`, `list_documents` | documents | **off by default** |
+| `search_documents`, `list_documents`, `get_document_outline` | documents | **off by default** |
 
 Disabled tools are not registered at all — sending the model a definition it can
 only fail on wastes context and a whole round-trip.
@@ -1288,7 +1288,7 @@ network once the embedding model is on disk.
 
 | File | What it does |
 |---|---|
-| [`rag/extractor.py`](rag/extractor.py) | file → text, page by page for PDFs |
+| [`rag/extract/`](rag/extract/) | file → text and headings; PDFs read their own bookmarks |
 | [`rag/chunker.py`](rag/chunker.py) | text → overlapping chunks on paragraph boundaries |
 | [`rag/embeddings.py`](rag/embeddings.py) | owns the worker process; starts it late, stops it early |
 | [`rag/worker.py`](rag/worker.py) | the model itself, in its own process |
@@ -1352,6 +1352,52 @@ is a real answer scoring *below* the floor.
 Set `RAG_HYBRID=0` to measure what it is buying on your own documents. If
 SQLite was built without FTS5, search quietly falls back to vectors alone and
 says so when it finds nothing.
+
+#### Structure: outlines and scoped search
+
+Retrieval answers "which passages match this question". It cannot answer "what
+is in this book", because you have to know what to ask before it helps.
+
+Every chunk already records the section it came from — a heading starts a new
+run, and the chunker never merges across one. **PDFs were the exception, and
+the wrong way round:** they produced no headings at all, so every chunk of a
+textbook had `section = None`, in the one format where the chapter matters
+most.
+
+They now get their structure from **the file's own bookmarks**, via
+PyMuPDF's `get_toc()` — the author's table of contents rather than a guess made
+from font sizes, and no model involved. A PDF without bookmarks gets no
+headings, exactly as before.
+
+The limitation is worth stating plainly: a bookmark points at a *page*, not a
+position on it. A section therefore begins at the top of its page, and a page
+holding the end of one section and the start of the next is credited entirely
+to the new one. Fixing that means reasoning about text coordinates, which is a
+great deal of work to move a boundary by a paragraph.
+
+Two things use it:
+
+`get_document_outline(document)` lists the sections in order with their pages,
+derived from the chunks rather than stored twice:
+
+```
+Chapter 2 Alkanes      p2–14   28 chunks
+Chapter 3 Alkenes      p15–31  41 chunks
+  3.7 Dehydration      p27–31  9 chunks
+```
+
+`search_documents(query, document=…, section=…)` narrows *before* searching,
+which is the difference between "the best five passages in this chapter" and
+"whichever of the best five overall happened to land in it". A section is
+matched loosely — `section="Chapter 3"` finds `Chapter 3 Alkenes` — because
+people ask by chapter, not by pasting a bookmark verbatim.
+
+A scoped search scores every candidate in the scope outright rather than
+searching the whole index and discarding: a section is tens of chunks, so that
+is both exact and cheaper. Keyword matching applies inside a scope too.
+
+Same on the API: `GET /api/rag/documents/{name}/outline`, and `document` /
+`section` on `POST /api/rag/search`.
 
 #### The model
 
@@ -1862,7 +1908,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**876 tests, no model server needed, and none of them touch the network.**
+**892 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2010,7 +2056,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 876 tests
+- 892 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

@@ -272,6 +272,29 @@ class ToolsOut(BaseModel):
 # --- document search (RAG) ---
 
 
+class RagSectionOut(BaseModel):
+    """One section of a document, as the outline reports it."""
+
+    section: str
+    first_page: int | None = None
+    last_page: int | None = None
+    chunks: int = 0
+    characters: int = 0
+
+
+class RagOutlineResult(BaseModel):
+    """What one document is made of, rather than what matches a question."""
+
+    success: bool = True
+    document: str
+    path: str
+    pages: int | None = None
+    chunks: int = 0
+    count: int = 0
+    sections: list[RagSectionOut] = []
+    note: str = ""
+
+
 class RagIndexRequest(BaseModel):
     """Index a file, or a folder of them."""
 
@@ -311,6 +334,10 @@ class RagSearchRequest(BaseModel):
     top_k: int | None = Field(default=None, ge=1, le=50)
     # Cosine similarity. None uses the configured threshold.
     min_score: float | None = Field(default=None, ge=-1.0, le=1.0)
+    # Narrow the search before it runs. A document by name or id, and a
+    # section by any part of its heading.
+    document: str | None = Field(default=None, max_length=500)
+    section: str | None = Field(default=None, max_length=300)
 
 
 class RagHit(BaseModel):
@@ -319,6 +346,9 @@ class RagHit(BaseModel):
     chunk_id: str
     score: float
     text: str
+    # How it was found: "semantic", "keyword" or "both". The score means
+    # something different for each.
+    match: str = "semantic"
     # Absent for formats that have no pages, rather than null.
     page: int | None = None
 
@@ -332,6 +362,8 @@ class RagSearchResult(BaseModel):
     # nothing above the threshold.
     note: str = ""
     truncated: str = ""
+    # What the search was narrowed to, when it was.
+    scope: str = ""
 
 
 class RagDocumentOut(BaseModel):
