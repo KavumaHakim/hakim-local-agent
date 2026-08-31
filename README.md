@@ -1378,6 +1378,45 @@ its text is extracted and indexed as text either way.
 For a 1,247-page book that is the difference between about **2.8 minutes and
 3.5 seconds** of extraction.
 
+#### What indexing a book actually costs
+
+Measured on this machine — i5-6300U, two cores — against the real BGE model,
+indexing a generated 120-page prose textbook (240 chunks, ~1,180 characters
+each):
+
+| | Time | Rate |
+|---|---|---|
+| Extract + chunk | 0.6 s | 195 pages/s |
+| **Embed, cold** | 252.8 s | 0.95 chunks/s |
+| **Embed, warm** (model already up) | 149.0 s | 1.61 chunks/s |
+| Model load, one-off | ~104 s | |
+| **Search a query** | **0.19 s** | |
+
+Extrapolated from the warm rate:
+
+| Book | Ingestion |
+|---|---|
+| 300 pages | ~6 minutes |
+| 1,247 pages | **~26 minutes** |
+
+Three things follow from that.
+
+**Ingesting a book is a coffee break, not an overnight job.** This was the open
+question, and the answer is comfortable.
+
+**Embedding is essentially the whole cost.** Extraction is now 3.5 s of that 26
+minutes. Anything further spent optimising the reading of PDFs is spent on 0.2%
+of the bill.
+
+**Retrieval is instant, and it is a one-off cost you pay once per book.** A
+query against the finished index is 0.19 s — three orders of magnitude below a
+single model turn. Against the real model, a relevant query scored 0.740, 0.736
+and 0.718, all marked `both`, so the semantic and keyword halves agreed.
+
+These were taken with about 530 MB free on a machine at 93% memory load, so the
+embedding worker was competing for RAM throughout. **They are a floor**: with a
+gigabyte free the warm rate would be better, not worse.
+
 #### Structure: outlines and scoped search
 
 Retrieval answers "which passages match this question". It cannot answer "what
@@ -2052,6 +2091,9 @@ Being straight about this, because the difference matters.
   `{"name":"calculate","arguments":"{\"expression\": \"sqrt(144) + 25**2\"}"}`
 - **A full agent turn works end-to-end** through the web UI: tool call → result
   → final answer, **637**, correct, in 285.7 s
+- **A 120-page book indexes in 149 s warm** against the real BGE model — 240
+  chunks at 1.61 chunks/s — and a query against the finished index takes
+  **0.19 s**. Extrapolates to about 26 minutes for a 1,247-page book
 - **OCR transcribes correctly** against the real GLM-OCR server: every field of
   a test note right, ~30 s per image
 - **Ministral 3B loads and emits tool calls**, and the RAM guard warned rather
