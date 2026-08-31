@@ -2242,6 +2242,25 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 - The custom C99 inference engine at `C:\path\to\mmengine` — parked until
   it is further along
 
+**Measured and decided against:**
+
+- **Borderless table detection** (`find_tables(strategy="text")`). It does
+  recover the data rows of an unruled table, but measured on the 120-page prose
+  book it took **56.9 s against 0.61 s** — about 93× — and reported a table on
+  **120 pages out of 120**, every one surviving the existing two-row filter.
+  Enabling it would give every page of a book a duplicate "table" of prose
+  chopped mid-word at the column boundaries.
+
+  Two refinements do work, if this is ever wanted: keep only rows that fill most
+  of their columns, which drops the mangled title and trailing sentence cleanly;
+  and run the expensive strategy only on pages whose text carries a `Table 3.2`
+  style caption, which matched 0 of the 120 prose pages, so the cost on prose is
+  nil.
+
+  Left alone because the degradation is mild. An unruled table already survives
+  as one line per row, which retrieves about as well; what proper detection buys
+  is explicit columns, and that helps precise lookup more than it helps search.
+
 ---
 
 *Built with llama.cpp, Python 3.11, FastAPI, React and no agent frameworks.*
