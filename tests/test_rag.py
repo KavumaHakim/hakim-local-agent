@@ -118,7 +118,7 @@ class TempCase(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def manager(self, **overrides) -> RagManager:
+    def manager(self, store_dir_name: str = "store", **overrides) -> RagManager:
         settings = dict(
             embedder=self.embedder,
             dimension=DIMENSION,
@@ -126,7 +126,7 @@ class TempCase(unittest.TestCase):
             top_k=5,
         )
         settings.update(overrides)
-        return RagManager(self.tmp / "store", **settings)
+        return RagManager(self.tmp / store_dir_name, **settings)
 
     def write(self, name: str, text: str) -> Path:
         path = self.docs / name
@@ -377,6 +377,30 @@ class VectorIndexTests(TempCase):
         self.assertEqual(hits[0][0], 0)
         self.assertAlmostEqual(hits[0][1], 1.0, places=5)
         self.assertEqual(hits[1][0], 2)
+
+    def test_specific_rows_can_be_scored_without_a_search(self):
+        """What a keyword hit needs: it arrives with a row and no cosine."""
+        index = self.index()
+        index.write(
+            [0, 1, 2],
+            np.array(
+                [[1, 0, 0, 0], [0, 1, 0, 0], [0.6, 0.8, 0, 0]], dtype=np.float32
+            ),
+        )
+        scores = index.score_rows(np.array([1, 0, 0, 0], dtype=np.float32), [2, 0])
+
+        self.assertEqual(sorted(scores), [0, 2])
+        self.assertAlmostEqual(scores[0], 1.0, places=5)
+        self.assertAlmostEqual(scores[2], 0.6, places=5)
+
+    def test_scoring_ignores_rows_that_are_not_there(self):
+        index = self.index()
+        index.write([0], np.array([[1, 0, 0, 0]], dtype=np.float32))
+        scores = index.score_rows(np.array([1, 0, 0, 0], dtype=np.float32), [0, 99])
+        self.assertEqual(list(scores), [0])
+
+    def test_scoring_nothing_needs_no_index(self):
+        self.assertEqual(self.index().score_rows(np.zeros(4, np.float32), []), {})
 
     def test_capacity_counts_rows(self):
         index = self.index()
@@ -882,6 +906,156 @@ class ManagerTests(TempCase):
 
 
 # --- the agent tool -------------------------------------------------------
+
+
+class HybridSearchTests(TempCase):
+    """Keyword matching beside the embeddings.
+
+    The failure this exists for is specific: a term that has to *appear* -
+    "E2", a formula, a surname - is what an embedding model is worst at, and
+    bge-small's noise floor leaves little room to tell a weak match from none.
+    The fake embedder here has the same weakness for the same reason, so the
+    case is reproducible without the real model.
+    """
+
+    def library(self) -> None:
+        self.write(
+            "chapter10.txt",
+            "Section 10.7 Dehydration. When a secondary alcohol is heated with "
+            "acid the major product follows the Zaitsev rule, giving the more "
+            "substituted alkene as the principal product.",
+        )
+        self.write(
+            "chapter04.txt",
+            "Removing a water molecule from an alcohol produces a double bond "
+            "between two carbon atoms, the general pattern of an elimination.",
+        )
+        self.write(
+            "biology.txt",
+            "Enzymes are biological catalysts that lower the activation energy "
+            "of a reaction without being consumed by it.",
+        )
+
+    def test_an_exact_term_survives_a_similarity_score_below_the_threshold(self):
+        """The whole point. Vector-only finds nothing; the words are right there."""
+        self.library()
+
+        without = self.manager(min_score=0.3, hybrid=False)
+        without.index_path(self.docs)
+        self.assertEqual(without.search("Zaitsev rule")["count"], 0)
+
+        with_keywords = self.manager(
+            store_dir_name="hybrid", min_score=0.3, hybrid=True
+        )
+        with_keywords.index_path(self.docs)
+        found = with_keywords.search("Zaitsev rule")
+        self.assertEqual(found["count"], 1)
+        self.assertEqual(found["results"][0]["document"], "chapter10.txt")
+
+    def test_a_result_says_how_it_was_found(self):
+        """A weak score means something different for each, so it is reported."""
+        self.library()
+        manager = self.manager(min_score=0.3)
+        manager.index_path(self.docs)
+
+        hit = manager.search("Zaitsev")["results"][0]
+        self.assertIn(hit["match"], ("keyword", "both"))
+        # The score stays cosine similarity, not a fused number: one column,
+        # one meaning.
+        self.assertLess(hit["score"], 0.3)
+
+    def test_the_threshold_still_gates_a_purely_semantic_guess(self):
+        """Only evidence is exempt. A vague near-miss is still filtered."""
+        self.library()
+        manager = self.manager(min_score=0.9)
+        manager.index_path(self.docs)
+        self.assertEqual(manager.search("photosynthesis chloroplast")["count"], 0)
+
+    def test_turning_it_off_restores_semantic_only_search(self):
+        self.library()
+        manager = self.manager(min_score=0.3, hybrid=False)
+        manager.index_path(self.docs)
+        self.assertEqual(manager.search("Zaitsev rule")["count"], 0)
+
+    def test_deleting_a_document_takes_it_out_of_keyword_search(self):
+        """The FTS index is kept in step by triggers; assert it, because a
+        stale one would return chunks that no longer exist."""
+        self.library()
+        manager = self.manager(min_score=0.3)
+        manager.index_path(self.docs)
+        self.assertEqual(manager.search("Zaitsev")["count"], 1)
+
+        manager.remove("chapter10.txt")
+        self.assertEqual(manager.search("Zaitsev")["count"], 0)
+
+    def test_reindexing_does_not_duplicate_a_keyword_hit(self):
+        self.library()
+        manager = self.manager(min_score=0.3)
+        manager.index_path(self.docs)
+        manager.index_path(self.docs, force=True)
+
+        found = manager.search("Zaitsev")
+        self.assertEqual(found["count"], 1)
+
+    def test_an_index_built_before_keyword_search_is_backfilled(self):
+        """The migration that matters: the chunk text is already in SQLite, so
+        adding keyword search must cost a rebuild of the FTS index and not a
+        single re-embedded chunk."""
+        self.library()
+        manager = self.manager(min_score=0.3)
+        manager.index_path(self.docs)
+        embedded = self.embedder.passages_encoded
+        self.assertGreater(embedded, 0)
+
+        # Wind the store back to what it looked like before this feature.
+        from rag.manager import METADATA_FILE
+
+        connection = sqlite3.connect(self.tmp / "store" / METADATA_FILE)
+        connection.executescript(
+            "DROP TRIGGER IF EXISTS chunks_search_insert;"
+            "DROP TRIGGER IF EXISTS chunks_search_delete;"
+            "DROP TRIGGER IF EXISTS chunks_search_update;"
+            "DROP TABLE IF EXISTS chunk_search;"
+            "DELETE FROM index_meta WHERE key = 'keyword_index_built';"
+        )
+        connection.commit()
+        connection.close()
+
+        reopened = self.manager(min_score=0.3)
+        self.assertEqual(reopened.search("Zaitsev rule")["count"], 1)
+        # Nothing was embedded to get there.
+        self.assertEqual(self.embedder.passages_encoded, embedded)
+
+    def test_a_query_of_only_operators_finds_nothing_rather_than_failing(self):
+        """FTS5 has its own query language and a person's question is not
+        written in it, so every term is quoted before it gets there."""
+        self.library()
+        manager = self.manager(min_score=0.3)
+        manager.index_path(self.docs)
+
+        for query in ('NEAR AND OR', '"', 'alcohol - "acid', 'a * b'):
+            result = manager.search(query)
+            self.assertTrue(result["success"], query)
+
+    def test_the_search_terms_are_quoted_not_interpreted(self):
+        from rag.metadata import _fts_query
+
+        self.assertEqual(_fts_query("Zaitsev rule E2"), '"Zaitsev" OR "rule" OR "E2"')
+        self.assertEqual(_fts_query("NEAR AND"), '"NEAR" OR "AND"')
+        self.assertEqual(_fts_query("!!! ?"), "")
+
+    def test_keyword_hits_are_scored_the_same_way_semantic_ones_are(self):
+        """A BM25 rank in a column documented as cosine similarity would put
+        two different measurements in one field."""
+        self.library()
+        manager = self.manager(min_score=0.3)
+        manager.index_path(self.docs)
+
+        hit = manager.search("Zaitsev")["results"][0]
+        rows = manager.store.search_text("Zaitsev", 5)
+        vector = manager.embedder.encode_query("Zaitsev")
+        expected = manager.index.score_rows(vector, rows)[rows[0]]
+        self.assertAlmostEqual(hit["score"], round(expected, 4), places=4)
 
 
 class DocumentToolTests(TempCase):

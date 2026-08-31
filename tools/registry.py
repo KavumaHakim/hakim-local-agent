@@ -197,6 +197,7 @@ def build_default_registry(config: Config) -> tuple[ToolRegistry, list[DisabledT
             overlap_tokens=config.rag_overlap_tokens,
             top_k=config.rag_top_k,
             min_score=config.rag_min_score,
+            hybrid=config.rag_hybrid,
             max_file_bytes=config.rag_max_file_bytes,
             context_budget=config.rag_context_chars,
             threads=config.rag_threads,

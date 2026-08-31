@@ -413,7 +413,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               863 tests, no server required
+└── tests/               876 tests, no server required
 ```
 
 ---
@@ -1255,7 +1255,7 @@ The old keyed `memories(key, value)` table is imported on first open and then
 **renamed** to `memories_legacy`, not dropped. An upgrade should never be the
 thing that loses your data.
 
-### documents — semantic search over your own files
+### documents — hybrid search over your own files
 
 Off by default. It also has dependencies the rest of the project does not,
 kept in their own file so `pip install -r requirements.txt` never drags torch
@@ -1293,8 +1293,65 @@ network once the embedding model is on disk.
 | [`rag/embeddings.py`](rag/embeddings.py) | owns the worker process; starts it late, stops it early |
 | [`rag/worker.py`](rag/worker.py) | the model itself, in its own process |
 | [`rag/index.py`](rag/index.py) | the vector file, searched with numpy |
-| [`rag/metadata.py`](rag/metadata.py) | chunk text, documents, the free list (SQLite) |
+| [`rag/metadata.py`](rag/metadata.py) | chunk text, documents, the free list, the keyword index (SQLite) |
 | [`rag/manager.py`](rag/manager.py) | decides the order everything happens in |
+
+#### Two ways of finding a passage, fused
+
+Embeddings are very good at "how does removing water from an alcohol make an
+alkene" and very bad at **`E2`**. A term that has to *appear* — a code, a
+formula, a surname, a section number — is exactly what a 384-dimension
+sentence embedding has no reason to treat as special, and bge-small's noise
+floor makes it worse: unrelated English sentences already score 0.4–0.55 with
+this model, so there is little room left to tell a weak match from no match.
+
+So search runs both halves and fuses them:
+
+```
+              query
+                │
+      ┌─────────┴─────────┐
+      ▼                   ▼
+ vector search       FTS5 + BM25
+ (cosine, numpy)     (the words themselves)
+      │                   │
+      └─────────┬─────────┘
+                ▼
+    reciprocal rank fusion
+                ▼
+            passages
+```
+
+**The keyword half costs nothing.** The chunk text is already in SQLite, and
+FTS5 is already in the standard library — no new model, no new process, no new
+dependency, no RAM. It is an external-content FTS5 table (`content='chunks'`),
+so the text is stored once and kept in step by triggers.
+
+**Adding it to an existing index costs no re-embedding.** The chunk text is
+already there, so the migration is one FTS5 `'rebuild'` and no model at all —
+which is why this did *not* bump `SCHEMA_VERSION`, since that would have meant
+re-embedding every document to gain something free.
+
+**Fusion is by rank, not by score.** Cosine similarity and BM25 share no scale,
+and normalising them into one number would make the weighting depend on the
+spread of whatever a particular query happened to return. Reciprocal rank
+fusion adds `1/(60 + position)` from each ranking, so a passage near the top of
+either beats one that is middling in both.
+
+**`score` stays cosine similarity.** A keyword hit arrives with a row and no
+score, so its vector is read back and measured the same way — one column, one
+meaning. Each result also carries `match`, one of `semantic`, `keyword` or
+`both`, because a 0.42 means different things for each: a weak guess, or a
+passage that literally contains what was asked for.
+
+**The threshold gates guesses, not evidence.** `RAG_MIN_SCORE` still filters
+purely semantic hits. A chunk that contains the search terms is admitted
+whatever its similarity — which is the entire point, since the case this fixes
+is a real answer scoring *below* the floor.
+
+Set `RAG_HYBRID=0` to measure what it is buying on your own documents. If
+SQLite was built without FTS5, search quietly falls back to vectors alone and
+says so when it finds nothing.
 
 #### The model
 
@@ -1786,7 +1843,8 @@ a connection failure.
 | `RAG_CHUNK_TOKENS` | `500` | Chunk size; capped at the model's 512 |
 | `RAG_CHUNK_OVERLAP` | `75` | Clamped to half the chunk |
 | `RAG_TOP_K` | `5` | Passages per search |
-| `RAG_MIN_SCORE` | `0.3` | Cosine similarity floor |
+| `RAG_MIN_SCORE` | `0.3` | Cosine similarity floor, for semantic hits only |
+| `RAG_HYBRID` | `1` | Keyword matching beside the embeddings, fused by rank |
 | `RAG_CONTEXT_CHARS` | `6000` | Retrieved text handed to the model per call |
 | `RAG_THREADS` | `2` | Shared with llama-server |
 | `RAG_BATCH_SIZE` | `8` | Bigger costs RAM, not speed |
@@ -1804,7 +1862,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**863 tests, no model server needed, and none of them touch the network.**
+**876 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -1843,6 +1901,7 @@ listening on a port — which has produced false greens here before.
 | `test_python_scripts.py` | Script files in both modes, and the workspace guard |
 | `test_git_tool.py` | Real throwaway repositories; write gating |
 | `test_memory.py` | Store, recall, forget |
+| `test_rag.py` | Extraction, chunking, the vector file, hybrid search and its migration |
 
 The manager tests stub only `_spawn` and `_healthy` — the OS boundary. Everything
 above it is the real implementation.
@@ -1951,7 +2010,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 863 tests
+- 876 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

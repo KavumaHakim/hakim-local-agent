@@ -95,7 +95,8 @@ class DocumentSearchTools:
                 name="search_documents",
                 category="documents",
                 description=(
-                    "Search the user's own indexed documents by meaning. "
+                    "Search the user's own indexed documents, by meaning and "
+                    "by exact wording at the same time. "
                     "Use when the request refers to their material - 'my "
                     "notes', 'the report', 'according to the handbook'. "
                     "Do NOT use for general knowledge, arithmetic, or code you "
@@ -108,7 +109,10 @@ class DocumentSearchTools:
                             "type": "string",
                             "description": (
                                 "What to look for. Full sentences retrieve "
-                                "better than keywords."
+                                "better than keywords - but include any exact "
+                                "term, name, code or formula that has to "
+                                "appear, because those are matched literally "
+                                "as well as by meaning."
                             ),
                         },
                         "top_k": {
@@ -144,6 +148,7 @@ def build_document_tools(
     overlap_tokens: int,
     top_k: int,
     min_score: float,
+    hybrid: bool = True,
     max_file_bytes: int,
     context_budget: int = DEFAULT_CONTEXT_BUDGET,
     threads: int = 2,
@@ -175,5 +180,6 @@ def build_document_tools(
         top_k=top_k,
         min_score=min_score,
         max_file_bytes=max_file_bytes,
+        hybrid=hybrid,
     )
     return DocumentSearchTools(manager, context_budget=context_budget).tools()

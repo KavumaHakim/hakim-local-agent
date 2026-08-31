@@ -85,6 +85,11 @@ class SearchHit:
     path: str
     chunk_id: str
     page: int | None
+    # How this chunk was found: "semantic", "keyword", or "both". Reported
+    # because it changes what the score means. A semantic hit at 0.42 is a
+    # weak guess; a keyword hit at 0.42 contains the words that were asked
+    # for, and the low similarity says only that BGE was unimpressed.
+    match: str = "semantic"
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -92,6 +97,7 @@ class SearchHit:
             "path": self.path,
             "chunk_id": self.chunk_id,
             "score": round(self.score, 4),
+            "match": self.match,
             "text": self.text,
         }
         # Omitted rather than null for formats without pages: an explicit
@@ -122,6 +128,7 @@ class RagManager:
         top_k: int = 5,
         min_score: float = 0.3,
         max_file_bytes: int = 20_000_000,
+        hybrid: bool = True,
         ocr=None,
     ) -> None:
         self.store_dir = Path(store_dir).expanduser()
@@ -131,6 +138,11 @@ class RagManager:
         self.top_k = max(1, int(top_k))
         self.min_score = float(min_score)
         self.max_file_bytes = int(max_file_bytes)
+        # Keyword matching alongside the embeddings. On by default because it
+        # costs no model time and no memory - the text is already in SQLite -
+        # and off is here for measuring what it is worth rather than for
+        # normal use.
+        self.hybrid = bool(hybrid)
 
         try:
             self.store_dir.mkdir(parents=True, exist_ok=True)
@@ -365,22 +377,70 @@ class RagManager:
             # but after deleting a large collection it is not, and top_k is
             # what sizes the running result arrays.
             margin = min(len(free), 100)
-            hits = self.index.search(vector, top_k=limit + margin, skip=free)
+            # Both halves look deeper than `limit`, because the point of
+            # fusing is that a chunk ranked eighth by one and second by the
+            # other can be the best answer. Truncating each to `limit` first
+            # would throw away exactly those.
+            depth = min(limit * CANDIDATE_DEPTH + margin, 100)
+            hits = self.index.search(vector, top_k=depth, skip=free)
         except EmbeddingError as exc:
             raise RagError(str(exc)) from None
         except VectorIndexError as exc:
             raise RagError(str(exc)) from None
 
-        records = self.store.chunks_by_rows([row for row, _ in hits])
+        semantic = [row for row, _ in hits]
+        scores = {row: score for row, score in hits}
+
+        keyword: list[int] = []
+        if self.hybrid:
+            keyword = [
+                row
+                for row in self.store.search_text(query, depth)
+                if row not in free
+            ]
+            # The keyword half found these by their words and has no cosine
+            # for them, so they are measured the same way a semantic hit was.
+            # One column, one meaning.
+            missing = [row for row in keyword if row not in scores]
+            if missing:
+                try:
+                    scores.update(self.index.score_rows(vector, missing))
+                except VectorIndexError as exc:
+                    raise RagError(str(exc)) from None
+
+        fused = _fuse(semantic, keyword) if keyword else None
+        if fused is not None:
+            order = sorted(
+                fused, key=lambda row: (-fused[row], -scores.get(row, 0.0))
+            )
+        else:
+            order = semantic
+
+        in_keyword = set(keyword)
+        in_semantic = set(semantic)
+        records = self.store.chunks_by_rows(order)
 
         results: list[SearchHit] = []
-        for row, score in hits:
+        for row in order:
             record = records.get(row)
             if record is None:
                 continue
-            if score < threshold:
+            score = scores.get(row, 0.0)
+            matched = row in in_keyword
+            # The threshold gates *guesses*, not evidence. A chunk that
+            # literally contains the words asked for has earned its place
+            # whatever BGE thinks of it - and with this model's noise floor
+            # sitting at 0.4-0.55 for unrelated English, a similarity gate is
+            # the wrong instrument for judging an exact term match.
+            if not matched and score < threshold:
                 continue
-            results.append(_hit(record, score))
+            if matched and row in in_semantic:
+                how = "both"
+            elif matched:
+                how = "keyword"
+            else:
+                how = "semantic"
+            results.append(_hit(record, score, how))
             if len(results) >= limit:
                 break
 
@@ -392,10 +452,17 @@ class RagManager:
         }
         if not results:
             best = max((score for _, score in hits), default=0.0)
+            keyword_note = (
+                ""
+                if self.store.keyword_search
+                else " Keyword search is unavailable in this build of SQLite, "
+                "so only semantic matching ran."
+            )
             payload["note"] = (
                 f"No chunk scored above the {threshold:g} similarity "
                 f"threshold (best was {best:.2f}) across {documents} "
-                f"document(s). The answer may not be in the indexed files."
+                f"document(s), and no chunk contained the search terms. "
+                f"The answer may not be in the indexed files.{keyword_note}"
             )
         return payload
 
@@ -687,7 +754,7 @@ class RagManager:
         raise RagError(f"{text!r} is not in the index.")
 
 
-def _hit(record: ChunkRecord, score: float) -> SearchHit:
+def _hit(record: ChunkRecord, score: float, match: str = "semantic") -> SearchHit:
     return SearchHit(
         text=record.text,
         score=score,
@@ -695,4 +762,35 @@ def _hit(record: ChunkRecord, score: float) -> SearchHit:
         path=record.path,
         chunk_id=record.chunk_id,
         page=record.page,
+        match=match,
     )
+
+
+# Reciprocal rank fusion. Each ranking contributes 1/(RRF_K + position), so a
+# chunk near the top of either list beats one that is middling in both, and a
+# chunk near the top of both wins outright.
+#
+# Ranks rather than scores, because cosine similarity and BM25 share no scale.
+# Normalising them into one number is the obvious alternative and it is the
+# wrong one: it would make the weighting depend on the spread of whatever this
+# particular query happened to return.
+#
+# 60 is the constant from the paper the method comes from. It is large enough
+# that the difference between rank 1 and rank 2 does not swamp the second
+# ranking's opinion entirely.
+RRF_K = 60
+
+# How much deeper than `top_k` each half looks before fusing. Four is enough
+# that a chunk ranked well by one method and moderately by the other can still
+# win, without making the keyword query or the record fetch meaningfully
+# larger.
+CANDIDATE_DEPTH = 4
+
+
+def _fuse(*rankings: list[int]) -> dict[int, float]:
+    """Reciprocal-rank-fusion scores for rows appearing in any ranking."""
+    fused: dict[int, float] = {}
+    for ranking in rankings:
+        for position, row in enumerate(ranking):
+            fused[row] = fused.get(row, 0.0) + 1.0 / (RRF_K + position + 1)
+    return fused

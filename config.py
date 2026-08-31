@@ -241,6 +241,18 @@ class Config:
     # "nothing here matches" rather than ranking.
     rag_top_k: int = 5
     rag_min_score: float = 0.3
+    # Keyword matching alongside the embeddings, fused by rank.
+    #
+    # On, because it is the cheapest recall this project has: the chunk text is
+    # already in SQLite, FTS5 is already in the standard library, and it costs
+    # no model time and no RAM. It exists because embeddings are weakest at
+    # exactly what a reference document is full of - a term that has to appear
+    # rather than be alluded to, like "E2", a formula, or a surname - and
+    # bge-small's noise floor (see memory_min_similarity) leaves little room to
+    # tell a weak match from none.
+    #
+    # Set RAG_HYBRID=0 to measure what it is actually buying on your documents.
+    rag_hybrid: bool = True
     # Total characters of retrieved text returned in one tool call.
     rag_context_chars: int = 6000
     # Two cores, shared with llama-server. Taking both makes the model this is
@@ -436,6 +448,7 @@ class Config:
             ),
             rag_top_k=_env_int("RAG_TOP_K", defaults.rag_top_k),
             rag_min_score=_env_float("RAG_MIN_SCORE", defaults.rag_min_score),
+            rag_hybrid=_env_bool("RAG_HYBRID", defaults.rag_hybrid),
             rag_context_chars=_env_int(
                 "RAG_CONTEXT_CHARS", defaults.rag_context_chars
             ),

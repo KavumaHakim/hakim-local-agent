@@ -256,6 +256,43 @@ class VectorIndex:
             if np.isfinite(best_scores[position])
         ]
 
+    def score_rows(
+        self, query: np.ndarray, rows: list[int] | set[int]
+    ) -> dict[int, float]:
+        """Cosine similarity for specific rows, rather than the closest ones.
+
+        What keyword search needs: it finds chunks by their words and has no
+        score on any scale the rest of the system uses, so the rows come back
+        here to be measured the same way a semantic hit was. Reading a handful
+        of rows out of a memmap is cheaper than a scan, and the alternative -
+        reporting a BM25 score in a field documented as cosine similarity -
+        would put two different measurements in one column.
+        """
+        wanted = sorted({int(row) for row in rows})
+        if not wanted:
+            return {}
+
+        vector = np.asarray(query, dtype=np.float32).reshape(-1)
+        if vector.shape[0] != self.dimension:
+            raise VectorIndexError(
+                f"Query has {vector.shape[0]} dimensions, index has "
+                f"{self.dimension}. The index was probably built with a "
+                f"different embedding model - rebuild it."
+            )
+
+        capacity = self.capacity()
+        wanted = [row for row in wanted if 0 <= row < capacity]
+        if not wanted:
+            return {}
+
+        data = self._open()
+        try:
+            block = np.asarray(data[wanted], dtype=np.float32)
+            scores = block @ vector
+        finally:
+            del data
+        return {row: float(score) for row, score in zip(wanted, scores)}
+
     def _open(self) -> np.memmap:
         """Map the vector file for reading."""
         rows = self.capacity()

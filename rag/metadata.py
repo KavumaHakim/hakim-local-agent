@@ -18,6 +18,7 @@ is an offset into the flat file that `rag.index` owns.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -77,6 +78,46 @@ CREATE TABLE IF NOT EXISTS index_meta (
 );
 """
 
+# The keyword half of search, kept apart because it is optional: FTS5 is
+# compiled into every SQLite Python ships on the platforms this runs on, but
+# "every" is not "guaranteed", and a missing module must degrade to
+# vector-only search rather than stopping the store from opening.
+#
+# `content='chunks'` makes it an external-content index: FTS5 stores the
+# postings and reads the text back from `chunks`, so the book is on disk once
+# rather than twice. The triggers are what keep the two in step, and they have
+# to exist because the writer inserts into `chunks` directly.
+SEARCH_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS chunk_search USING fts5(
+    text,
+    content='chunks',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS chunks_search_insert AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunk_search(rowid, text) VALUES (new.id, new.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_search_delete AFTER DELETE ON chunks BEGIN
+    INSERT INTO chunk_search(chunk_search, rowid, text)
+        VALUES ('delete', old.id, old.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_search_update AFTER UPDATE ON chunks BEGIN
+    INSERT INTO chunk_search(chunk_search, rowid, text)
+        VALUES ('delete', old.id, old.text);
+    INSERT INTO chunk_search(rowid, text) VALUES (new.id, new.text);
+END;
+"""
+
+# Set once the FTS index has been filled from chunks that were indexed before
+# it existed. Backfilling is a one-statement rebuild and needs no model, which
+# is the whole reason this did not have to bump SCHEMA_VERSION: adding keyword
+# search to an existing index costs nothing, where re-embedding it would cost
+# hours.
+SEARCH_BUILT_KEY = "keyword_index_built"
+
 
 @dataclass(frozen=True)
 class Document:
@@ -134,6 +175,52 @@ class MetadataStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+        # False when SQLite was built without FTS5. Searching then falls back
+        # to vectors alone, which is what it did before this existed.
+        self.keyword_search = self._prepare_keyword_index()
+
+    def _prepare_keyword_index(self) -> bool:
+        """Create the FTS index if it is missing, and fill it if it is empty.
+
+        The fill is for indexes built before keyword search existed: their
+        chunk text is already in SQLite, so the whole migration is one FTS5
+        'rebuild' and no embedding model at all.
+        """
+        try:
+            with self._connect() as connection:
+                connection.executescript(SEARCH_SCHEMA)
+        except sqlite3.OperationalError:
+            # No FTS5 in this build of SQLite. Not an error worth stopping
+            # for - it costs recall, not correctness.
+            return False
+
+        try:
+            with self._connect() as connection:
+                built = connection.execute(
+                    "SELECT value FROM index_meta WHERE key = ?",
+                    (SEARCH_BUILT_KEY,),
+                ).fetchone()
+                if built is None:
+                    connection.execute(
+                        "INSERT INTO chunk_search(chunk_search) VALUES ('rebuild')"
+                    )
+                    connection.execute(
+                        "INSERT INTO index_meta (key, value) VALUES (?, ?)"
+                        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (SEARCH_BUILT_KEY, "1"),
+                    )
+        except sqlite3.OperationalError:
+            return False
+        return True
+
+    def rebuild_keyword_index(self) -> None:
+        """Re-derive the FTS index from the chunk text. Cheap, and no model."""
+        if not self.keyword_search:
+            return
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO chunk_search(chunk_search) VALUES ('rebuild')"
+            )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -377,6 +464,42 @@ class MetadataStore:
 
     # --- reading ---
 
+    def search_text(self, query: str, limit: int) -> list[int]:
+        """Vector rows whose chunk text best matches `query`, best first.
+
+        BM25, which is what FTS5 ranks with, and it is good at exactly what
+        embeddings are worst at: a term that has to appear rather than be
+        alluded to. "E2", a chapter number, a formula, a surname. The
+        embedding model has no idea those are special; an inverted index does
+        not need to know.
+
+        Rows rather than scores, because the caller fuses this with the vector
+        ranking by position. BM25 scores and cosine similarities are not on
+        any common scale and pretending otherwise - by normalising them into
+        one number - would invent a precision neither has.
+        """
+        if not self.keyword_search:
+            return []
+        expression = _fts_query(query)
+        if not expression:
+            return []
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT c.vector_row AS vector_row"
+                    " FROM chunk_search s"
+                    " JOIN chunks c ON c.id = s.rowid"
+                    " WHERE chunk_search MATCH ?"
+                    " ORDER BY bm25(chunk_search) LIMIT ?",
+                    (expression, int(limit)),
+                ).fetchall()
+        except sqlite3.OperationalError:
+            # A query FTS5 could not parse. The terms are quoted before they
+            # get here, so this should not happen - and if it does, losing the
+            # keyword half is better than losing the search.
+            return []
+        return [int(row["vector_row"]) for row in rows]
+
     def chunks_by_rows(self, rows: list[int]) -> dict[int, ChunkRecord]:
         """Fetch the chunks behind a set of search hits, keyed by vector row.
 
@@ -423,6 +546,32 @@ class MetadataStore:
             connection.execute("DELETE FROM chunks")
             connection.execute("DELETE FROM documents")
             connection.execute("DELETE FROM free_rows")
+
+
+# Anything that is not a letter, digit or underscore separates terms. FTS5
+# has its own query language - AND, OR, NOT, NEAR, prefix *, column filters -
+# and a question typed by a person is not written in it.
+_TERM = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _fts_query(query: str) -> str:
+    """Turn a human question into an FTS5 expression that cannot misfire.
+
+    Every term is extracted and quoted, then joined with OR. Quoting is what
+    makes this safe: a query containing NEAR, a bare hyphen or an unbalanced
+    quote would otherwise be a syntax error at best and a different search at
+    worst, and the person typing it meant none of that.
+
+    OR rather than AND because BM25 already rewards a chunk that matches more
+    of the terms. Requiring all of them would make a five-word question find
+    nothing, which is the failure this whole feature exists to fix.
+    """
+    terms = [term for term in _TERM.findall(query) if len(term) > 1]
+    if not terms:
+        return ""
+    # A long question contributes nothing after the first few dozen terms and
+    # makes the query slower to plan.
+    return " OR ".join(f'"{term}"' for term in terms[:32])
 
 
 def _pack_pages(pages: tuple[int, ...] | list[int]) -> str:
