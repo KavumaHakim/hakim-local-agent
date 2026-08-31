@@ -413,7 +413,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               892 tests, no server required
+└── tests/               895 tests, no server required
 ```
 
 ---
@@ -1353,6 +1353,31 @@ Set `RAG_HYBRID=0` to measure what it is buying on your own documents. If
 SQLite was built without FTS5, search quietly falls back to vectors alone and
 says so when it finds nothing.
 
+#### Extraction speed, and the one call that dominated it
+
+Measured on a generated 120-page prose textbook with a real table of contents:
+
+| Stage | Time | Rate |
+|---|---|---|
+| Extract, **before** | 16.06 s | 7.5 pages/s |
+| Extract, **after** | 0.61 s | 195 pages/s |
+| Chunk | 0.02 s | 5,200 pages/s |
+
+Table detection was **98% of extraction time and found nothing**. PyMuPDF's
+`find_tables()` defaults to `vertical_strategy="lines"` and
+`horizontal_strategy="lines"`, so it only ever detects tables delimited by
+*drawn lines* — and it was being run on all 120 pages of prose to establish
+that, at about 130 ms each.
+
+So a page is now checked for vector drawings first, and detection runs only if
+it has any. That is a filter rather than a heuristic: it skips only pages where
+the detector's own strategy guarantees no result. A ruled table is still found;
+a borderless one was never found by this configuration and still is not, and
+its text is extracted and indexed as text either way.
+
+For a 1,247-page book that is the difference between about **2.8 minutes and
+3.5 seconds** of extraction.
+
 #### Structure: outlines and scoped search
 
 Retrieval answers "which passages match this question". It cannot answer "what
@@ -1908,7 +1933,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**892 tests, no model server needed, and none of them touch the network.**
+**895 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2056,7 +2081,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 892 tests
+- 895 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

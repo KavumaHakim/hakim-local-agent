@@ -126,3 +126,39 @@ def add_outline(path: str | Path, entries: list[tuple[int, str, int]]) -> Path:
     finally:
         document.close()
     return target
+
+
+def add_ruled_table(path: str | Path, page_number: int = 1) -> Path:
+    """Draw a lined table on one page of an existing PDF.
+
+    Ruled rather than whitespace-aligned on purpose: PyMuPDF's table finder
+    defaults to `strategy="lines"`, so a drawn grid is the only kind it ever
+    detects, and it is therefore the only kind worth testing against.
+    """
+    import fitz
+
+    target = Path(path)
+    document = fitz.open(target)
+    try:
+        page = document[page_number - 1]
+        top, left, rows, columns, height, width = 100, 72, 4, 3, 20, 120
+        for row in range(rows + 1):
+            page.draw_line(
+                (left, top + row * height),
+                (left + columns * width, top + row * height),
+            )
+        for column in range(columns + 1):
+            page.draw_line(
+                (left + column * width, top),
+                (left + column * width, top + rows * height),
+            )
+        for row in range(rows):
+            for column in range(columns):
+                page.insert_text(
+                    (left + column * width + 5, top + row * height + 14),
+                    f"r{row}c{column}",
+                )
+        document.save(str(target), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    finally:
+        document.close()
+    return target

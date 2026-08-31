@@ -29,10 +29,11 @@ from config import Config
 from rag.chunker import CHARS_PER_TOKEN, chunk_document, token_budget
 from rag.elements import DocumentElement, ExtractedDocument
 from rag.extract import ExtractionError, clean_text, extract, is_supported
+from rag.extract.pdf import extract_pdf
 from rag.index import VectorIndex, VectorIndexError
 from rag.manager import RagError, RagManager
 from rag.metadata import MetadataStore
-from tests.pdf_fixture import add_outline, write_pdf
+from tests.pdf_fixture import add_outline, add_ruled_table, write_pdf
 from tools.base import ToolRegistry
 from tools.document_search import DocumentSearchError, DocumentSearchTools
 from tools.registry import build_default_registry
@@ -217,6 +218,52 @@ class ExtractionTests(TempCase):
         self.assertTrue(is_supported("a.pdf"))
         self.assertTrue(is_supported("a.PY"))
         self.assertFalse(is_supported("a.exe"))
+
+
+class TableDetectionTests(TempCase):
+    """Table finding is the most expensive call in extraction, and on a book
+    it is nearly all of it."""
+
+    def test_a_ruled_table_is_still_extracted(self):
+        path = self.docs / "report.pdf"
+        write_pdf(path, [["Introduction text"], ["Table 3.1 Boiling points"]])
+        add_ruled_table(path, page_number=2)
+
+        document = extract_pdf(path)
+        self.assertIn("table", [element.type for element in document.elements])
+
+    def test_a_page_with_no_drawings_cannot_hold_a_line_ruled_table(self):
+        """The filter is exact, not a guess: find_tables defaults to
+        strategy='lines', so no lines means no possible result."""
+        import fitz
+
+        from rag.extract.pdf import _may_hold_table
+
+        path = self.docs / "prose.pdf"
+        write_pdf(path, [["Nothing but prose on this page."]])
+        add_ruled_table(path, page_number=1)
+
+        document = fitz.open(path)
+        try:
+            self.assertTrue(_may_hold_table(document[0]))
+        finally:
+            document.close()
+
+        plain = self.docs / "plain.pdf"
+        write_pdf(plain, [["Nothing but prose on this page."]])
+        document = fitz.open(plain)
+        try:
+            self.assertFalse(_may_hold_table(document[0]))
+        finally:
+            document.close()
+
+    def test_prose_pages_produce_no_table_elements(self):
+        path = self.docs / "book.pdf"
+        write_pdf(path, [["Alkenes contain a double bond."], ["More prose here."]])
+        document = extract_pdf(path)
+        self.assertEqual(
+            [element.type for element in document.elements], ["text", "text"]
+        )
 
 
 class CleaningTests(unittest.TestCase):
