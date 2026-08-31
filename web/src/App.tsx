@@ -15,6 +15,7 @@ import { Pane } from './components/Pane'
 import { Rail, type PaneId } from './components/Rail'
 import { RemoteConsent } from './components/RemoteConsent'
 import { TurnStatus } from './components/TurnStatus'
+import { WorkspacePicker } from './components/WorkspacePicker'
 import { CommandIcon, ExpandIcon } from './components/Icons'
 import { useChat } from './hooks/useChat'
 import {
@@ -22,6 +23,7 @@ import {
   useHotkey,
   useModels,
   useTools,
+  useWorkspace,
 } from './hooks/useResources'
 import { COMMANDS, parseCommand, type CommandId } from './lib/commands'
 import { api } from './lib/api'
@@ -42,6 +44,7 @@ export default function App() {
 
   const [pane, setPane] = useState<PaneId>('history')
   const [paneOpen, setPaneOpen] = useState(true)
+  const [pickingWorkspace, setPickingWorkspace] = useState(false)
   const [theme, setTheme] = useState<Theme>(
     () =>
       (document.documentElement.dataset.theme as Theme | undefined) ?? 'dark',
@@ -50,6 +53,40 @@ export default function App() {
   const models = useModels()
   const tools = useTools()
   const conversations = useConversations()
+  const workspace = useWorkspace()
+
+  /**
+   * Move the workspace, then re-read the tool roster.
+   *
+   * The roster carries the path too, and the tool descriptions are built
+   * against the config the registry saw — so leaving it alone would have the
+   * Tools panel quietly disagreeing with the Workspace one about where the
+   * agent is working.
+   */
+  const chooseWorkspace = useCallback(
+    async (path: string) => {
+      const moved = await workspace.choose(path)
+      if (moved) void tools.refresh()
+      return moved
+    },
+    [workspace, tools],
+  )
+
+  /**
+   * And the same in the other direction.
+   *
+   * Which tools act on the workspace is part of what the workspace panel says
+   * about the folder, so flipping a switch has to re-read it - otherwise the
+   * picker would go on claiming the agent can only read there while the write
+   * tool it just gained sat one panel away.
+   */
+  const toggleTool = useCallback(
+    async (id: string, enabled: boolean) => {
+      await tools.toggle(id, enabled)
+      void workspace.refresh()
+    },
+    [tools, workspace],
+  )
 
   const chat = useChat({
     modelKey,
@@ -126,6 +163,19 @@ export default function App() {
           setPane('tools')
           setPaneOpen(true)
           break
+        case 'workspace':
+          // With a path it moves straight there, because someone who pasted
+          // one already knows where they are going; without, it opens the
+          // picker, because nobody types a Windows path from memory.
+          if (argument) {
+            void chooseWorkspace(argument).then((moved) => {
+              if (moved) setNote(null)
+              else setPickingWorkspace(true)
+            })
+          } else {
+            setPickingWorkspace(true)
+          }
+          break
         case 'help':
           setNote(
             COMMANDS.map(
@@ -136,7 +186,7 @@ export default function App() {
           break
       }
     },
-    [models, modelKey, newConversation],
+    [models, modelKey, newConversation, chooseWorkspace],
   )
 
   const submit = useCallback(
@@ -228,7 +278,9 @@ export default function App() {
           toolPending={tools.pending}
           onSetOcrBackend={(backend) => void tools.setOcrBackend(backend)}
           toolError={tools.error}
-          onToggleTool={(id, enabled) => void tools.toggle(id, enabled)}
+          onToggleTool={(id, enabled) => void toggleTool(id, enabled)}
+          workspace={workspace.workspace}
+          onOpenWorkspacePicker={() => setPickingWorkspace(true)}
           autoRoute={autoRoute}
           onAutoRoute={setAutoRoute}
           thinking={thinking}
@@ -346,10 +398,29 @@ export default function App() {
               onOpenTools={() => selectPane('tools')}
               thinking={thinking}
               onToggleThinking={() => setThinking((value) => !value)}
+              workspace={workspace.workspace}
+              onOpenWorkspace={() => setPickingWorkspace(true)}
             />
           </div>
         </div>
       </main>
+
+      {pickingWorkspace && workspace.workspace && (
+        <WorkspacePicker
+          workspace={workspace.workspace}
+          pending={workspace.pending}
+          error={workspace.error}
+          onChoose={chooseWorkspace}
+          onReset={() => {
+            void workspace.reset().then(() => tools.refresh())
+          }}
+          onClose={() => {
+            workspace.clearError()
+            setPickingWorkspace(false)
+          }}
+          onClearError={workspace.clearError}
+        />
+      )}
 
       {chat.consent && (
         <RemoteConsent

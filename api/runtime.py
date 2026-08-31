@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from agent.loop import Agent, AgentError, IterationLimitError, ToolEvent
@@ -80,6 +82,77 @@ TOOL_FLAGS: tuple[ToolFlag, ...] = (
 )
 
 FLAGS_BY_ID = {flag.id: flag for flag in TOOL_FLAGS}
+
+# How many past workspaces the picker offers back.
+RECENT_WORKSPACES = 8
+
+
+class WorkspaceError(ValueError):
+    """A folder that cannot be the workspace, and why."""
+
+
+def _system_roots() -> list[Path]:
+    """Directories that must never become the jail.
+
+    Not a security boundary - anyone who can reach this API can already ask
+    for a shell - but a guard against the two mistakes that turn the jail into
+    no jail at all: pointing it at a drive root, or at the operating system.
+    """
+    roots: list[Path] = []
+    for name in ("SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            try:
+                roots.append(Path(value).resolve())
+            except OSError:
+                continue
+    if os.name != "nt":
+        roots.extend(
+            Path(p) for p in ("/bin", "/boot", "/dev", "/etc", "/proc", "/sys", "/usr")
+        )
+    return roots
+
+
+def resolve_workspace(raw: str | Path) -> Path:
+    """Turn a folder someone typed or clicked into a usable workspace root.
+
+    Resolved before it is checked, exactly as `WorkspaceFiles` resolves the
+    paths the model gives it: a check against an unresolved path says nothing
+    about where it actually lands.
+    """
+    text = str(raw).strip().strip('"')
+    if not text:
+        raise WorkspaceError("Give a folder.")
+
+    try:
+        path = Path(text).expanduser().resolve()
+    except OSError as exc:
+        raise WorkspaceError(f"That is not a usable path: {exc}") from None
+
+    if not path.exists():
+        raise WorkspaceError(f"There is no such folder: {path}")
+    if not path.is_dir():
+        raise WorkspaceError(f"That is a file, not a folder: {path}")
+    if path.parent == path:
+        raise WorkspaceError(
+            f"{path} is the root of a drive. A workspace there is no jail at "
+            f"all - pick the folder you actually want the agent working in."
+        )
+    for root in _system_roots():
+        if path == root or root in path.parents or path in root.parents:
+            raise WorkspaceError(
+                f"{path} holds part of the operating system. Pick a folder of "
+                f"your own instead."
+            )
+
+    # A folder that cannot be listed is not a workspace; finding that out now
+    # is better than every tool call failing later.
+    try:
+        next(path.iterdir(), None)
+    except OSError as exc:
+        raise WorkspaceError(f"That folder cannot be read: {exc}") from None
+
+    return path
 
 # How much of a tool call to keep for display.
 #
@@ -155,11 +228,18 @@ class Runtime:
         # or memory-off setup should not pay for that at startup.
         self._memory = None
         self._memory_lock = threading.Lock()
-        # Tool switches flipped from the UI, applied on top of the environment.
+        # Settings changed from the UI, applied on top of the environment.
         # Held in memory only: a restart returns to whatever the environment
         # says, so the env vars stay the durable answer to "what is on here"
         # and a switch cannot quietly become permanent.
-        self._overrides: dict[str, bool] = {}
+        #
+        # Mostly booleans - the tool switches - but not only: the OCR backend
+        # is a string and the workspace is a Path.
+        self._overrides: dict[str, Any] = {}
+        # Workspaces used in this process, most recent first, starting with
+        # the one the environment chose. In memory for the same reason the
+        # switches are: nothing here should outlive the process quietly.
+        self._recent_workspaces: list[Path] = [self.config.workspace]
 
     # --- tool switches ---
 
@@ -189,6 +269,53 @@ class Runtime:
         if backend not in ("tesseract", "model"):
             raise ValueError(f"Unknown OCR backend {backend!r}.")
         self._overrides["ocr_backend"] = backend
+
+    # --- workspace ---
+    #
+    # The workspace is the jail every file-touching tool resolves against, and
+    # until now it could only be chosen before startup with AGENT_WORKSPACE.
+    # Moving it from the UI is the same loosening the tool switches were: the
+    # jail itself is unchanged - one directory, resolved paths, no escape - but
+    # which directory it is has become a click rather than a restart.
+    #
+    # Like the switches, it lives in memory only, so the environment stays the
+    # durable answer to "what can this thing reach".
+
+    @property
+    def workspace(self) -> Path:
+        """The workspace the next turn will use."""
+        return self.effective_config().workspace
+
+    @property
+    def default_workspace(self) -> Path:
+        """The workspace the environment chose, and a restart returns to."""
+        return self.config.workspace
+
+    @property
+    def recent_workspaces(self) -> list[Path]:
+        return list(self._recent_workspaces)
+
+    def set_workspace(self, raw: str | Path) -> Path:
+        """Point the file tools at another folder for this process.
+
+        Returns the resolved path, which is rarely what was typed: `~`, a
+        relative path and a trailing separator all survive the trip.
+        """
+        path = resolve_workspace(raw)
+        self._overrides["workspace"] = path
+        self._remember(path)
+        return path
+
+    def reset_workspace(self) -> Path:
+        """Go back to what AGENT_WORKSPACE says."""
+        self._overrides.pop("workspace", None)
+        self._remember(self.config.workspace)
+        return self.config.workspace
+
+    def _remember(self, path: Path) -> None:
+        self._recent_workspaces = [path] + [
+            other for other in self._recent_workspaces if other != path
+        ][: RECENT_WORKSPACES - 1]
 
     def effective_config(self) -> Config:
         """The config with the UI's switches applied."""

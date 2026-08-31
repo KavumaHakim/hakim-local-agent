@@ -11,6 +11,7 @@
 export type CommandId =
   | 'help'
   | 'tools'
+  | 'workspace'
   | 'models'
   | 'model'
   | 'load'
@@ -54,6 +55,13 @@ export const COMMANDS: CommandSpec[] = [
     hint: 'Qwen3 reasons before answering. Much slower on CPU',
   },
   { id: 'tools', slash: '/tools', title: 'Show tools', hint: 'Enabled tools, and why the rest are not' },
+  {
+    id: 'workspace',
+    slash: '/workspace',
+    argument: '[path]',
+    title: 'Change workspace',
+    hint: 'The one folder the file tools may reach. No path opens the picker',
+  },
   { id: 'clear', slash: '/clear', title: 'Clear conversation', hint: 'Empty the transcript' },
   { id: 'help', slash: '/help', title: 'Help', hint: 'List every command' },
 ]

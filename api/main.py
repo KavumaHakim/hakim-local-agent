@@ -39,6 +39,7 @@ from api.routes import (
     models,
     rag,
     uploads,
+    workspace,
 )
 from api.runtime import Runtime
 
@@ -142,6 +143,7 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
     app.include_router(models.router, prefix="/api")
     app.include_router(meta.router, prefix="/api")
     app.include_router(uploads.router, prefix="/api")
+    app.include_router(workspace.router, prefix="/api")
     app.include_router(rag.router, prefix="/api")
     app.include_router(memory.router, prefix="/api")
 

@@ -14,6 +14,7 @@ import type {
   ModelsResponse,
   OcrBackend,
   ToolsResponse,
+  WorkspaceInfo,
 } from '../lib/types'
 
 /** A ticking count of seconds since `since`, or 0 when it is null. */
@@ -207,6 +208,14 @@ export function useTools() {
   const [pending, setPending] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  const refresh = useCallback(async () => {
+    try {
+      setData(await api.tools())
+    } catch {
+      /* the roster reappears on the next call; a banner would say nothing */
+    }
+  }, [])
+
   useEffect(() => {
     let live = true
     void api
@@ -246,7 +255,72 @@ export function useTools() {
     }
   }, [])
 
-  return { data, toggle, pending, error, setOcrBackend }
+  return { data, toggle, pending, error, setOcrBackend, refresh }
+}
+
+/**
+ * The folder the file tools may reach.
+ *
+ * Kept apart from `useTools` even though the roster carries the path too: the
+ * workspace has its own history, its own default and its own failure modes —
+ * a folder that is gone, one Windows will not list — and folding that into the
+ * tool roster would make one shape mean two things.
+ */
+export function useWorkspace() {
+  const [data, setData] = useState<WorkspaceInfo | null>(null)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    try {
+      setData(await api.workspace())
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    }
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  /** Returns whether it moved, so the picker knows to close. */
+  const choose = useCallback(async (path: string): Promise<boolean> => {
+    setPending(true)
+    setError(null)
+    try {
+      setData(await api.setWorkspace(path))
+      return true
+    } catch (failure) {
+      // The server's refusals are the useful ones — "that is a file", "that
+      // is the root of a drive" — so they are shown as they arrive.
+      setError(failure instanceof Error ? failure.message : String(failure))
+      return false
+    } finally {
+      setPending(false)
+    }
+  }, [])
+
+  const reset = useCallback(async () => {
+    setPending(true)
+    setError(null)
+    try {
+      setData(await api.resetWorkspace())
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setPending(false)
+    }
+  }, [])
+
+  return {
+    workspace: data,
+    pending,
+    error,
+    choose,
+    reset,
+    refresh,
+    clearError: useCallback(() => setError(null), []),
+  }
 }
 
 /** Fires `handler` on a key chord, e.g. ctrl/cmd+K. */

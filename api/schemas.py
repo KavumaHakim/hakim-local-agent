@@ -470,6 +470,64 @@ class MemoryProcessResult(BaseModel):
     pending: int = 0
 
 
+# --- workspace ---
+
+
+class WorkspaceRequest(BaseModel):
+    """The folder to hand the file tools."""
+
+    path: str = Field(min_length=1)
+
+
+class WorkspaceOut(BaseModel):
+    """Which folder the file tools may reach, and what that means here."""
+
+    path: str
+    # What AGENT_WORKSPACE says, which a restart returns to.
+    default: str
+    # True when nothing has been chosen here, so the environment is still in
+    # charge. The UI says so, because that is the difference between a choice
+    # that survives a restart and one that does not.
+    from_env: bool
+    # Folders chosen in this process, most recent first.
+    recent: list[str] = []
+    # True when the workspace is the project's own directory. Worth naming:
+    # it is the default, unrestricted Python refuses to run there, and it is
+    # rarely the folder someone actually wants to work in.
+    is_project: bool = False
+    # Which of the switched-on tools can write into it right now. Changing the
+    # workspace changes what those tools reach, so the answer belongs beside
+    # the path rather than three panels away.
+    writable: bool = False
+    # Tools that would act on the new folder, by label. Empty when only the
+    # read-only ones are on.
+    active_tools: list[str] = []
+
+
+class DirectoryEntryOut(BaseModel):
+    name: str
+    path: str
+
+
+class DirectoryOut(BaseModel):
+    """One level of the filesystem, for picking a folder without typing it.
+
+    A browser cannot tell a page the real path of a chosen folder - the
+    directory picker gives relative names and nothing else - so the walking is
+    done here. Sub-directory names only: this lists where you could go, never
+    what is in a file.
+    """
+
+    path: str
+    # None at a drive root, which is where walking up stops.
+    parent: str | None = None
+    entries: list[DirectoryEntryOut] = []
+    # Drives on Windows, plus home. The starting points for a walk.
+    roots: list[DirectoryEntryOut] = []
+    # Set when the folder could be listed only in part, or not at all.
+    note: str = ""
+
+
 # --- health ---
 
 

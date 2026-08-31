@@ -175,6 +175,40 @@ export interface ToolsResponse {
 
 export type OcrBackend = 'tesseract' | 'model'
 
+/** The folder the file tools may reach, and what is pointed at it. */
+export interface WorkspaceInfo {
+  path: string
+  /** What AGENT_WORKSPACE says. A restart returns here. */
+  default: string
+  /** True while nothing has been chosen in the UI. */
+  from_env: boolean
+  /** Folders chosen in this process, most recent first. */
+  recent: string[]
+  /** True when the workspace is the project's own directory. */
+  is_project: boolean
+  /** Whether any switched-on tool can change files in it. */
+  writable: boolean
+  /** Labels of the tools that would act on it. Read-only ones are not listed. */
+  active_tools: string[]
+}
+
+export interface DirectoryEntry {
+  name: string
+  path: string
+}
+
+/** One level of the filesystem, for picking a folder without typing it. */
+export interface DirectoryListing {
+  path: string
+  /** Null at a drive root, which is where walking up stops. */
+  parent: string | null
+  entries: DirectoryEntry[]
+  /** Drives and home: the places a walk can start. */
+  roots: DirectoryEntry[]
+  /** Set when the folder could be listed only in part, or not at all. */
+  note: string
+}
+
 /** An image stored in the workspace, ready to be named in a prompt. */
 export interface UploadResult {
   /** Workspace-relative, the only form ocr_image accepts. */

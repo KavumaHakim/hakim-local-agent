@@ -790,6 +790,168 @@ class UploadTests(ApiTestCase):
         self.assertEqual(stored["messages"][0]["content"], "plain question")
 
 
+class WorkspaceRouteTests(ApiTestCase):
+    """Moving the jail, which is the point: an agent that can only ever look
+    at its own source is not much use."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.elsewhere = Path(self._tmp.name) / "elsewhere"
+        self.elsewhere.mkdir()
+        (self.elsewhere / "marker.txt").write_text("found me", encoding="utf-8")
+
+    def workspace(self) -> dict[str, Any]:
+        return self.client.get("/api/workspace").json()
+
+    def move_to(self, path: Any):
+        return self.client.post("/api/workspace", json={"path": str(path)})
+
+    def test_it_starts_where_the_environment_put_it(self):
+        body = self.workspace()
+        self.assertEqual(body["path"], str(self.runtime.config.workspace))
+        self.assertEqual(body["default"], str(self.runtime.config.workspace))
+        self.assertTrue(body["from_env"])
+
+    def test_moving_it_moves_what_the_tools_actually_read(self):
+        """The roster saying so proves nothing; the tool result does."""
+        self.assertEqual(self.move_to(self.elsewhere).status_code, 200)
+
+        self.runtime.responses = [
+            tool_call_message(("list_directory", {"path": "."})),
+            {"role": "assistant", "content": "one file"},
+        ]
+        events = self.say("what is in here?")
+        self.assertIn("marker.txt", first(events, "tool")["output"])
+
+    def test_it_is_resolved_rather_than_taken_as_typed(self):
+        body = self.move_to(f"{self.elsewhere}{os.sep}.{os.sep}").json()
+        self.assertEqual(body["path"], str(self.elsewhere.resolve()))
+        self.assertFalse(body["from_env"])
+
+    def test_uploads_follow_it(self):
+        """Anywhere else and the agent could not read its own attachment."""
+        self.move_to(self.elsewhere)
+        body = self.client.post(
+            "/api/uploads",
+            files={"file": ("note.png", UploadTests.PNG, "image/png")},
+        ).json()
+        self.assertTrue((self.elsewhere / body["path"]).is_file())
+
+    def test_resetting_returns_to_the_environment(self):
+        self.move_to(self.elsewhere)
+        body = self.client.delete("/api/workspace").json()
+        self.assertEqual(body["path"], str(self.runtime.config.workspace))
+        self.assertTrue(body["from_env"])
+
+    def test_recent_folders_are_offered_back(self):
+        self.move_to(self.elsewhere)
+        recent = self.workspace()["recent"]
+        self.assertEqual(recent[0], str(self.elsewhere))
+        self.assertIn(str(self.runtime.config.workspace), recent)
+
+    def test_a_file_is_not_a_workspace(self):
+        response = self.move_to(self.elsewhere / "marker.txt")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("not a folder", response.json()["detail"])
+
+    def test_a_folder_that_is_not_there_is_refused(self):
+        response = self.move_to(self.elsewhere / "nothing-here")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no such folder", response.json()["detail"])
+
+    def test_a_drive_root_is_refused(self):
+        """A jail around the whole disk is not a jail."""
+        root = Path(self.elsewhere.anchor or "/")
+        response = self.move_to(root)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("root of a drive", response.json()["detail"])
+
+    def test_the_operating_system_is_refused(self):
+        system = os.environ.get("SystemRoot") or "/etc"
+        if not Path(system).is_dir():
+            self.skipTest("no system directory to point at")
+        response = self.move_to(system)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("operating system", response.json()["detail"])
+
+    def test_it_will_not_move_mid_turn(self):
+        self.runtime.queue.busy = lambda: True  # type: ignore[method-assign]
+        self.assertEqual(self.move_to(self.elsewhere).status_code, 409)
+        self.assertEqual(self.client.delete("/api/workspace").status_code, 409)
+
+    def test_it_reports_which_tools_would_act_on_the_folder(self):
+        self.assertEqual(self.workspace()["active_tools"], [])
+        self.assertFalse(self.workspace()["writable"])
+
+        self.client.post("/api/tools/file_writes", json={"enabled": True})
+        body = self.workspace()
+        self.assertIn("File writes", body["active_tools"])
+        self.assertTrue(body["writable"])
+
+    def test_health_reports_the_folder_in_force_not_the_startup_one(self):
+        self.move_to(self.elsewhere)
+        self.assertEqual(
+            self.client.get("/api/health").json()["workspace"], str(self.elsewhere)
+        )
+
+
+class WorkspaceBrowseTests(ApiTestCase):
+    """The picker walks the filesystem here, because a browser cannot tell a
+    page the real path of a folder someone chose."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = Path(self._tmp.name)
+        (self.root / "notes").mkdir()
+        (self.root / "notes" / "deeper").mkdir()
+        (self.root / "not-a-folder.txt").write_text("x", encoding="utf-8")
+
+    def browse(self, path: Any = "") -> dict[str, Any]:
+        response = self.client.get("/api/workspace/browse", params={"path": str(path)})
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def test_it_lists_sub_folders_and_nothing_else(self):
+        body = self.browse(self.root)
+        names = {entry["name"] for entry in body["entries"]}
+        self.assertIn("notes", names)
+        self.assertNotIn("not-a-folder.txt", names)
+
+    def test_an_entry_carries_the_absolute_path_the_api_needs(self):
+        entry = next(e for e in self.browse(self.root)["entries"] if e["name"] == "notes")
+        self.assertEqual(Path(entry["path"]), self.root / "notes")
+        # And it is directly usable, which is the whole contract with the UI.
+        self.assertEqual(
+            self.client.post("/api/workspace", json={"path": entry["path"]}).json()[
+                "path"
+            ],
+            str(self.root / "notes"),
+        )
+
+    def test_it_walks_up_and_down(self):
+        deeper = self.browse(self.root / "notes")
+        self.assertEqual(Path(deeper["parent"]), self.root)
+        self.assertEqual(
+            [entry["name"] for entry in deeper["entries"]], ["deeper"]
+        )
+
+    def test_no_path_means_the_current_workspace(self):
+        self.assertEqual(
+            Path(self.browse()["path"]), Path(self.runtime.workspace)
+        )
+
+    def test_it_offers_somewhere_to_start(self):
+        roots = self.browse(self.root)["roots"]
+        self.assertTrue(roots)
+        self.assertTrue(all(Path(entry["path"]).is_dir() for entry in roots))
+
+    def test_a_missing_folder_is_a_404(self):
+        response = self.client.get(
+            "/api/workspace/browse", params={"path": str(self.root / "nope")}
+        )
+        self.assertEqual(response.status_code, 404)
+
+
 class MetaRouteTests(ApiTestCase):
     def test_tools_lists_the_enabled_ones_and_why_the_rest_are_not(self):
         body = self.client.get("/api/tools").json()

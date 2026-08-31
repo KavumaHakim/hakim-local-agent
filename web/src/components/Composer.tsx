@@ -12,10 +12,12 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { matchCommands, type CommandSpec } from '../lib/commands'
-import type { Model, UploadResult } from '../lib/types'
+import type { Model, UploadResult, WorkspaceInfo } from '../lib/types'
+import { basename } from '../lib/paths'
 import {
   ChevronIcon,
   CloudIcon,
+  FolderIcon,
   ImageIcon,
   PaperclipIcon,
   SendIcon,
@@ -42,6 +44,8 @@ interface Props {
   onOpenTools: () => void
   thinking: boolean
   onToggleThinking: () => void
+  workspace: WorkspaceInfo | null
+  onOpenWorkspace: () => void
 }
 
 export function Composer({
@@ -61,6 +65,8 @@ export function Composer({
   onOpenTools,
   thinking,
   onToggleThinking,
+  workspace,
+  onOpenWorkspace,
 }: Props) {
   const box = useRef<HTMLTextAreaElement>(null)
   const picker = useRef<HTMLInputElement>(null)
@@ -236,6 +242,32 @@ export function Composer({
           <Pill onClick={onOpenTools} title="Tools offered to the model">
             <ToolIcon className="size-[13px] opacity-60" />
             {toolCount} tools
+            <ChevronIcon className="size-3 rotate-90 opacity-40" />
+          </Pill>
+
+          {/* The folder this turn's file tools may reach. It belongs here for
+              the same reason the model picker does: it is a property of the
+              message you are about to send, not of a settings page. */}
+          <Pill
+            onClick={onOpenWorkspace}
+            title={
+              workspace
+                ? `Working in ${workspace.path}${
+                    workspace.writable
+                      ? ' — files there can be changed'
+                      : ' — read-only'
+                  }. Click to change.`
+                : 'Choose the folder the agent may work in'
+            }
+          >
+            <FolderIcon
+              className={`size-[13px] ${
+                workspace?.writable ? 'text-warn' : 'opacity-60'
+              }`}
+            />
+            <span className="max-w-[110px] truncate">
+              {workspace ? basename(workspace.path) : 'Workspace'}
+            </span>
             <ChevronIcon className="size-3 rotate-90 opacity-40" />
           </Pill>
 

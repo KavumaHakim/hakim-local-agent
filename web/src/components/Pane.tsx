@@ -15,6 +15,7 @@ import type {
   OcrBackend,
   ToolsResponse,
   ToolSwitch,
+  WorkspaceInfo,
 } from '../lib/types'
 import type { PaneId } from './Rail'
 import {
@@ -56,6 +57,9 @@ interface Props {
   toolError: string | null
   onToggleTool: (id: string, enabled: boolean) => void
   onSetOcrBackend: (backend: OcrBackend) => void
+
+  workspace: WorkspaceInfo | null
+  onOpenWorkspacePicker: () => void
 
   autoRoute: boolean
   onAutoRoute: (value: boolean) => void
@@ -381,14 +385,55 @@ function Toggle({
   )
 }
 
-function WorkspacePane({ tools, models }: Props) {
+function WorkspacePane({ tools, models, workspace, onOpenWorkspacePicker }: Props) {
   return (
     <>
-      <div className="mb-3 flex items-start gap-1.5 text-[11.5px] text-faint">
-        <FolderIcon className="mt-px size-3 shrink-0" />
-        <span className="min-w-0 font-mono break-all">
-          {tools?.workspace ?? '—'}
-        </span>
+      <div className="mb-3 rounded-md border border-line bg-sunken px-2.5 py-2">
+        <div className="flex items-start gap-1.5">
+          <FolderIcon className="mt-0.5 size-3 shrink-0 text-accent" />
+          <span
+            title={workspace?.path ?? tools?.workspace}
+            className="min-w-0 flex-1 font-mono text-[11.5px] break-all text-muted"
+          >
+            {workspace?.path ?? tools?.workspace ?? '—'}
+          </span>
+        </div>
+
+        <div className="mt-2 flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={onOpenWorkspacePicker}
+            className="h-6 rounded-md border border-line px-2 text-[11px] transition hover:border-accent-line"
+          >
+            Change folder
+          </button>
+          {workspace && !workspace.from_env && (
+            <span
+              title={`AGENT_WORKSPACE says ${workspace.default}, which a restart returns to.`}
+              className="rounded border border-line px-1 text-[10px] text-faint"
+            >
+              this session
+            </span>
+          )}
+          {workspace?.is_project && (
+            <span
+              title="The default. Rarely the folder you actually want the agent working in."
+              className="rounded border border-line px-1 text-[10px] text-faint"
+            >
+              project
+            </span>
+          )}
+        </div>
+
+        {workspace && workspace.active_tools.length > 0 && (
+          <p className="mt-2 text-[10.5px] leading-relaxed text-faint">
+            <span className={workspace.writable ? 'text-warn' : undefined}>
+              {workspace.active_tools.join(', ')}
+            </span>{' '}
+            {workspace.active_tools.length === 1 ? 'acts' : 'act'} on this
+            folder.
+          </p>
+        )}
       </div>
 
       <p className="mb-1.5 text-[10px] tracking-[0.1em] text-faint uppercase">

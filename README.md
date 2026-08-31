@@ -353,12 +353,13 @@ Hakim Local Agent/
 │   ├── turns.py         the queue: one turn at a time, with positions
 │   ├── schemas.py       request and response bodies
 │   └── routes/          chat (SSE), conversations, models, meta, uploads,
-│                        rag, memory
+│                        workspace, rag, memory
 │
 ├── web/                 React + TypeScript + Vite + Tailwind
 │   ├── src/lib/         api client, SSE reader, markdown, commands
 │   ├── src/hooks/       the turn state machine and data hooks
-│   ├── src/components/  sidebar, transcript, composer, palette
+│   ├── src/components/  sidebar, transcript, composer, palette,
+│                        workspace picker
 │   └── dist/            build output (git-ignored)
 │
 ├── agent/
@@ -412,7 +413,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               418 tests, no server required
+└── tests/               836 tests, no server required
 ```
 
 ---
@@ -820,7 +821,9 @@ Paths are resolved **first** — collapsing `..` and following symlinks — and 
 result must sit under the workspace root. That is what makes the check hold
 against `../`, absolute paths and symlink tricks. Oversized files are refused.
 
-Default workspace is the project directory; set `AGENT_WORKSPACE` to move it.
+Default workspace is the project directory. `AGENT_WORKSPACE` moves it before
+startup, and the **Workspace panel or the folder pill in the composer** moves it
+while the app is running - see [Choosing a workspace](#choosing-a-workspace).
 
 ### python  — read this before enabling
 
@@ -1449,6 +1452,8 @@ gzipped, because the dependency list stops at those four.
   from a hang is the entire difficulty
 - The model's **reasoning** streams into a collapsible panel — see below
 - **Tool switches** in the sidebar, with each tool's own risk text
+- **The workspace is chosen here**, from the folder pill in the composer or
+  the Workspace panel - see below
 - Slash completion inline in the composer, and a ⌘K palette over commands,
   models and conversations
 - Sidebar folds away; light and dark both supported
@@ -1463,6 +1468,51 @@ It builds React elements, never HTML, so there is no `dangerouslySetInnerHTML`
 anywhere in the app and no sanitiser to get wrong. A model that emits
 `<script>` emits eight harmless characters. Links are restricted to `http(s)`,
 so a `javascript:` URL renders as text.
+
+### Choosing a workspace
+
+The workspace is the jail. `WorkspaceFiles` resolves every path the model gives
+it and refuses anything landing outside; the terminal tool runs with it as its
+working directory; git works on it; uploads land inside it. Until now it could
+only be chosen before startup, with `AGENT_WORKSPACE` - which made the agent
+useful mainly for reading its own source.
+
+It is now a control: the **folder pill in the composer**, beside the model and
+the tool count, and a **Change folder** button in the Workspace panel.
+`/workspace` opens the same picker, and `/workspace <path>` skips it.
+
+**The picker walks the filesystem server-side, and it has to.** A directory
+picker in a browser hands the page a folder's *name* and never its absolute
+path, which is the one thing the tools need. So `GET /api/workspace/browse`
+lists one level at a time - sub-directory names only, never a file's contents -
+and the path shown is the real one rather than a reconstruction. Pasting a path
+from Explorer works too, because eleven clicks is not an improvement on Ctrl+V.
+
+Two folders are refused, in `runtime.resolve_workspace`:
+
+| Refused | Why |
+|---|---|
+| A drive root (`C:\`) | A jail around the whole disk is not a jail |
+| Windows, Program Files, `/usr`, `/etc` … | The operating system is not a project |
+
+Neither is a security boundary - with the terminal switch on this API can hand a
+model a shell - they stop the two choices that would make the jail meaningless.
+
+**It applies from the next turn**, and moving it is refused with a 409 while one
+is running: the tool registry is built when a turn starts, so moving the jail
+underneath a running turn would either do nothing or move it halfway through.
+
+Like the tool switches, the choice **lives in memory only**. A restart returns to
+whatever `AGENT_WORKSPACE` says, which stays the durable answer to "what can
+this thing reach"; the panel marks a session-only choice `this session`. Two
+things follow the workspace when it moves: uploads, which land in the new
+folder, and every file tool. Attachments uploaded before a move stay in the old
+folder and the agent can no longer read them - re-attach them.
+
+The panel names which switched-on tools act on the folder, and the picker
+repeats it before you choose. "File writes is switched on, so the agent will act
+on whatever you pick, and can change files there" is worth reading before
+pointing it at Documents.
 
 ### Attachments and OCR
 
@@ -1528,6 +1578,7 @@ commands plus every model and saved conversation.
 | `/load <key>` | Load a model now |
 | `/unload` | Unload the current model, free its RAM |
 | `/tools` | List enabled tools and what is off |
+| `/workspace [path]` | Move the workspace. No path opens the picker |
 | `/auto` | Toggle automatic routing |
 | `/thinking` | Toggle extended thinking |
 | `/new`, `/clear` | Start a new conversation |
@@ -1581,7 +1632,7 @@ a connection failure.
 | `AGENT_CONNECT_TIMEOUT` | `10` | Seconds |
 | `AGENT_MAX_HISTORY` | `60` | Messages kept; 0 disables trimming |
 | `AGENT_MAX_ITERATIONS` | `8` | Tool rounds per turn |
-| `AGENT_WORKSPACE` | project dir | The only directory tools may read |
+| `AGENT_WORKSPACE` | project dir | The only directory tools may read. The starting point; the UI can move it for the session |
 | `AGENT_MAX_READ_BYTES` | `200000` | Largest readable file |
 | `AGENT_DB_PATH` | `data/chat_history.db` | History and memory database |
 | `AGENT_ENABLE_PYTHON_TOOL` | `0` | See the security note |
@@ -1645,7 +1696,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**485 tests, no model server needed, and none of them touch the network.**
+**836 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -1675,7 +1726,7 @@ They take about 140 s, almost all of it importing torch.
 | `test_port_reclaim.py` | Reclaiming a port from a llama-server we did not start |
 | `test_turns.py` | The queue: serialisation, positions, bounded backlog, a runner that raises |
 | `test_remote.py` | Hosted models: registry shape, key handling, connectivity cache, error hints |
-| `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches, remote consent, uploads |
+| `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches, the workspace and its picker, remote consent, uploads |
 
 The API tests use the same manager harness as the model tests and a scripted
 chat client, so none of them depend on whether something happens to be
@@ -1741,6 +1792,16 @@ delete or rename, and the Python and terminal tools are still not sandboxes.
 Overrides are held in memory only, so a restart returns to whatever the
 environment says and a switch cannot quietly become permanent.
 
+**So is choosing the workspace from the UI**, and in the same shape. What the
+jail does has not moved: one directory, paths resolved before they are checked,
+nothing outside it reachable, no delete or rename anywhere in the filesystem
+tools. What moved is that *which* directory is a click rather than a restart -
+the change that makes the agent useful on your own files. Drive roots and the
+operating system's own directories are refused, because a jail around either is
+not a jail; that is a guard against a mistake, not a boundary against an
+attacker, and with the terminal switch on there is no such boundary here anyway.
+The choice is held in memory like every other override.
+
 ---
 
 ## 16. What is verified and what is not
@@ -1782,7 +1843,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 485 tests
+- 836 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

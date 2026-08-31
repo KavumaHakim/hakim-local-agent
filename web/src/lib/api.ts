@@ -9,6 +9,7 @@
 import type {
   Conversation,
   ConversationDetail,
+  DirectoryListing,
   Health,
   ModelOverride,
   ModelsResponse,
@@ -16,6 +17,7 @@ import type {
   OcrBackend,
   ToolsResponse,
   UploadResult,
+  WorkspaceInfo,
 } from './types'
 
 /** The structured body a 409 carries when a turn would leave the machine. */
@@ -103,6 +105,27 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ backend }),
     }),
+
+  workspace: () => request<WorkspaceInfo>('/workspace'),
+
+  /** Point the file tools at another folder. Applies from the next turn. */
+  setWorkspace: (path: string) =>
+    request<WorkspaceInfo>('/workspace', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+
+  /** Back to the folder AGENT_WORKSPACE names. */
+  resetWorkspace: () => request<WorkspaceInfo>('/workspace', { method: 'DELETE' }),
+
+  /**
+   * List one folder's sub-folders.
+   *
+   * The walking happens on the server because it has to: a directory picker in
+   * a browser reports names, never the absolute path the tools resolve against.
+   */
+  browse: (path = '') =>
+    request<DirectoryListing>(`/workspace/browse?path=${encodeURIComponent(path)}`),
 
   models: () => request<ModelsResponse>('/models'),
 

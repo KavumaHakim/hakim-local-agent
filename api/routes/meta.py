@@ -263,10 +263,13 @@ def health(runtime: Runtime = Depends(get_runtime)):
     Says nothing about the model servers - those have their own state and are
     reported by /models, which can be slow when it reconciles processes.
     """
+    # The effective workspace, not the one the environment chose: the folder
+    # the tools would actually reach right now is the only useful answer, and
+    # since it can be moved from the UI the two are no longer the same thing.
     return HealthOut(
         ok=True,
         busy=runtime.queue.busy(),
         queue_depth=runtime.queue.depth(),
-        workspace=str(runtime.config.workspace),
+        workspace=str(runtime.workspace),
         db_path=str(runtime.config.db_path),
     )
