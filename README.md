@@ -172,6 +172,7 @@ own context rather than a fixed number:
 | | limit |
 |---|---|
 | one tool result | `AGENT_TOOL_RESULT_SHARE`, a quarter of the context |
+| all of a turn's results together | whatever is left of the history budget |
 | the conversation replayed | `AGENT_HISTORY_SHARE`, half of it |
 
 On a 4,096-token model that is 3,348 and 6,696 characters. A model with a
@@ -513,7 +514,7 @@ By hand it is `cp .env.example .env` and fill in what you need.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-974 tests, no model server needed, and none of them touch the network.
+986 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -706,7 +707,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               974 tests, no server required
+└── tests/               986 tests, no server required
 ```
 
 ---
@@ -2387,7 +2388,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**974 tests, no model server needed, and none of them touch the network.**
+**986 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2538,7 +2539,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 974 tests
+- 986 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

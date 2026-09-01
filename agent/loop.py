@@ -30,6 +30,12 @@ class IterationLimitError(AgentError):
     """The model kept calling tools past the configured limit."""
 
 
+# The smallest a tool result may be cut to. Below this the result says
+# nothing useful and the note explaining the cut does not fit either, so the
+# model is better told plainly that the thing did not fit.
+MIN_RESULT_CHARS = 400
+
+
 class TurnStopped(AgentError):
     """Someone asked for this turn to stop, and it did.
 
@@ -170,7 +176,7 @@ class Agent:
                         # window and loses the whole turn rather than part of
                         # one result.
                         "content": result.content_within(
-                            self._config.max_tool_result_chars
+                            self._result_budget()
                         ),
                     }
                 )
@@ -190,6 +196,32 @@ class Agent:
         )
 
     # --- internals ---
+
+    def _result_budget(self) -> int:
+        """How much of the context this tool result may take, right now.
+
+        The per-result cap, or whatever is left of the history budget if that
+        is smaller. Both are needed and neither is enough alone: the per-result
+        cap bounds one page of OCR, and this bounds the turn where the model
+        lists four directories looking for a file. Each of those four is
+        within its own cap and their sum is three times the window.
+
+        `_trim_history` cannot help here. It only cuts immediately before a
+        user message, and inside one turn there is exactly one of those, at
+        the very front - so it finds nothing safe to drop and returns, leaving
+        the request oversized rather than trimmed.
+
+        Never below a floor: a result cut to nothing tells the model less than
+        an honest "this did not fit", and the truncation note itself needs
+        room to be read.
+        """
+        per_result = self._config.max_tool_result_chars
+        budget = self._config.max_history_chars
+        if budget <= 0:
+            return per_result
+
+        remaining = budget - self._history_chars()
+        return max(MIN_RESULT_CHARS, min(per_result, remaining))
 
     @staticmethod
     def _check_stop(should_stop: StopCheck | None) -> None:
@@ -302,10 +334,23 @@ class Agent:
 
         Characters rather than tokens, because counting tokens means loading a
         tokeniser and this runs on every round of every turn.
+
+        `tool_calls` counts as well as `content`. An assistant message that
+        asks for a tool has an empty content and a JSON array of calls that is
+        several hundred characters, all of it sent to the model - so counting
+        content alone under-reports every tool round, which is precisely the
+        kind of turn that runs out of context.
         """
-        return sum(
-            len(str(message.get("content", ""))) for message in self._history
-        )
+        total = 0
+        for message in self._history:
+            total += len(str(message.get("content") or ""))
+            calls = message.get("tool_calls")
+            if calls:
+                try:
+                    total += len(json.dumps(calls, ensure_ascii=False, default=str))
+                except (TypeError, ValueError):
+                    total += 200  # unserialisable, but it still costs something
+        return total
 
 
 def summarize_arguments(arguments: dict[str, Any], limit: int = 80) -> str:

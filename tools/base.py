@@ -145,7 +145,76 @@ class ToolResult:
             except (TypeError, ValueError):
                 break
 
+        # Lists next, because not every big result is a big string. A
+        # directory listing is hundreds of small dicts under one key, and
+        # cutting strings does nothing to it - which is how `list_directory`
+        # used to walk straight past this limit and overflow the window.
+        lists = sorted(
+            (key for key, value in payload.items() if isinstance(value, list)),
+            key=lambda key: len(payload[key]),
+            reverse=True,
+        )
+
+        for key in lists:
+            if len(text) <= limit:
+                break
+            original = payload[key]
+            if not original:
+                continue
+
+            probe = dict(payload)
+            probe[key] = []
+            probe.pop("truncated", None)
+            try:
+                fixed = len(json.dumps(probe, ensure_ascii=False, default=str))
+            except (TypeError, ValueError):
+                break
+
+            room = limit - fixed - _NOTE_RESERVE
+            keep = _entries_that_fit(original, room)
+            if keep >= len(original):
+                continue
+
+            payload[key] = original[:keep]
+            payload["truncated"] = (
+                f"{key!r} was cut: {len(original) - keep:,} of "
+                f"{len(original):,} entries are not shown, because the whole "
+                f"result does not fit this model's context. Say so rather "
+                f"than treating this as complete."
+            )
+            try:
+                text = json.dumps(payload, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                break
+
+        # The backstop. Everything above cuts a *field*, which cannot help a
+        # payload whose bulk is somewhere those passes do not reach - a nested
+        # structure, or thousands of numbers. Returning an oversized result
+        # here is what overflows the model's window, so this never does: it
+        # gives up on the content and says so, in valid JSON.
+        if len(text) > limit:
+            return json.dumps(
+                {
+                    "success": bool(self.payload.get("success", self.ok)),
+                    "truncated": (
+                        f"The result was {len(text):,} characters and could "
+                        f"not be cut to the {limit:,} this model's context "
+                        f"allows, so none of it is shown. Ask for less of it "
+                        f"- a narrower path, or one page rather than a whole "
+                        f"document."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
         return text
+
+    @staticmethod
+    def _fits(entries: list, room: int) -> bool:
+        try:
+            return len(json.dumps(entries, ensure_ascii=False, default=str)) <= room
+        except (TypeError, ValueError):
+            return False
 
     def summary(self, limit: int = 100) -> str:
         """One-line rendering for the CLI."""
@@ -158,6 +227,31 @@ class ToolResult:
             ) or "ok"
         text = " ".join(text.split())
         return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _entries_that_fit(entries: list, room: int) -> int:
+    """How many leading entries of `entries` serialise within `room`.
+
+    A binary search rather than a loop adding one at a time: a listing of a
+    node_modules directory is tens of thousands of entries, and measuring the
+    cost of each prefix in turn is quadratic in the thing already known to be
+    too big.
+    """
+    if room <= 2:  # not even "[]"
+        return 0
+
+    low, high = 0, len(entries)
+    while low < high:
+        middle = (low + high + 1) // 2
+        try:
+            cost = len(json.dumps(entries[:middle], ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            return low
+        if cost <= room:
+            low = middle
+        else:
+            high = middle - 1
+    return low
 
 
 def _short(value: Any, limit: int = 60) -> str:
