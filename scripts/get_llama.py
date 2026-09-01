@@ -227,8 +227,13 @@ def find_asset(build: str | None) -> tuple[str, str, str, int]:
 # --- fetching and unpacking -----------------------------------------------
 
 
-def download(url: str, target: Path, size: int) -> None:
-    say(f"  downloading {size / 1e6:.1f} MB ...")
+def download(url: str, target: Path, size: int, on_progress=None) -> None:
+    # A bar when the caller supplied one, a line when it did not. This module
+    # knows nothing about the terminal; the caller hands in something with
+    # advance() and done(), or nothing at all.
+    bar = on_progress("downloading", size) if on_progress else None
+    if bar is None:
+        say(f"  downloading {size / 1e6:.1f} MB ...")
     session = _requests()
 
     if session is not None:
@@ -237,8 +242,10 @@ def download(url: str, target: Path, size: int) -> None:
                 if response.status_code >= 400:
                     raise LlamaError(f"Download returned HTTP {response.status_code}")
                 with target.open("wb") as handle:
-                    for block in response.iter_content(chunk_size=1 << 20):
+                    for block in response.iter_content(chunk_size=1 << 18):
                         handle.write(block)
+                        if bar is not None:
+                            bar.advance(len(block))
         except LlamaError:
             raise
         except Exception as exc:  # noqa: BLE001 - requests' own error tree
@@ -250,9 +257,18 @@ def download(url: str, target: Path, size: int) -> None:
         try:
             with urllib.request.urlopen(request, timeout=300) as response:
                 with target.open("wb") as handle:
-                    shutil.copyfileobj(response, handle, length=1 << 20)
+                    while True:
+                        block = response.read(1 << 18)
+                        if not block:
+                            break
+                        handle.write(block)
+                        if bar is not None:
+                            bar.advance(len(block))
         except (urllib.error.URLError, OSError) as exc:
             raise LlamaError(f"Download failed: {exc}") from None
+
+    if bar is not None:
+        bar.done()
 
     if size and target.stat().st_size != size:
         raise LlamaError(
@@ -340,7 +356,7 @@ def verify(server: Path) -> str:
 # --- the whole job --------------------------------------------------------
 
 
-def install(*, build: str | None = None, force: bool = False) -> Path | None:
+def install(*, build: str | None = None, force: bool = False, on_progress=None) -> Path | None:
     """Download and unpack llama.cpp. Returns the server path, or None."""
     existing = find_server(VENDOR)
     if existing and not force:
@@ -355,7 +371,7 @@ def install(*, build: str | None = None, force: bool = False) -> Path | None:
 
     with tempfile.TemporaryDirectory() as scratch:
         archive = Path(scratch) / name
-        download(url, archive, size)
+        download(url, archive, size, on_progress=on_progress)
         say("  unpacking ...")
         unpack(archive, VENDOR)
 

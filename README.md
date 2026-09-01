@@ -246,18 +246,54 @@ setup.bat
 ./setup.sh
 ```
 
-That creates the virtualenv, installs the Python and front-end dependencies,
-**downloads llama.cpp**, writes a starter `.env` and runs the tests.
+Run in a terminal it is a walkthrough: it prints what it is about to do, asks
+which optional pieces you want, and shows progress while it works.
+
+```
+  Optional pieces
+   [x] 1) Download llama.cpp (about 18 MB)
+          The engine that runs the models. Skip if you already have one.
+   [ ] 2) Document search (torch, about 2 GB)
+          Semantic search over your own files. Slow to install; optional.
+   [ ] 3) Build the web UI for production
+          Otherwise it runs in development mode, which is what most want.
+   [x] 4) Run the tests at the end
+          About a minute, and it is how you know the install is sound.
+  Number to toggle, or Enter to continue [continue]
+
+This is what will happen
+  1. Checking Python          5. llama.cpp
+  2. Creating the virtualenv  6. Model weights
+  3. Python dependencies      7. Configuration
+  4. Front end                8. Verifying
+
+[3/8] Python dependencies
+  / requirements.txt (14s)
+[5/8] llama.cpp
+  downloading [##############..........]  58% 10.8/18.4 MB  2.1 MB/s
+```
 
 **The only thing left for you is a model.** Drop any `.gguf` into `weights/`
 and it is picked up on the next scan, sized from its own header.
 
+**Piped, redirected or in CI it asks nothing**, takes the defaults, and prints
+plain lines — no cursor tricks, no carriage returns, no prompt waiting for
+input that will never come. `--yes` forces that mode in a terminal too.
+
 | Flag | Effect |
 |---|---|
+| `-y`, `--yes` | ask nothing; take the defaults and the flags below |
 | `--with-rag` | also install document search (torch, about 2 GB) |
 | `--build-web` | build the UI instead of running Vite in development |
 | `--no-llama` | do not download llama.cpp |
 | `--skip-tests` | do not run the verification tests |
+
+The toolkit behind it is [`scripts/ui.py`](scripts/ui.py), which is standard
+library only and has to be: setup runs *before* anything is installed, so
+`rich`, `tqdm` and `questionary` are unavailable to it by definition. It reads
+whole lines rather than single keys — arrow-key menus need raw terminal mode,
+which is `msvcrt` on Windows and `termios` elsewhere, and both have edge cases
+in the terminals people actually run setup in.
 
 It is safe to run again at any time; nothing it does is destructive.
 
@@ -361,7 +397,7 @@ lists every variable with no values, and `.env` is git-ignored.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-923 tests, no model server needed, and none of them touch the network.
+946 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -484,6 +520,7 @@ Hakim Local Agent/
 ├── setup.bat/.sh        one-command install, both platforms
 ├── start.bat/.sh        run the API and the UI together
 ├── scripts/setup.py     what both setup wrappers actually run
+├── scripts/ui.py        menus, spinners and progress bars, stdlib only
 ├── scripts/get_llama.py fetches the right llama.cpp build for this machine
 ├── vendor/llama/        that build, once fetched (git-ignored)
 │
@@ -553,7 +590,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               923 tests, no server required
+└── tests/               946 tests, no server required
 ```
 
 ---
@@ -2234,7 +2271,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**923 tests, no model server needed, and none of them touch the network.**
+**946 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2385,7 +2422,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 923 tests
+- 946 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3
