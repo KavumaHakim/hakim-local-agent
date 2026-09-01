@@ -50,6 +50,34 @@ ROOT = Path(__file__).resolve().parent.parent
 # wide, and git-ignored so a 60 MB toolchain never enters the repository.
 VENDOR = ROOT / "vendor" / "llama"
 
+# Backends worth fetching. Each gets its own directory so both can be present
+# at once, which is the whole point of having the second: on an integrated GPU
+# the only way to know whether offloading helps is to measure it against the
+# CPU build on the same machine.
+#
+# Only the plain CPU build is searched for automatically. Anything else has to
+# be asked for and then pointed at deliberately, because an accelerator build
+# that cannot reach its device is slower than the CPU one, not faster.
+BACKENDS = {
+    "cpu": {
+        "windows": "win-cpu",
+        "linux": "ubuntu",
+        "darwin": "macos",
+        "directory": "llama",
+    },
+    "vulkan": {
+        "windows": "win-vulkan",
+        "linux": "ubuntu-vulkan",
+        # macOS has no Vulkan build: Metal is compiled into the ordinary one.
+        "darwin": "",
+        "directory": "llama-vulkan",
+    },
+}
+
+
+def vendor_dir(backend: str) -> Path:
+    return ROOT / "vendor" / BACKENDS[backend]["directory"]
+
 RELEASES = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
 
 # Accelerator builds. Each needs a runtime that has to be installed separately,
@@ -88,8 +116,12 @@ def say(message: str = "") -> None:
 # --- choosing the right archive -------------------------------------------
 
 
-def platform_tokens() -> tuple[str, str]:
+def platform_tokens(backend: str = "cpu") -> tuple[str, str]:
     """The (platform, architecture) tokens that appear in an asset name."""
+    if backend not in BACKENDS:
+        raise LlamaError(
+            f"Unknown backend {backend!r}. Known: {', '.join(sorted(BACKENDS))}."
+        )
     machine = platform.machine().lower()
     if machine in ("amd64", "x86_64", "x64"):
         architecture = "x64"
@@ -102,23 +134,32 @@ def platform_tokens() -> tuple[str, str]:
         )
 
     system = platform.system().lower()
-    if system == "windows":
-        return "win-cpu", architecture
-    if system == "linux":
-        return "ubuntu", architecture
-    if system == "darwin":
-        return "macos", architecture
-    raise LlamaError(f"Unsupported system: {platform.system()}")
+    token = BACKENDS[backend].get(system)
+    if token is None:
+        raise LlamaError(f"Unsupported system: {platform.system()}")
+    if not token:
+        raise LlamaError(
+            f"There is no {backend} build for {platform.system()}. On macOS, "
+            f"Metal is compiled into the ordinary build already."
+        )
+    return token, architecture
 
 
-def wanted(name: str, system: str, architecture: str) -> bool:
-    """Whether one asset is the plain CPU build for this machine."""
+def wanted(name: str, system: str, architecture: str, backend: str = "cpu") -> bool:
+    """Whether one asset is the build this machine asked for.
+
+    Every accelerator except the one being fetched is excluded by name. That
+    matters more than it looks: "ubuntu-vulkan-x64" and "ubuntu-x64" both
+    contain "ubuntu", so without the exclusions a request for the CPU build
+    would happily match a 34 MB Vulkan one.
+    """
     lowered = name.lower()
     if not lowered.startswith("llama-") or "-bin-" not in lowered:
         return False
     if any(token in lowered for token in NOT_A_BUILD):
         return False
-    if any(token in lowered for token in ACCELERATORS):
+    unwanted = [token for token in ACCELERATORS if token != backend]
+    if any(token in lowered for token in unwanted):
         return False
     if system not in lowered:
         return False
@@ -189,13 +230,13 @@ def fetch_json(url: str, params: str = "") -> object:
         raise LlamaError(f"Could not reach GitHub: {exc}") from None
 
 
-def find_asset(build: str | None) -> tuple[str, str, str, int]:
+def find_asset(build: str | None, backend: str = "cpu") -> tuple[str, str, str, int]:
     """(tag, asset name, download url, size) for this machine.
 
     `build` pins a tag such as "b10731"; without it the newest release that
     actually carries binaries wins.
     """
-    system, architecture = platform_tokens()
+    system, architecture = platform_tokens(backend)
 
     if build:
         releases = [fetch_json(f"{RELEASES}/tags/{build}")]
@@ -209,7 +250,7 @@ def find_asset(build: str | None) -> tuple[str, str, str, int]:
             continue
         for asset in release.get("assets", []):
             name = asset.get("name", "")
-            if wanted(name, system, architecture):
+            if wanted(name, system, architecture, backend):
                 return (
                     release.get("tag_name", "?"),
                     name,
@@ -218,7 +259,7 @@ def find_asset(build: str | None) -> tuple[str, str, str, int]:
                 )
 
     raise LlamaError(
-        f"No CPU build for {system}-{architecture} was found in the last "
+        f"No {backend} build for {system}-{architecture} was found in the last "
         f"{len(releases)} release(s). Download one by hand from "
         f"https://github.com/ggml-org/llama.cpp/releases"
     )
@@ -356,38 +397,53 @@ def verify(server: Path) -> str:
 # --- the whole job --------------------------------------------------------
 
 
-def install(*, build: str | None = None, force: bool = False, on_progress=None) -> Path | None:
+def install(
+    *,
+    build: str | None = None,
+    force: bool = False,
+    on_progress=None,
+    backend: str = "cpu",
+) -> Path | None:
     """Download and unpack llama.cpp. Returns the server path, or None."""
-    existing = find_server(VENDOR)
+    target = vendor_dir(backend)
+
+    existing = find_server(target)
     if existing and not force:
         say(f"  already there: {existing}")
         return existing
 
-    tag, name, url, size = find_asset(build)
+    tag, name, url, size = find_asset(build, backend)
     say(f"  {name}  ({tag})")
 
-    if VENDOR.exists() and force:
-        shutil.rmtree(VENDOR, ignore_errors=True)
+    if target.exists() and force:
+        shutil.rmtree(target, ignore_errors=True)
 
     with tempfile.TemporaryDirectory() as scratch:
         archive = Path(scratch) / name
         download(url, archive, size, on_progress=on_progress)
         say("  unpacking ...")
-        unpack(archive, VENDOR)
+        unpack(archive, target)
 
-    server = find_server(VENDOR)
+    server = find_server(target)
     if server is None:
         raise LlamaError(
             f"The archive unpacked but contained no llama-server. "
-            f"Look in {VENDOR} and report this."
+            f"Look in {target} and report this."
         )
 
     make_executable(server)
     version = verify(server)
     say(f"  {version}")
-    (VENDOR / "BUILD.txt").write_text(
+    (target / "BUILD.txt").write_text(
         f"{tag}\n{name}\n{url}\n", encoding="utf-8"
     )
+
+    if backend != "cpu":
+        say("")
+        say(f"  This is the {backend} build, and nothing uses it yet.")
+        say("  Only vendor/llama is searched automatically, so point at it")
+        say("  deliberately - setup.py's 'I already have it', or:")
+        say(f"      {server}")
     return server
 
 
@@ -400,16 +456,28 @@ def main() -> int:
     parser.add_argument(
         "--list", action="store_true", help="show the newest build for this machine"
     )
+    parser.add_argument(
+        "--backend",
+        default="cpu",
+        choices=sorted(BACKENDS),
+        help=(
+            "which build to fetch. 'vulkan' is for benchmarking an integrated "
+            "GPU; it lands beside the CPU build rather than replacing it, and "
+            "must be pointed at deliberately."
+        ),
+    )
     arguments = parser.parse_args()
 
     try:
         if arguments.list:
-            tag, name, url, size = find_asset(arguments.build)
+            tag, name, url, size = find_asset(arguments.build, arguments.backend)
             say(f"{tag}  {name}  {size / 1e6:.1f} MB")
             say(url)
             return 0
 
-        server = install(build=arguments.build, force=arguments.force)
+        server = install(
+            build=arguments.build, force=arguments.force, backend=arguments.backend
+        )
         say(f"llama-server: {server}")
     except LlamaError as exc:
         say(f"[X] {exc}")

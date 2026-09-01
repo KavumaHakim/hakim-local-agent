@@ -10,6 +10,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import type {
   Conversation,
+  HubFiles,
+  HubModel,
+  ModelDownload,
   ModelOverride,
   ModelsResponse,
   OcrBackend,
@@ -319,6 +322,132 @@ export function useWorkspace() {
     choose,
     reset,
     refresh,
+    clearError: useCallback(() => setError(null), []),
+  }
+}
+
+/**
+ * Searching Hugging Face, and fetching what you pick.
+ *
+ * Downloads are polled rather than streamed. They last minutes to hours, a
+ * dropped SSE connection over that span is normal, and the server already
+ * keeps the progress - so asking every second is both simpler and more robust
+ * than holding a connection open for an hour.
+ */
+export function useModelHub(onFinished: () => void) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<HubModel[]>([])
+  const [searching, setSearching] = useState(false)
+  const [files, setFiles] = useState<HubFiles | null>(null)
+  const [openRepo, setOpenRepo] = useState<string | null>(null)
+  const [downloads, setDownloads] = useState<ModelDownload[]>([])
+  const [error, setError] = useState<string | null>(null)
+
+  const search = useCallback(async (text: string) => {
+    const trimmed = text.trim()
+    setQuery(text)
+    if (!trimmed) {
+      setResults([])
+      return
+    }
+    setSearching(true)
+    setError(null)
+    try {
+      setResults((await api.hubSearch(trimmed)).models)
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+      setResults([])
+    } finally {
+      setSearching(false)
+    }
+  }, [])
+
+  const open = useCallback(
+    async (repo: string) => {
+      if (openRepo === repo) {
+        setOpenRepo(null)
+        setFiles(null)
+        return
+      }
+      setOpenRepo(repo)
+      setFiles(null)
+      setError(null)
+      try {
+        setFiles(await api.hubFiles(repo))
+      } catch (failure) {
+        setError(failure instanceof Error ? failure.message : String(failure))
+      }
+    },
+    [openRepo],
+  )
+
+  const refreshDownloads = useCallback(async () => {
+    try {
+      setDownloads((await api.downloads()).downloads)
+    } catch {
+      /* a poll that fails is retried a second later; a banner would flap */
+    }
+  }, [])
+
+  const download = useCallback(
+    async (repo: string, path: string, sizeBytes: number) => {
+      setError(null)
+      try {
+        await api.startDownload(repo, path, sizeBytes)
+        await refreshDownloads()
+      } catch (failure) {
+        // The refusals are the useful ones - not enough disk, already there,
+        // one already running - so they are shown exactly as sent.
+        setError(failure instanceof Error ? failure.message : String(failure))
+      }
+    },
+    [refreshDownloads],
+  )
+
+  const cancel = useCallback(async (id: string) => {
+    try {
+      setDownloads((await api.cancelDownload(id)).downloads)
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    }
+  }, [])
+
+  // Poll only while something is running, and rescan once when one lands so
+  // the new model appears in the picker without anyone reloading.
+  const running = downloads.some((item) => item.state === 'running')
+  const settled = useRef(new Set<string>())
+
+  useEffect(() => {
+    for (const item of downloads) {
+      if (item.state === 'done' && !settled.current.has(item.id)) {
+        settled.current.add(item.id)
+        onFinished()
+      }
+    }
+  }, [downloads, onFinished])
+
+  useEffect(() => {
+    if (!running) return
+    const timer = window.setInterval(() => void refreshDownloads(), 1000)
+    return () => window.clearInterval(timer)
+  }, [running, refreshDownloads])
+
+  useEffect(() => {
+    void refreshDownloads()
+  }, [refreshDownloads])
+
+  return {
+    query,
+    results,
+    searching,
+    files,
+    openRepo,
+    downloads,
+    error,
+    search,
+    open,
+    download,
+    cancel,
     clearError: useCallback(() => setError(null), []),
   }
 }

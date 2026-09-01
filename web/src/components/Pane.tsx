@@ -61,6 +61,8 @@ interface Props {
   workspace: WorkspaceInfo | null
   onOpenWorkspacePicker: () => void
 
+  onOpenModelBrowser: () => void
+
   autoRoute: boolean
   onAutoRoute: (value: boolean) => void
   thinking: boolean
@@ -462,6 +464,7 @@ function SettingsPane({
   modelBusyKey,
   onSetPrimary,
   onRescanModels,
+  onOpenModelBrowser,
   onSetModelHidden,
   onOverrideModel,
   onClearModelOverride,
@@ -484,6 +487,21 @@ function SettingsPane({
         on={thinking}
         onToggle={onThinking}
       />
+
+      <div className="rounded-md border border-line bg-sunken px-2.5 py-2">
+        <p className="text-[11.5px]">Need another model?</p>
+        <p className="mt-0.5 text-[10.5px] leading-snug text-faint">
+          Search Hugging Face and see what each one would need in RAM before
+          downloading it.
+        </p>
+        <button
+          type="button"
+          onClick={onOpenModelBrowser}
+          className="mt-2 h-6 rounded-md border border-line px-2 text-[11px] transition hover:border-accent-line"
+        >
+          Find a model
+        </button>
+      </div>
 
       {models && (
         <ModelSettings

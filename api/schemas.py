@@ -532,6 +532,74 @@ class TruncateOut(BaseModel):
     emptied: bool
 
 
+# --- model hub ---
+
+
+class HubModelOut(BaseModel):
+    """One repository in a search result."""
+
+    id: str
+    downloads: int = 0
+    likes: int = 0
+    # Needs terms accepted on the website; this app holds no credentials.
+    gated: bool = False
+    tags: list[str] = []
+
+
+class HubSearchOut(BaseModel):
+    query: str
+    models: list[HubModelOut] = []
+
+
+class HubFileOut(BaseModel):
+    """One GGUF, and what it would cost to run."""
+
+    path: str
+    size_bytes: int
+    # The Q4_K_M-ish part of the name, for grouping.
+    quantisation: str = ""
+    # Estimated from the file size alone, by the same arithmetic discovery
+    # uses on a downloaded file. The whole point of the listing: being told a
+    # 4.8 GB file wants 6.2 GB free before spending an hour on it.
+    needs_ram_mb: int = 0
+
+
+class HubFilesOut(BaseModel):
+    repo: str
+    files: list[HubFileOut] = []
+    # None where it cannot be determined, which is not the same as zero.
+    free_ram_mb: int | None = None
+
+
+class DownloadRequest(BaseModel):
+    repo: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    # Sent so the disk check can happen before any bytes move.
+    size_bytes: int = 0
+
+
+class DownloadOut(BaseModel):
+    """One model being fetched, and how far it has got."""
+
+    id: str
+    repo: str
+    path: str
+    name: str
+    # running | done | failed | cancelled
+    state: str
+    error: str = ""
+    seen_bytes: int = 0
+    total_bytes: int = 0
+    percent: float = 0.0
+    bytes_per_second: int = 0
+    # None until there is enough of a rate to extrapolate from.
+    seconds_left: int | None = None
+
+
+class DownloadsOut(BaseModel):
+    downloads: list[DownloadOut] = []
+
+
 # --- workspace ---
 
 

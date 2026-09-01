@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 from pathlib import Path
 
@@ -54,8 +55,10 @@ ASSETS = [
 ]
 
 
-def picked(system: str, architecture: str) -> list[str]:
-    return [name for name in ASSETS if get_llama.wanted(name, system, architecture)]
+def picked(system: str, architecture: str, backend: str = "cpu") -> list[str]:
+    return [
+        name for name in ASSETS if get_llama.wanted(name, system, architecture, backend)
+    ]
 
 
 class AssetChoiceTests(unittest.TestCase):
@@ -116,6 +119,53 @@ class AssetChoiceTests(unittest.TestCase):
         """Whatever is running the tests must be able to name a build."""
         system, architecture = get_llama.platform_tokens()
         self.assertEqual(len(picked(system, architecture)), 1)
+
+
+class BackendTests(unittest.TestCase):
+    """Fetching an accelerator build on purpose, without ever getting one by
+    accident."""
+
+    def test_the_vulkan_build_can_be_asked_for(self):
+        self.assertEqual(
+            picked("win-vulkan", "x64", "vulkan"),
+            ["llama-b10731-bin-win-vulkan-x64.zip"],
+        )
+        self.assertEqual(
+            picked("ubuntu-vulkan", "x64", "vulkan"),
+            ["llama-b10731-bin-ubuntu-vulkan-x64.tar.gz"],
+        )
+
+    def test_asking_for_vulkan_does_not_also_match_cuda_or_rocm(self):
+        """Only the one accelerator asked for is allowed back in."""
+        for name in picked("win-vulkan", "x64", "vulkan"):
+            for token in ("cuda", "rocm", "sycl", "openvino"):
+                self.assertNotIn(token, name.lower())
+
+    def test_the_cpu_build_never_matches_an_accelerator_one(self):
+        """'ubuntu-vulkan-x64' contains 'ubuntu', so without the exclusions a
+        request for the CPU build would match a 34 MB Vulkan archive."""
+        self.assertEqual(
+            picked("ubuntu", "x64", "cpu"), ["llama-b10731-bin-ubuntu-x64.tar.gz"]
+        )
+
+    def test_each_backend_gets_its_own_directory(self):
+        """Both have to be present at once: the only way to know whether an
+        integrated GPU helps is to measure it against the CPU build."""
+        self.assertNotEqual(
+            get_llama.vendor_dir("cpu"), get_llama.vendor_dir("vulkan")
+        )
+        self.assertEqual(get_llama.vendor_dir("cpu").name, "llama")
+
+    def test_an_unknown_backend_is_refused(self):
+        with self.assertRaises(get_llama.LlamaError):
+            get_llama.platform_tokens("cuda")
+
+    def test_macos_says_metal_is_already_included(self):
+        with mock.patch.object(get_llama.platform, "system", return_value="Darwin"):
+            with mock.patch.object(get_llama.platform, "machine", return_value="arm64"):
+                with self.assertRaises(get_llama.LlamaError) as caught:
+                    get_llama.platform_tokens("vulkan")
+        self.assertIn("Metal", str(caught.exception))
 
 
 class UnpackTests(unittest.TestCase):

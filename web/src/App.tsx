@@ -15,12 +15,14 @@ import { Pane } from './components/Pane'
 import { Rail, type PaneId } from './components/Rail'
 import { RemoteConsent } from './components/RemoteConsent'
 import { TurnStatus } from './components/TurnStatus'
+import { ModelBrowser } from './components/ModelBrowser'
 import { WorkspacePicker } from './components/WorkspacePicker'
 import { CommandIcon, ExpandIcon } from './components/Icons'
 import { useChat } from './hooks/useChat'
 import {
   useConversations,
   useHotkey,
+  useModelHub,
   useModels,
   useTools,
   useWorkspace,
@@ -45,6 +47,7 @@ export default function App() {
   const [pane, setPane] = useState<PaneId>('history')
   const [paneOpen, setPaneOpen] = useState(true)
   const [pickingWorkspace, setPickingWorkspace] = useState(false)
+  const [browsingModels, setBrowsingModels] = useState(false)
   const [theme, setTheme] = useState<Theme>(
     () =>
       (document.documentElement.dataset.theme as Theme | undefined) ?? 'dark',
@@ -54,6 +57,14 @@ export default function App() {
   const tools = useTools()
   const conversations = useConversations()
   const workspace = useWorkspace()
+
+  // A finished download is a new model, and the catalogue is what the picker
+  // reads - so rescan once when one lands rather than making someone reload.
+  const hub = useModelHub(
+    useCallback(() => {
+      void models.rescan()
+    }, [models]),
+  )
 
   /**
    * Move the workspace, then re-read the tool roster.
@@ -315,6 +326,7 @@ export default function App() {
           onToggleTool={(id, enabled) => void toggleTool(id, enabled)}
           workspace={workspace.workspace}
           onOpenWorkspacePicker={() => setPickingWorkspace(true)}
+          onOpenModelBrowser={() => setBrowsingModels(true)}
           autoRoute={autoRoute}
           onAutoRoute={setAutoRoute}
           thinking={thinking}
@@ -452,6 +464,10 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {browsingModels && (
+        <ModelBrowser hub={hub} onClose={() => setBrowsingModels(false)} />
+      )}
 
       {pickingWorkspace && workspace.workspace && (
         <WorkspacePicker

@@ -11,6 +11,9 @@ import type {
   ConversationDetail,
   DirectoryListing,
   Health,
+  HubFiles,
+  HubSearchResult,
+  ModelDownload,
   ModelOverride,
   ModelsResponse,
   RescanResponse,
@@ -142,6 +145,37 @@ export const api = {
     request<DirectoryListing>(`/workspace/browse?path=${encodeURIComponent(path)}`),
 
   models: () => request<ModelsResponse>('/models'),
+
+  /**
+   * Look for models on Hugging Face.
+   *
+   * Sorted by downloads server-side: for any given model there are dozens of
+   * re-uploads, and the popular one is overwhelmingly the complete, correctly
+   * converted one that is still there next month.
+   */
+  hubSearch: (query: string, limit = 20) =>
+    request<HubSearchResult>(
+      `/hub/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+    ),
+
+  /** The GGUF files in one repository, with what each would need in RAM. */
+  hubFiles: (repo: string) =>
+    request<HubFiles>(`/hub/files?repo=${encodeURIComponent(repo)}`),
+
+  /** Fetch one into weights/. Refused up front if the disk cannot take it. */
+  startDownload: (repo: string, path: string, sizeBytes: number) =>
+    request<ModelDownload>('/hub/download', {
+      method: 'POST',
+      body: JSON.stringify({ repo, path, size_bytes: sizeBytes }),
+    }),
+
+  downloads: () => request<{ downloads: ModelDownload[] }>('/hub/downloads'),
+
+  cancelDownload: (id: string) =>
+    request<{ downloads: ModelDownload[] }>(
+      `/hub/downloads/${encodeURIComponent(id)}/cancel`,
+      { method: 'POST' },
+    ),
 
   /** Re-read the models folder. Cheap: headers only, never a tensor. */
   rescanModels: () =>

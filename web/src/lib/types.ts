@@ -270,6 +270,59 @@ export type TurnEvent =
       can_escalate?: boolean
     }
 
+/** One Hugging Face repository carrying GGUF files. */
+export interface HubModel {
+  id: string
+  downloads: number
+  likes: number
+  /** Needs terms accepted on the website; this app holds no credentials. */
+  gated: boolean
+  tags: string[]
+}
+
+export interface HubSearchResult {
+  query: string
+  models: HubModel[]
+}
+
+/** One GGUF, and what it would cost to run. */
+export interface HubFile {
+  path: string
+  size_bytes: number
+  /** The Q4_K_M-ish part of the name. */
+  quantisation: string
+  /**
+   * Estimated from the file size by the same arithmetic used on a model
+   * already on disk. The point of the listing: knowing a 4.8 GB file wants
+   * 6.2 GB free before spending an hour on it.
+   */
+  needs_ram_mb: number
+}
+
+export interface HubFiles {
+  repo: string
+  files: HubFile[]
+  /** Null when it cannot be determined, which is not the same as zero. */
+  free_ram_mb: number | null
+}
+
+export type DownloadState = 'running' | 'done' | 'failed' | 'cancelled'
+
+export interface ModelDownload {
+  id: string
+  repo: string
+  path: string
+  name: string
+  state: DownloadState
+  error: string
+  seen_bytes: number
+  total_bytes: number
+  percent: number
+  bytes_per_second: number
+  /** Null until there is enough of a rate to extrapolate from. */
+  seconds_left: number | null
+}
+
 /** What rewinding a conversation removed. */
 export interface RewindResult {
   removed: number

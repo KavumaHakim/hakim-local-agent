@@ -238,6 +238,9 @@ class Runtime:
         # already use, rather than one that probes real ports.
         self.manager = manager if manager is not None else ModelManager()
         self.store = ChatStore(self.config.db_path)
+        # Model downloads, into the same folder discovery watches. Built here
+        # rather than per-request so progress survives between polls.
+        self._downloads = None
         self.queue = TurnQueue(self.run_turn)
         self.connectivity = Connectivity()
         # Built lazily: memory pulls in numpy, and a runtime for a CLI-only
@@ -256,6 +259,19 @@ class Runtime:
         # the one the environment chose. In memory for the same reason the
         # switches are: nothing here should outlive the process quietly.
         self._recent_workspaces: list[Path] = [self.config.workspace]
+
+    @property
+    def downloads(self):
+        """Model downloads, pointed at the folder discovery already watches.
+
+        Lazy because it needs the manager's models folder, and because a run
+        that never opens the model browser should not pay for the import.
+        """
+        if self._downloads is None:
+            from models.hub import Downloads
+
+            self._downloads = Downloads(self.manager.models_dir)
+        return self._downloads
 
     # --- tool switches ---
 

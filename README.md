@@ -419,6 +419,21 @@ It lands in `vendor/llama/`, which is git-ignored. `--build b10731` pins a
 release, `--force` re-downloads, and `--list` shows what would be fetched
 without fetching it.
 
+`--backend vulkan` fetches the Vulkan build instead, into `vendor/llama-vulkan/`
+**beside** the CPU one rather than replacing it — because the only way to know
+whether an integrated GPU helps is to measure both on the same machine. Only
+`vendor/llama/` is searched automatically, so the accelerator build has to be
+pointed at deliberately (`setup.py`'s "I already have it", which remembers the
+path). An accelerator build that cannot reach its device is slower than the CPU
+one, not faster, which is why it is never picked up by accident.
+
+On whether it is worth trying: this machine's own `llama-bench` numbers say
+generation is **bound by memory bandwidth, not cores** — and an integrated GPU
+shares the same DIMMs and the same controller, so it cannot lift that ceiling.
+Prompt processing is the compute-bound half (7.81 → 16.70 tok/s from one thread
+to four), and that is where offloading could plausibly pay. Measure that, not
+tokens per second overall.
+
 Three details, because llama.cpp's releases are not arranged the way you would
 guess:
 
@@ -514,7 +529,7 @@ By hand it is `cp .env.example .env` and fill in what you need.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-986 tests, no model server needed, and none of them touch the network.
+1016 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -646,8 +661,8 @@ Hakim Local Agent/
 │   ├── runtime.py       process-wide objects; runs one turn
 │   ├── turns.py         the queue: one turn at a time, with positions
 │   ├── schemas.py       request and response bodies
-│   └── routes/          chat (SSE), conversations, models, meta, uploads,
-│                        workspace, rag, memory
+│   └── routes/          chat (SSE), conversations, models, hub, meta,
+│                        uploads, workspace, rag, memory
 │
 ├── web/                 React + TypeScript + Vite + Tailwind
 │   ├── src/lib/         api client, SSE reader, markdown, commands
@@ -665,6 +680,7 @@ Hakim Local Agent/
 ├── models/
 │   ├── gguf.py          reads a GGUF header without loading the model
 │   ├── discovery.py     turns a folder of .gguf files into model entries
+│   ├── hub.py           searching and downloading models from Hugging Face
 │   ├── preferences.py   your choices, in data/models.local.json
 │   ├── qwen.py          llama-server client (the only module that speaks HTTP)
 │   ├── remote.py        hosted providers (the only module that leaves the box)
@@ -707,7 +723,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               986 tests, no server required
+└── tests/               1016 tests, no server required
 ```
 
 ---
@@ -919,6 +935,44 @@ weights/
 > package (`models/manager.py`, `models/qwen.py`). A data directory with that
 > name would shadow it on the import path. `models_dir` in `models.json` moves
 > it anywhere you like, including another drive.
+
+### Finding one without leaving the app
+
+**Settings → Find a model** searches Hugging Face for GGUF repositories, most
+downloaded first — for any given model there are dozens of re-uploads, and the
+popular one is overwhelmingly the complete, correctly converted one that is
+still there next month.
+
+Expanding a repository lists its quantisations smallest first, each with the
+number that actually decides the matter:
+
+```
+IQ1_S     538 MB   ~0.8 GB to run
+Q3_K_M    940 MB   ~1.1 GB to run
+Q4_K_M    1.1 GB   ~1.3 GB to run
+Q8_0      1.8 GB   ~2.0 GB to run
+```
+
+That figure is the arithmetic below, applied to the file size **before** the
+file is downloaded, and compared against what is free right now. Being told a
+4.8 GB file wants 6.2 GB free is worth more than any download speed.
+
+Downloads run on their own thread, so a two-hour fetch does not block a
+conversation, and one at a time for the reason the model manager runs one
+server at a time. Progress, speed and an estimate are polled once a second.
+When one lands the catalogue is rescanned, so the model appears in the picker
+without a reload.
+
+What is enforced, because this reaches the network and writes to disk:
+
+| | |
+|---|---|
+| Host | `huggingface.co` only, over HTTPS |
+| Files | paths ending `.gguf` only |
+| Name | rebuilt from the basename — `../../.ssh/x.gguf` saves as `x.gguf` |
+| Disk | checked before any bytes move, keeping 500 MB spare |
+| Atomicity | written to `.part`, renamed only when complete, so discovery never sees a half-model |
+| Gated repos | reported as gated; this app holds no credentials |
 
 ### Choosing a model for your hardware
 
@@ -2388,7 +2442,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**986 tests, no model server needed, and none of them touch the network.**
+**1016 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2539,7 +2593,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 986 tests
+- 1016 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3
