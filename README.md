@@ -246,31 +246,46 @@ setup.bat
 ./setup.sh
 ```
 
-Run in a terminal it is a walkthrough: it prints what it is about to do, asks
-which optional pieces you want, and shows progress while it works.
+Run in a terminal it is a walkthrough: it says what it is about to do, asks
+what you want, and shows progress while it works.
 
 ```
-  Optional pieces
-   [x] 1) Download llama.cpp (about 18 MB)
-          The engine that runs the models. Skip if you already have one.
-   [ ] 2) Document search (torch, about 2 GB)
-          Semantic search over your own files. Slow to install; optional.
-   [ ] 3) Build the web UI for production
-          Otherwise it runs in development mode, which is what most want.
-   [x] 4) Run the tests at the end
-          About a minute, and it is how you know the install is sound.
-  Number to toggle, or Enter to continue [continue]
+  ██   ██   █████   ██  ██   ██  ███   ███
+  ██   ██  ██   ██  ██ ██    ██  ████ ████
+  ███████  ███████  █████    ██  ██ ███ ██
+  ██   ██  ██   ██  ██ ██    ██  ██  █  ██
+  ██   ██  ██   ██  ██  ██   ██  ██     ██
+  a local agent that runs on your own machine
 
-This is what will happen
-  1. Checking Python          5. llama.cpp
-  2. Creating the virtualenv  6. Model weights
-  3. Python dependencies      7. Configuration
-  4. Front end                8. Verifying
+  What would you like?
 
-[3/8] Python dependencies
+   [+] 1  Get llama.cpp for me
+          18 MB. It is the engine that actually runs your models.
+   [ ] 2  Let it search my documents
+          2 GB and slow to install. You can add this later.
+   [ ] 3  Build the web interface for production
+          Most people want the development mode instead. Leave this off.
+   [+] 4  Check it works when you are done
+          Runs the tests. About a minute, and worth it.
+
+  number to change one, Enter when it looks right  >
+```
+
+The checklist **redraws in place** — pressing a number replaces it rather than
+printing it again underneath — and it clears itself once accepted. Then:
+
+```
+Here is the plan
+   1. Checking your Python        5. Fetching llama.cpp
+   2. Making a private environment 6. Looking for a model
+   3. Installing the Python side  7. Writing your configuration
+   4. Installing the web interface 8. Making sure it all works
+
+===-----  3/8 Installing the Python side
   / requirements.txt (14s)
-[5/8] llama.cpp
-  downloading [##############..........]  58% 10.8/18.4 MB  2.1 MB/s
+
+=====---  5/8 Fetching llama.cpp
+  downloading [██████████████..........]  58% 10.8/18.4 MB  2.1 MB/s
 ```
 
 **The only thing left for you is a model.** Drop any `.gguf` into `weights/`
@@ -290,10 +305,24 @@ input that will never come. `--yes` forces that mode in a terminal too.
 
 The toolkit behind it is [`scripts/ui.py`](scripts/ui.py), which is standard
 library only and has to be: setup runs *before* anything is installed, so
-`rich`, `tqdm` and `questionary` are unavailable to it by definition. It reads
-whole lines rather than single keys — arrow-key menus need raw terminal mode,
-which is `msvcrt` on Windows and `termios` elsewhere, and both have edge cases
-in the terminals people actually run setup in.
+`rich`, `tqdm` and `questionary` are unavailable to it by definition.
+
+Everything in it degrades rather than decorating:
+
+| Where it runs | What happens |
+|---|---|
+| A terminal with 256 colours | Violet accent, matching the web UI |
+| A terminal with eight | Cyan accent instead — no approximating |
+| `NO_COLOR` or `TERM=dumb` | No colour at all |
+| A console that cannot encode `█` | The banner falls back to `#` |
+| Narrower than the banner | The banner falls back to the plain word |
+| No cursor control | The menu prints again instead of redrawing |
+| A pipe or CI | No prompts, no redraws, no carriage returns |
+
+It reads whole lines rather than single keys. Arrow-key menus need raw
+terminal mode — `msvcrt` on Windows against `termios` elsewhere — and both
+have edge cases in the terminals people actually run setup in; a menu you
+cannot answer is worse than one that looks plainer.
 
 It is safe to run again at any time; nothing it does is destructive.
 
@@ -397,7 +426,7 @@ lists every variable with no values, and `.env` is git-ignored.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-946 tests, no model server needed, and none of them touch the network.
+955 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -590,7 +619,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               946 tests, no server required
+└── tests/               955 tests, no server required
 ```
 
 ---
@@ -2271,7 +2300,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**946 tests, no model server needed, and none of them touch the network.**
+**955 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2422,7 +2451,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 946 tests
+- 955 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

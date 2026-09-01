@@ -10,6 +10,7 @@ and it is the one that only shows up in CI.
 from __future__ import annotations
 
 import io
+import re
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -109,6 +110,92 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual([item["on"] for item in result], [True])
 
 
+class RedrawTests(unittest.TestCase):
+    """The menu replaces itself rather than printing again underneath."""
+
+    def setUp(self):
+        patch = mock.patch.object(ui, "interactive", return_value=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def menu(self, replies, *, fancy):
+        items = [
+            {"label": "one", "note": "first", "on": True},
+            {"label": "two", "note": "second", "on": False},
+        ]
+        with mock.patch.object(ui, "fancy", return_value=fancy), mock.patch.object(
+            ui, "_read", side_effect=list(replies)
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                ui.toggle("pick", items)
+        return output.getvalue(), items
+
+    def test_it_moves_the_cursor_up_instead_of_scrolling(self):
+        text, _ = self.menu(["1", ""], fancy=True)
+        moves = re.findall(r"\033\[(\d+)A\033\[J", text)
+        # One redraw for the toggle, one to clear the menu on accept.
+        self.assertEqual(len(moves), 2)
+
+    def test_it_moves_up_exactly_what_it_drew(self):
+        """Off by one and the menu eats the line above it, or leaves a
+        duplicate behind - both of which look like a broken terminal."""
+        text, _ = self.menu(["1", ""], fancy=True)
+        moves = [int(value) for value in re.findall(r"\033\[(\d+)A", text)]
+
+        first_frame = re.split(r"\033\[\d+A", text)[0]
+        drawn = first_frame.count("\n")
+        # The prompt line has no newline of its own; the user's Enter ends it.
+        self.assertEqual(moves[0], drawn + 1)
+
+    def test_a_plain_terminal_never_moves_the_cursor(self):
+        """Where the cursor cannot be moved, printing again is correct - and
+        emitting the escape codes anyway would litter the log with them."""
+        text, _ = self.menu(["1", ""], fancy=False)
+        self.assertNotIn("\033[", text)
+
+    def test_the_menu_is_cleared_once_accepted(self):
+        """It has served its purpose; leaving it on screen above the install
+        log is clutter."""
+        text, _ = self.menu([""], fancy=True)
+        self.assertRegex(text, r"\033\[\d+A\033\[J$")
+
+    def test_a_bad_answer_is_explained_in_the_redraw(self):
+        text, _ = self.menu(["nope", ""], fancy=True)
+        self.assertIn("pick 1 to 2", text)
+
+
+class BannerTests(unittest.TestCase):
+    def test_it_falls_back_to_plain_text_on_a_narrow_terminal(self):
+        with mock.patch.object(ui, "width", return_value=30):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                ui.banner("HAKIM", "subtitle")
+        text = output.getvalue()
+        self.assertIn("HAKIM", text)
+        self.assertNotIn("###", text)
+
+    def test_it_draws_letters_when_there_is_room(self):
+        with mock.patch.object(ui, "width", return_value=100):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                ui.banner("HAKIM")
+        text = output.getvalue()
+        self.assertEqual(len(text.strip().splitlines()), 5)
+
+    def test_it_uses_ascii_when_the_console_cannot_encode_blocks(self):
+        """cmd.exe with a legacy code page cannot print a block character, and
+        a UnicodeEncodeError would be an absurd way for setup to die."""
+        with mock.patch.object(ui, "width", return_value=100), mock.patch.object(
+            ui, "_can_encode", return_value=False
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                ui.banner("HAKIM")
+        self.assertIn("#", output.getvalue())
+        self.assertNotIn("\u2588", output.getvalue())
+
+
 class ProgressTests(unittest.TestCase):
     """The bar, and what it does when nothing can be redrawn."""
 
@@ -198,7 +285,19 @@ class StepsTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             steps.start(1)
-        self.assertIn("[2/2]", output.getvalue())
+        text = output.getvalue()
+        self.assertIn("2/2", text)
+        self.assertIn("Two", text)
+
+    def test_the_progress_bar_fills_as_the_steps_pass(self):
+        """The header carries a bar so the shape of the run is visible
+        without counting the numbers."""
+        steps = ui.Steps(["a", "b", "c", "d"])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            steps.start(1)
+        plain = re.sub(r"\[[0-9;]*m", "", output.getvalue())
+        self.assertIn("==--", plain)
 
 
 class ColourTests(unittest.TestCase):

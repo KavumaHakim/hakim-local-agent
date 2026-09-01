@@ -105,7 +105,7 @@ def check_python() -> bool:
 
 def make_venv() -> bool:
     if venv_python().is_file():
-        ui.ok("already there")
+        ui.ok("already made, reusing it")
         ui.note(str(VENV))
         return True
     with ui.Spinner("creating .venv"):
@@ -209,7 +209,7 @@ def _download_progress(label: str, total: int):
 def check_llama_server(*, download: bool) -> bool:
     existing = find_llama_server()
     if existing is not None:
-        ui.ok("already here")
+        ui.ok("you already have one")
         ui.note(str(existing))
         return True
 
@@ -240,10 +240,10 @@ def check_weights() -> bool:
             ui.ok(f"{path.name} {ui.DIM}({path.stat().st_size / 1e9:.1f} GB){ui.RESET}")
         return True
 
-    ui.warn("no .gguf files yet - this is the one thing you supply")
-    ui.note("Any GGUF works; it is sized from its own header when discovered.")
-    ui.note("On 8 GB of RAM, a 2-3B instruct model at Q4_K_M is the place to start.")
-    ui.note("See 'Choosing a model for your hardware' in the README.")
+    ui.warn("nothing here yet - a model is the one thing you choose yourself")
+    ui.note("Any .gguf works. Drop one in and it is measured automatically.")
+    ui.note("On 8 GB of RAM, start with a 2-3B instruct model at Q4_K_M.")
+    ui.note("The README explains why, under 'Choosing a model'.")
     return False
 
 
@@ -256,7 +256,7 @@ def make_env_file() -> None:
     """
     target = ROOT / ".env"
     if target.is_file():
-        ui.ok(".env is already there, leaving it alone")
+        ui.ok("you already have a .env - left exactly as it was")
         return
 
     example = ROOT / ".env.example"
@@ -265,8 +265,8 @@ def make_env_file() -> None:
         return
 
     shutil.copyfile(example, target)
-    ui.ok("copied .env.example to .env")
-    ui.note("no keys needed to run locally")
+    ui.ok("made a .env from the example")
+    ui.note("no API keys needed - everything runs locally without them")
 
 
 def verify() -> bool:
@@ -296,37 +296,38 @@ def plan(arguments) -> dict:
         return choices
 
     ui.say(
-        f"\n  This installs into {ui.BOLD}.venv{ui.RESET} inside the project "
-        f"and touches nothing else."
+        f"\n  Everything goes in {ui.BOLD}.venv{ui.RESET} inside this folder. "
+        f"Nothing else on your\n  machine is touched, and deleting the folder "
+        f"undoes all of it."
     )
 
     options = [
         {
-            "label": "Download llama.cpp (about 18 MB)",
-            "note": "The engine that runs the models. Skip if you already have one.",
+            "label": "Get llama.cpp for me",
+            "note": "18 MB. It is the engine that actually runs your models.",
             "on": choices["llama"],
             "key": "llama",
         },
         {
-            "label": "Document search (torch, about 2 GB)",
-            "note": "Semantic search over your own files. Slow to install; optional.",
+            "label": "Let it search my documents",
+            "note": "2 GB and slow to install. You can add this later.",
             "on": choices["rag"],
             "key": "rag",
         },
         {
-            "label": "Build the web UI for production",
-            "note": "Otherwise it runs in development mode, which is what most want.",
+            "label": "Build the web interface for production",
+            "note": "Most people want the development mode instead. Leave this off.",
             "on": choices["web_build"],
             "key": "web_build",
         },
         {
-            "label": "Run the tests at the end",
-            "note": "About a minute, and it is how you know the install is sound.",
+            "label": "Check it works when you are done",
+            "note": "Runs the tests. About a minute, and worth it.",
             "on": choices["tests"],
             "key": "tests",
         },
     ]
-    for item in ui.toggle("Optional pieces", options):
+    for item in ui.toggle("What would you like?", options):
         choices[item["key"]] = item["on"]
     return choices
 
@@ -337,45 +338,50 @@ def summary(*, llama: bool, weights: bool) -> None:
         r".venv\Scripts\activate" if os.name == "nt" else "source .venv/bin/activate"
     )
 
+    ui.say()
     ui.rule()
     if llama and weights:
-        ui.say(f"\n  {ui.GREEN}{ui.BOLD}Ready.{ui.RESET} Start it with:\n")
-        ui.say(f"      {ui.BOLD}{launcher}{ui.RESET}")
+        ui.say(f"\n  {ui.GREEN}{ui.BOLD}All set.{ui.RESET} Start it whenever you like:\n")
+        ui.say(f"      {ui.ACCENT}{ui.BOLD}{launcher}{ui.RESET}")
     elif llama and not weights:
-        ui.say(f"\n  {ui.BOLD}Installed. One thing left: a model.{ui.RESET}\n")
-        ui.say(f"  Drop any .gguf into {ui.BOLD}weights/{ui.RESET} and it is picked up")
-        ui.say("  automatically - no configuration, it is sized from its own header.")
-        ui.say(f"\n  {ui.DIM}https://huggingface.co/models?library=gguf{ui.RESET}")
-        ui.say(f"\n  Then: {ui.BOLD}{launcher}{ui.RESET}")
+        ui.say(f"\n  {ui.BOLD}Almost there - it just needs a model.{ui.RESET}\n")
+        ui.say(f"  Put any {ui.BOLD}.gguf{ui.RESET} file into {ui.BOLD}weights/{ui.RESET} "
+               f"and it will be found on its own.")
+        ui.say("  Nothing to configure: the size and context are read from the")
+        ui.say("  file itself.")
+        ui.say(f"\n  {ui.DIM}Not sure which one? The README has a section called{ui.RESET}")
+        ui.say(f"  {ui.DIM}'Choosing a model for your hardware' with the arithmetic.{ui.RESET}")
+        ui.say(f"\n  Then:  {ui.ACCENT}{ui.BOLD}{launcher}{ui.RESET}")
     else:
-        ui.say(f"\n  {ui.BOLD}Installed, but a local model cannot start yet.{ui.RESET}")
+        ui.say(f"\n  {ui.BOLD}Installed, but it cannot run a model yet.{ui.RESET}\n")
         if not llama:
-            ui.say("    - llama-server is missing (see above)")
+            ui.say("    llama.cpp is missing - see the note further up")
         if not weights:
-            ui.say("    - there are no .gguf files in weights/")
-        ui.say("\n  Fix those and run this again to check.")
+            ui.say("    there is no .gguf file in weights/")
+        ui.say("\n  Sort those out and run this again; it will pick up where it")
+        ui.say("  left off and tell you what is still needed.")
 
-    ui.say(f"\n  {ui.DIM}By hand, in two terminals:{ui.RESET}")
+    ui.say(f"\n  {ui.DIM}If you would rather start it by hand, in two terminals:{ui.RESET}")
     ui.note(activate)
     ui.note("python -m uvicorn api.main:app --host 127.0.0.1 --port 8000")
     ui.note("npm --prefix web run dev")
-    ui.say(f"\n  {ui.DIM}Terminal client instead of the web UI:{ui.RESET}")
+    ui.say(f"\n  {ui.DIM}Or skip the browser entirely:{ui.RESET}")
     ui.note("python main.py")
     ui.say()
 
 
 def step_names(choices: dict) -> list[str]:
     names = [
-        "Checking Python",
-        "Creating the virtualenv",
-        "Python dependencies",
-        "Front end",
-        "llama.cpp" if choices["llama"] else "Looking for llama.cpp",
-        "Model weights",
-        "Configuration",
+        "Checking your Python",
+        "Making a private environment",
+        "Installing the Python side",
+        "Installing the web interface",
+        "Fetching llama.cpp" if choices["llama"] else "Looking for llama.cpp",
+        "Looking for a model",
+        "Writing your configuration",
     ]
     if choices["tests"]:
-        names.append("Verifying")
+        names.append("Making sure it all works")
     return names
 
 
@@ -409,9 +415,9 @@ def main() -> int:
     )
     arguments = parser.parse_args()
 
+    ui.banner("HAKIM", "a local agent that runs on your own machine")
     ui.say()
-    ui.say(f"  {ui.BOLD}Hakim AI System{ui.RESET} {ui.DIM}- setup{ui.RESET}")
-    ui.note(str(ROOT))
+    ui.say(f"  {ui.DIM}{ROOT}{ui.RESET}")
 
     try:
         choices = plan(arguments)

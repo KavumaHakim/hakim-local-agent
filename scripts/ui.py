@@ -83,6 +83,23 @@ def _colour_ok() -> bool:
 COLOUR = _colour_ok()
 
 
+def _rich() -> bool:
+    """Whether 256 colours are available, rather than the basic eight.
+
+    The web UI uses a violet accent and this borrows it, but violet is not one
+    of the eight colours every terminal has. Where it is unavailable the
+    accent falls back to cyan rather than to something approximate.
+    """
+    if not COLOUR:
+        return False
+    if os.environ.get("COLORTERM", "") in ("truecolor", "24bit"):
+        return True
+    return "256color" in os.environ.get("TERM", "")
+
+
+RICH = _rich()
+
+
 def _code(value: str) -> str:
     return value if COLOUR else ""
 
@@ -95,12 +112,81 @@ YELLOW = _code("\033[33m")
 RED = _code("\033[31m")
 CYAN = _code("\033[36m")
 
+# The accent, matching the front end's violet where the terminal has it.
+ACCENT = _code("\033[38;5;141m") if RICH else CYAN
+ACCENT_DIM = _code("\033[38;5;103m") if RICH else CYAN
+
+
+def _can_encode(text: str) -> bool:
+    """Whether stdout can actually print this.
+
+    cmd.exe with a legacy code page cannot render block characters, and a
+    UnicodeEncodeError would be an absurd way for a setup script to fail. So
+    the banner asks first and falls back to ASCII.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+# H A K I M, five rows. Hand-set rather than pulled from a figlet font,
+# because one word is not worth a font file and a parser for it.
+_LETTERS = {
+    "H": ("##   ##", "##   ##", "#######", "##   ##", "##   ##"),
+    "A": (" ##### ", "##   ##", "#######", "##   ##", "##   ##"),
+    "K": ("##  ## ", "## ##  ", "#####  ", "## ##  ", "##  ## "),
+    "I": ("##", "##", "##", "##", "##"),
+    "M": ("###   ###", "#### ####", "## ### ##", "##  #  ##", "##     ##"),
+}
+
+
+def banner(word: str = "HAKIM", subtitle: str = "") -> None:
+    """Big letters, when there is room and the terminal can draw them.
+
+    Falls back to the plain name on a narrow terminal or a console that cannot
+    encode the blocks - a banner is decoration, and decoration that breaks the
+    thing it decorates is worse than none.
+    """
+    rows = ["  ".join(_LETTERS[letter][row] for letter in word) for row in range(5)]
+    solid = [row.replace("#", "\u2588") for row in rows]
+
+    if _can_encode("\u2588"):
+        rows = solid
+
+    if max(len(row) for row in rows) + 4 > width():
+        say(f"\n  {BOLD}{word}{RESET}")
+        if subtitle:
+            say(f"  {DIM}{subtitle}{RESET}")
+        return
+
+    say()
+    for row in rows:
+        say(f"  {ACCENT}{row}{RESET}")
+    if subtitle:
+        say(f"  {DIM}{subtitle}{RESET}")
+
 
 def width(default: int = 80) -> int:
     try:
         return max(40, min(shutil.get_terminal_size((default, 24)).columns, 100))
     except Exception:  # noqa: BLE001
         return default
+
+
+def erase(lines: int) -> None:
+    """Move up `lines` and clear everything below, ready to redraw.
+
+    What makes a menu feel like one control rather than a transcript of every
+    time you pressed a key. Only in a terminal - anywhere else the previous
+    draw is already scrolled away in a log file and cannot be taken back.
+    """
+    if lines <= 0 or not fancy():
+        return
+    sys.stdout.write(f"\033[{lines}A\033[J")
+    sys.stdout.flush()
 
 
 # --- plain output ---------------------------------------------------------
@@ -155,16 +241,20 @@ class Steps:
         self.current = -1
 
     def show(self) -> None:
-        heading("This is what will happen")
+        heading("Here is the plan")
         for index, name in enumerate(self.names, start=1):
-            say(f"  {DIM}{index}.{RESET} {name}")
+            say(f"   {DIM}{index}.{RESET} {name}")
         say()
 
     def start(self, index: int) -> None:
         self.current = index
         label = self.names[index]
+        bar = "".join(
+            f"{ACCENT}={RESET}" if position <= index else f"{DIM}-{RESET}"
+            for position in range(len(self.names))
+        )
         say(
-            f"\n{BOLD}{CYAN}[{index + 1}/{len(self.names)}]{RESET} "
+            f"\n{bar}  {ACCENT}{BOLD}{index + 1}/{len(self.names)}{RESET} "
             f"{BOLD}{label}{RESET}"
         )
 
@@ -218,7 +308,7 @@ class Spinner:
                 return
             seconds = int(self.elapsed)
             clock = f"{seconds // 60}m{seconds % 60:02d}s" if seconds >= 60 else f"{seconds}s"
-            sys.stdout.write(f"\r  {CYAN}{frame}{RESET} {self.label} {DIM}({clock}){RESET}   ")
+            sys.stdout.write(f"\r  {ACCENT}{frame}{RESET} {self.label} {DIM}({clock}){RESET}   ")
             sys.stdout.flush()
             time.sleep(0.12)
 
@@ -272,7 +362,7 @@ class Progress:
         filled = int(cells * fraction)
         bar = "#" * filled + "." * (cells - filled)
         sys.stdout.write(
-            f"\r  {self.label} {CYAN}[{bar}]{RESET} {int(fraction * 100):3d}% "
+            f"\r  {self.label} {ACCENT}[{bar}]{RESET} {int(fraction * 100):3d}% "
             f"{DIM}{megabytes} {speed}{RESET}  "
         )
         sys.stdout.flush()
@@ -330,7 +420,7 @@ def choose(title: str, options: list[tuple[str, str]], *, default: int = 0) -> i
     say(f"\n  {BOLD}{title}{RESET}")
     for index, (label, explanation) in enumerate(options, start=1):
         marker = "*" if index - 1 == default else " "
-        say(f"   {marker} {CYAN}{index}{RESET}) {label}")
+        say(f"   {marker} {ACCENT}{index}{RESET}) {label}")
         if explanation:
             note(explanation)
 
@@ -344,32 +434,57 @@ def choose(title: str, options: list[tuple[str, str]], *, default: int = 0) -> i
 
 
 def toggle(title: str, items: list[dict], *, assume: bool = False) -> list[dict]:
-    """A checklist the user can flip entries on and off in.
+    """A checklist you can flip entries on and off in, redrawn in place.
 
-    Each item is {"label", "note", "on"}. Numbers toggle, empty input accepts.
+    Each item is {"label", "note", "on"}. Numbers toggle, Enter accepts.
     Returns the same list, with "on" updated.
+
+    The redraw is what makes this feel like one control rather than a
+    transcript of every key you pressed. Where the terminal cannot move the
+    cursor it simply prints again, which is worse-looking and just as usable.
     """
     if assume or not interactive():
         return items
 
-    while True:
-        say(f"\n  {BOLD}{title}{RESET}")
-        for index, item in enumerate(items, start=1):
-            box = f"{GREEN}[x]{RESET}" if item["on"] else "[ ]"
-            say(f"   {box} {CYAN}{index}{RESET}) {item['label']}")
-            if item.get("note"):
-                note(item["note"])
+    drawn = 0
+    complaint = ""
 
-        answer = _read(
-            f"  Number to toggle, or Enter to continue {DIM}[continue]{RESET} "
+    while True:
+        erase(drawn)
+        lines = [f"  {BOLD}{title}{RESET}", ""]
+        for index, item in enumerate(items, start=1):
+            if item["on"]:
+                box = f"{GREEN}[+]{RESET}"
+                label = item["label"]
+            else:
+                box = f"{DIM}[ ]{RESET}"
+                label = f"{DIM}{item['label']}{RESET}"
+            lines.append(f"   {box} {ACCENT}{index}{RESET}  {label}")
+            if item.get("note"):
+                lines.append(f"          {DIM}{item['note']}{RESET}")
+        lines.append("")
+        if complaint:
+            lines.append(f"  {YELLOW}{complaint}{RESET}")
+
+        for line in lines:
+            say(line)
+
+        prompt = (
+            f"  {DIM}number to change one, Enter when it looks right{RESET}  "
+            f"{ACCENT}>{RESET} "
         )
+        answer = _read(prompt)
+        # The lines just printed, plus the prompt line the Enter ended.
+        drawn = len(lines) + 1
+
         if not answer:
+            erase(drawn)
             return items
         if answer.isdigit() and 1 <= int(answer) <= len(items):
-            chosen = items[int(answer) - 1]
-            chosen["on"] = not chosen["on"]
+            items[int(answer) - 1]["on"] = not items[int(answer) - 1]["on"]
+            complaint = ""
             continue
-        warn(f"Enter a number between 1 and {len(items)}, or press Enter.")
+        complaint = f"That is not one of them - pick 1 to {len(items)}, or press Enter."
 
 
 def ask_text(question: str, *, default: str = "") -> str:
