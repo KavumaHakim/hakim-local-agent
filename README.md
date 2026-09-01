@@ -394,10 +394,39 @@ guess:
   a `llama-server`, and that binary must answer `--version`. That is weaker
   than a signature, and it is said here rather than implied.
 
-Where it looks, in order: the `server_exe` in `models.json` if that path
-exists, then `vendor/llama/`, then `PATH`. So a checkout works without editing
-a path someone else committed, and a build you downloaded deliberately is not
-quietly overridden by a stale one on `PATH`. To point it somewhere else:
+**If you already have one somewhere**, setup asks rather than downloading a
+second copy:
+
+```
+  [!]  I could not find llama.cpp on this machine.
+
+  What would you like to do?
+   * 1) Download it for me
+        About 18 MB, straight from the project.
+     2) I already have it
+        Tell me where, and I will remember.
+     3) Skip for now
+        Nothing local will run until it is sorted.
+```
+
+Point it at the binary *or* the folder containing it — both work — and it is
+checked by running `--version` before being believed. The path is then written
+to `data/models.local.json`, which is git-ignored, **not** to `models.json`,
+which is in version control: a path from one laptop is wrong on every other
+machine.
+
+Where it looks, in order:
+
+| | Where | Why it is in this position |
+|---|---|---|
+| 1 | `server_exe` in `data/models.local.json` | You said so. Nothing should second-guess that |
+| 2 | `server_exe` in `models.json` | The committed default, when it happens to exist |
+| 3 | `vendor/llama/` | What setup downloaded |
+| 4 | `PATH` | Whatever else is around |
+
+A remembered path that has since been deleted is ignored rather than honoured,
+so removing the binary falls back to the search instead of failing. To point it
+somewhere else by hand:
 
 ```json
 { "server_exe": "../llama.cpp/llama-server", "models_dir": "weights" }
@@ -417,8 +446,27 @@ point. For the arithmetic behind that, and what fits on other machines, see
 [Choosing a model for your hardware](#choosing-a-model-for-your-hardware).
 
 **6. Optional: API keys.** Only for hosted models; the agent is fully local
-without them. `cp .env.example .env` and fill in what you need — `.env.example`
-lists every variable with no values, and `.env` is git-ignored.
+without them. Setup offers to take them:
+
+```
+  These are optional. Everything works locally without them;
+  a key just makes that provider's model selectable too.
+
+  Add a hosted model API key? [y/N] y
+  Gemini 3.5 Flash (GEMINI_API_KEY) (hidden, Enter to skip) >
+```
+
+Typed with **no echo** — an API key pasted in the open stays in the terminal
+buffer, the scrollback and any screen recording — and never printed back
+afterwards, not even the last few characters. They are written to `.env`,
+replacing the commented placeholder rather than being appended below it, and
+`.env` is git-ignored.
+
+Which providers are offered comes from `models.json`, so adding a hosted entry
+there is enough for setup to start asking about its key. A key already set, in
+`.env` or in the environment, is not asked for again.
+
+By hand it is `cp .env.example .env` and fill in what you need.
 
 **7. Check it.**
 
@@ -426,7 +474,7 @@ lists every variable with no values, and `.env` is git-ignored.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-955 tests, no model server needed, and none of them touch the network.
+966 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -619,7 +667,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               955 tests, no server required
+└── tests/               966 tests, no server required
 ```
 
 ---
@@ -2300,7 +2348,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**955 tests, no model server needed, and none of them touch the network.**
+**966 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2451,7 +2499,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 955 tests
+- 966 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

@@ -206,6 +206,76 @@ def _download_progress(label: str, total: int):
     return ui.Progress(label, total)
 
 
+def remember_server(path: Path) -> None:
+    """Write a llama-server path into the machine's own preferences.
+
+    Not into models.json: that file is in version control, and a path from
+    somebody's laptop is wrong on every other machine. data/models.local.json
+    is git-ignored and already the place the app keeps per-machine choices.
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        from models.preferences import ModelPreferences
+
+        preferences = ModelPreferences.load(ROOT / "data")
+        preferences.set_server_exe(str(path))
+    except Exception as exc:  # noqa: BLE001 - remembering is a convenience
+        ui.warn(f"could not save the path ({exc}); it will still work this time")
+
+
+def verify_server(path: Path) -> str:
+    """Check a path really is a llama-server before believing it."""
+    if not path.exists():
+        raise ValueError(f"there is nothing at {path}")
+    if path.is_dir():
+        # People paste the folder more often than the binary.
+        for name in ("llama-server.exe", "llama-server"):
+            for found in sorted(path.rglob(name)):
+                if found.is_file():
+                    path = found
+                    break
+            else:
+                continue
+            break
+        else:
+            raise ValueError(f"no llama-server anywhere under {path}")
+    if not path.is_file():
+        raise ValueError(f"{path} is not a file")
+
+    try:
+        import get_llama
+
+        version = get_llama.verify(path)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"{path.name} would not run: {exc}") from None
+    return version
+
+
+def ask_for_server() -> Path | None:
+    """Let someone point at a llama-server they already have."""
+    while True:
+        typed = ui.ask_text("Where is it? (blank to give up)")
+        if not typed:
+            return None
+        candidate = Path(typed.strip().strip('"').strip("'")).expanduser()
+        try:
+            verify_server(candidate)
+        except ValueError as exc:
+            ui.warn(str(exc))
+            continue
+
+        if candidate.is_dir():
+            for name in ("llama-server.exe", "llama-server"):
+                for found in sorted(candidate.rglob(name)):
+                    if found.is_file():
+                        candidate = found
+                        break
+                else:
+                    continue
+                break
+        return candidate
+
+
 def check_llama_server(*, download: bool) -> bool:
     existing = find_llama_server()
     if existing is not None:
@@ -214,9 +284,42 @@ def check_llama_server(*, download: bool) -> bool:
         return True
 
     if not download:
+        # Still worth asking where it is - "do not download" is not the same
+        # as "do not help".
+        if ui.interactive():
+            ui.warn("I could not find llama.cpp anywhere.")
+            chosen = ask_for_server()
+            if chosen is not None:
+                remember_server(chosen)
+                ui.ok(str(chosen))
+                ui.note("remembered in data/models.local.json")
+                return True
         ui.warn("not installed, and it was not asked for.")
         ui.note("https://github.com/ggml-org/llama.cpp/releases")
         return False
+
+    if ui.interactive():
+        ui.warn("I could not find llama.cpp on this machine.")
+        pick = ui.choose(
+            "What would you like to do?",
+            [
+                ("Download it for me", "About 18 MB, straight from the project."),
+                ("I already have it", "Tell me where, and I will remember."),
+                ("Skip for now", "Nothing local will run until it is sorted."),
+            ],
+        )
+        if pick == 1:
+            chosen = ask_for_server()
+            if chosen is not None:
+                remember_server(chosen)
+                ui.ok(str(chosen))
+                ui.note("remembered in data/models.local.json")
+                return True
+            ui.note("nothing given, so nothing was changed")
+            return False
+        if pick == 2:
+            ui.note("https://github.com/ggml-org/llama.cpp/releases")
+            return False
 
     try:
         import get_llama
@@ -267,6 +370,105 @@ def make_env_file() -> None:
     shutil.copyfile(example, target)
     ui.ok("made a .env from the example")
     ui.note("no API keys needed - everything runs locally without them")
+
+
+# The hosted models this project ships an entry for, and the variable each
+# one's key lives in. Read from models.json rather than hard-coded, so adding
+# a provider there is enough to have setup ask about it.
+def hosted_providers() -> list[tuple[str, str]]:
+    """(label, environment variable) for each hosted model with a key name."""
+    registry = ROOT / "models.json"
+    try:
+        raw = json.loads(registry.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+    found = []
+    for entry in raw.get("models", []):
+        variable = entry.get("api_key_env")
+        if variable:
+            found.append((entry.get("label") or entry.get("key", variable), variable))
+    return found
+
+
+def existing_keys() -> set[str]:
+    """Variables already answered, in the environment or in .env."""
+    answered = {name for name in os.environ if os.environ.get(name)}
+    target = ROOT / ".env"
+    if target.is_file():
+        for line in target.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            if value.strip():
+                answered.add(name.strip())
+    return answered
+
+
+def write_key(variable: str, value: str) -> None:
+    """Put one key into .env, replacing any commented placeholder for it."""
+    target = ROOT / ".env"
+    lines = (
+        target.read_text(encoding="utf-8").splitlines()
+        if target.is_file()
+        else []
+    )
+
+    replaced = False
+    for index, line in enumerate(lines):
+        stripped = line.strip().lstrip("#").strip()
+        if stripped.startswith(f"{variable}="):
+            lines[index] = f"{variable}={value}"
+            replaced = True
+            break
+    if not replaced:
+        lines.append(f"{variable}={value}")
+
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def ask_for_keys(*, ask: bool) -> None:
+    """Offer to save hosted-model API keys.
+
+    Entirely optional: the agent is fully local without any of them, which is
+    said out loud because a setup script asking for API keys otherwise reads
+    like something is required that is not.
+
+    Keys are read without echo and never printed back - not even partially.
+    They go into .env, which is git-ignored.
+    """
+    providers = hosted_providers()
+    if not providers or not ask or not ui.interactive():
+        return
+
+    already = existing_keys()
+    wanted = [(label, name) for label, name in providers if name not in already]
+    if not wanted:
+        ui.ok("hosted model keys are already set")
+        return
+
+    ui.say(
+        f"\n  {ui.DIM}These are optional. Everything works locally without "
+        f"them;{ui.RESET}"
+    )
+    ui.say(
+        f"  {ui.DIM}a key just makes that provider's model selectable too."
+        f"{ui.RESET}"
+    )
+
+    if not ui.confirm("Add a hosted model API key?", default=False):
+        ui.note("skipped - you can add them to .env whenever you like")
+        return
+
+    for label, variable in wanted:
+        value = ui.ask_secret(f"{label} ({variable})")
+        if not value:
+            ui.note(f"{variable} left empty")
+            continue
+        write_key(variable, value)
+        # Deliberately not echoed, not even the last few characters.
+        ui.ok(f"{variable} saved to .env")
 
 
 def verify() -> bool:
@@ -462,6 +664,7 @@ def main() -> int:
 
         advance()
         make_env_file()
+        ask_for_keys(ask=not arguments.yes)
 
         if choices["tests"]:
             advance()

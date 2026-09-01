@@ -487,6 +487,38 @@ def toggle(title: str, items: list[dict], *, assume: bool = False) -> list[dict]
         complaint = f"That is not one of them - pick 1 to {len(items)}, or press Enter."
 
 
+def ask_secret(question: str) -> str:
+    """Read something that must not appear on screen or in scrollback.
+
+    getpass rather than input: an API key pasted into a terminal stays in the
+    buffer, in the scrollback, and in any screen recording. It is also never
+    echoed back afterwards, not even the last few characters - a partial key
+    in a log is still more of one than belongs there.
+
+    Falls back to a plain read where getpass cannot suppress echo, saying so
+    first, because silently echoing a secret someone believed was hidden is
+    worse than asking for it in the open.
+    """
+    if not interactive():
+        return ""
+
+    import getpass
+
+    prompt = f"  {question}{DIM} (hidden, Enter to skip){RESET} {ACCENT}>{RESET} "
+    try:
+        return getpass.getpass(prompt).strip()
+    except (getpass.GetPassWarning, OSError):
+        warn("This terminal cannot hide what you type.")
+        try:
+            return input(f"  {question} > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            say()
+            return ""
+    except (EOFError, KeyboardInterrupt):
+        say()
+        return ""
+
+
 def ask_text(question: str, *, default: str = "") -> str:
     if not interactive():
         return default

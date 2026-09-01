@@ -411,6 +411,17 @@ def load_registry(
             DEFAULT_PREFERENCES_DIR if path == DEFAULT_REGISTRY else path.parent
         )
     preferences = ModelPreferences.load(preferences_dir)
+
+    # A remembered path wins over everything the search would guess at. It is
+    # only ever there because somebody typed it in, and a person who has said
+    # where their llama-server is should not be second-guessed by a stale one
+    # on PATH. A path that has since gone is ignored rather than honoured, so
+    # deleting the binary falls back to the search instead of failing.
+    chosen_server = find_server(raw.get("server_exe", ""))
+    if preferences.server_exe:
+        remembered = Path(preferences.server_exe).expanduser()
+        if remembered.is_file():
+            chosen_server = remembered
     for key, values in preferences.overrides.items():
         spec = specs.get(key)
         if spec is None:
@@ -470,7 +481,7 @@ def load_registry(
         return chosen if chosen in offered else fallback
 
     return {
-        "server_exe": find_server(raw.get("server_exe", "")),
+        "server_exe": chosen_server,
         "specs": specs,
         "offered": offered,
         "default": fallback,

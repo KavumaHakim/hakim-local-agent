@@ -66,6 +66,11 @@ class ModelPreferences:
     # prompt keys off. Separate from `primary` being empty so that choosing
     # and then clearing is not mistaken for a fresh install.
     setup_complete: bool = False
+    # Where this machine's llama-server is, when it is somewhere the search
+    # would not find on its own. Kept here rather than in models.json because
+    # it is a property of one computer, and models.json is in version control -
+    # a path committed from someone's laptop is wrong on every other machine.
+    server_exe: str = ""
 
     # --- loading and saving ---
 
@@ -101,6 +106,7 @@ class ModelPreferences:
             overrides=overrides,
             hidden=[str(key) for key in (raw.get("hidden") or []) if key],
             setup_complete=bool(raw.get("setup_complete", False)),
+            server_exe=str(raw.get("server_exe", "") or ""),
         )
 
     def save(self) -> None:
@@ -118,6 +124,7 @@ class ModelPreferences:
                 "is models.json; this layers on top of it."
             ),
             "primary": self.primary,
+            "server_exe": self.server_exe,
             "router": {"fast": self.router_fast, "strong": self.router_strong},
             "overrides": self.overrides,
             "hidden": self.hidden,
@@ -138,6 +145,11 @@ class ModelPreferences:
             raise
 
     # --- changing them ---
+
+    def set_server_exe(self, path: str) -> None:
+        """Remember where llama-server is on this machine. "" forgets it."""
+        self.server_exe = str(path or "")
+        self.save()
 
     def set_primary(self, key: str) -> None:
         """Choose the model everything defaults to.

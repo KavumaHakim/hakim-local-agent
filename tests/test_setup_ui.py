@@ -317,5 +317,152 @@ class ColourTests(unittest.TestCase):
             self.assertFalse(ui.fancy())
 
 
+class ServerPathTests(unittest.TestCase):
+    """Remembering where somebody's llama-server actually is."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+    def a_server_at(self, *parts: str) -> Path:
+        path = self.tmp.joinpath(*parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("binary", encoding="utf-8")
+        return path
+
+    def registry_pointing_nowhere(self) -> Path:
+        import json
+
+        source = json.loads(
+            (Path(__file__).resolve().parent.parent / "models.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        source["server_exe"] = "../nowhere/llama-server.exe"
+        path = self.tmp / "models.json"
+        path.write_text(json.dumps(source), encoding="utf-8")
+        return path
+
+    def test_a_remembered_path_beats_the_search(self):
+        """Someone who has said where theirs is should not be second-guessed
+        by a stale binary on PATH."""
+        from models.manager import load_registry
+        from models.preferences import ModelPreferences
+
+        server = self.a_server_at("odd", "place", "llama-server.exe")
+        ModelPreferences.load(self.tmp).set_server_exe(str(server))
+
+        registry = load_registry(
+            self.registry_pointing_nowhere(), preferences_dir=self.tmp
+        )
+        self.assertEqual(Path(registry["server_exe"]), server)
+
+    def test_a_remembered_path_that_has_gone_is_ignored(self):
+        """Deleting the binary should fall back to the search, not fail."""
+        from models.manager import load_registry
+        from models.preferences import ModelPreferences
+
+        server = self.a_server_at("odd", "llama-server.exe")
+        ModelPreferences.load(self.tmp).set_server_exe(str(server))
+        server.unlink()
+
+        registry = load_registry(
+            self.registry_pointing_nowhere(), preferences_dir=self.tmp
+        )
+        self.assertNotEqual(Path(registry["server_exe"]), server)
+
+    def test_it_survives_being_written_and_read_back(self):
+        from models.preferences import ModelPreferences
+
+        ModelPreferences.load(self.tmp).set_server_exe(r"C:\tools\llama-server.exe")
+        again = ModelPreferences.load(self.tmp)
+        self.assertEqual(again.server_exe, r"C:\tools\llama-server.exe")
+
+    def test_it_is_kept_out_of_version_control(self):
+        """models.json is committed, so a path from one laptop would be wrong
+        on every other machine."""
+        from models.preferences import ModelPreferences
+
+        ModelPreferences.load(self.tmp).set_server_exe("/opt/llama-server")
+        self.assertTrue((self.tmp / "models.local.json").is_file())
+        registry = Path(__file__).resolve().parent.parent / "models.json"
+        self.assertNotIn("/opt/llama-server", registry.read_text(encoding="utf-8"))
+
+
+class ApiKeyTests(unittest.TestCase):
+    """Saving hosted-model keys into .env, without ever printing one."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        (self.tmp / ".env").write_text(
+            "# comment\n# GEMINI_API_KEY=\n# CEREBRAS_API_KEY=\n", encoding="utf-8"
+        )
+
+        import setup as setup_script
+
+        self.setup = setup_script
+        patch = mock.patch.object(setup_script, "ROOT", self.tmp)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def env(self) -> str:
+        return (self.tmp / ".env").read_text(encoding="utf-8")
+
+    def test_a_key_replaces_its_commented_placeholder(self):
+        """Appending instead would leave the example line above the real one,
+        which reads as though the key is still unset."""
+        self.setup.write_key("GEMINI_API_KEY", "abc123")
+        self.assertIn("GEMINI_API_KEY=abc123", self.env())
+        self.assertNotIn("# GEMINI_API_KEY=", self.env())
+
+    def test_writing_twice_does_not_duplicate_the_line(self):
+        self.setup.write_key("GEMINI_API_KEY", "first")
+        self.setup.write_key("GEMINI_API_KEY", "second")
+        lines = [
+            line
+            for line in self.env().splitlines()
+            if line.startswith("GEMINI_API_KEY=")
+        ]
+        self.assertEqual(lines, ["GEMINI_API_KEY=second"])
+
+    def test_a_key_with_no_placeholder_is_appended(self):
+        self.setup.write_key("SOMETHING_NEW", "value")
+        self.assertIn("SOMETHING_NEW=value", self.env())
+
+    def test_an_answered_key_is_not_asked_for_again(self):
+        self.assertNotIn("GEMINI_API_KEY", self.setup.existing_keys())
+        self.setup.write_key("GEMINI_API_KEY", "abc")
+        self.assertIn("GEMINI_API_KEY", self.setup.existing_keys())
+
+    def test_a_commented_placeholder_does_not_count_as_answered(self):
+        """The example file ships with all of them commented out."""
+        self.assertNotIn("CEREBRAS_API_KEY", self.setup.existing_keys())
+
+    def test_nothing_is_asked_without_a_terminal(self):
+        with mock.patch.object(ui, "interactive", return_value=False):
+            with mock.patch.object(
+                ui, "ask_secret", side_effect=AssertionError("asked!")
+            ):
+                self.setup.ask_for_keys(ask=True)
+
+    def test_the_providers_come_from_the_registry(self):
+        """Adding one to models.json should be enough for setup to ask."""
+        with mock.patch.object(
+            self.setup, "ROOT", Path(__file__).resolve().parent.parent
+        ):
+            variables = [name for _, name in self.setup.hosted_providers()]
+        self.assertIn("GEMINI_API_KEY", variables)
+        self.assertIn("CEREBRAS_API_KEY", variables)
+
+
 if __name__ == "__main__":
     unittest.main()
