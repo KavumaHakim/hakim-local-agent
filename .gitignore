@@ -18,9 +18,10 @@ __pycache__/
 *.apk
 
 # Secrets. The cloud providers need API keys, and this is a git repository now,
-# so the keys live in a file that can never be committed. There is deliberately
-# no .env.example with real-looking values in it either - only the variable
-# names, documented in the README.
+# so the keys live in a file that can never be committed. `.env.example` IS
+# committed, and carries variable names with no values - not even
+# plausible-looking placeholders, which are the thing most likely to be
+# committed by accident and then trusted.
 .env
 .env.*
 !.env.example

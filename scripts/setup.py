@@ -251,21 +251,25 @@ def check_weights() -> bool:
 
 
 def make_env_file() -> None:
+    """Put a .env in place, from the committed example.
+
+    Copied rather than generated, so there is one description of the settings
+    instead of two that drift. `.env.example` carries names and no values, so
+    copying it commits nothing and enables nothing.
+    """
     step("Checking .env")
     target = ROOT / ".env"
     if target.is_file():
         ok(".env is already there, leaving it alone")
         return
-    target.write_text(
-        "# API keys for hosted models. Git-ignored, and only read at startup.\n"
-        "# Leave this empty to stay entirely local - nothing here is required.\n"
-        "#\n"
-        "# The name of each key is set in models.json, under api_key_env.\n"
-        "# GEMINI_API_KEY=\n"
-        "# CEREBRAS_API_KEY=\n",
-        encoding="utf-8",
-    )
-    ok("wrote a commented .env - no keys needed to run locally")
+
+    example = ROOT / ".env.example"
+    if not example.is_file():
+        warn("no .env.example to copy; hosted models will need one by hand")
+        return
+
+    shutil.copyfile(example, target)
+    ok("copied .env.example to .env - no keys needed to run locally")
 
 
 def verify() -> bool:

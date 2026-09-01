@@ -343,11 +343,19 @@ directory, so the project folder can be renamed or moved without editing
 anything. That is not a style choice: they were absolute once, the folder was
 renamed, and the hardcoded path was the one thing that broke.
 
-**5. Get a model.** Drop any `.gguf` into `weights/` and it is picked up on the
-next scan — sized from its own GGUF header, no configuration needed. On 8 GB of
-RAM, a 2–3B instruct model quantised to Q4_K_M is the sensible starting point.
+**5. Get a model.** The one thing the setup script does not fetch for you.
+Drop any `.gguf` into `weights/` and it is picked up on the next scan — sized
+from its own GGUF header, no configuration needed.
 
-**6. Check it.**
+On 8 GB of RAM, a 2–3B instruct model at `Q4_K_M` is the sensible starting
+point. For the arithmetic behind that, and what fits on other machines, see
+[Choosing a model for your hardware](#choosing-a-model-for-your-hardware).
+
+**6. Optional: API keys.** Only for hosted models; the agent is fully local
+without them. `cp .env.example .env` and fill in what you need — `.env.example`
+lists every variable with no values, and `.env` is git-ignored.
+
+**7. Check it.**
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -t .
@@ -757,6 +765,94 @@ weights/
 > package (`models/manager.py`, `models/qwen.py`). A data directory with that
 > name would shadow it on the import path. `models_dir` in `models.json` moves
 > it anywhere you like, including another drive.
+
+### Choosing a model for your hardware
+
+The one decision setup leaves to you, so here is the arithmetic behind it.
+
+**What a model actually costs in RAM.** This is the formula
+`models/discovery.py` uses on every dropped-in `.gguf`, and it is measured
+rather than guessed:
+
+```
+free RAM needed  =  file size x 0.8        resident weights
+                 +  KV cache               grows with context
+                 +  250 MB                 headroom for everything else
+                 +  50% of the weights     only when weights exceed 3 GB
+```
+
+The **0.8** comes from watching GLM-OCR: a 906 MB file occupies 683 MB
+resident, a ratio of 0.754, rounded up because under-estimating means letting
+a model start that then thrashes. The **50% surcharge** on large models exists
+because past about 3 GB a model stops fitting alongside the operating system,
+starts paging from disk, and the formula stops describing it.
+
+**Context is not free.** The KV cache is computed from the GGUF header —
+layers x KV heads x head dimension x 2 x bytes. For GLM-OCR that is 52,224
+bytes *per token*:
+
+| Context | KV cache |
+|---|---|
+| 2048 | 102 MB |
+| 4096 | 204 MB |
+| 8192 | 408 MB |
+| 16384 | 816 MB |
+
+Which is why chat models here run at 4096 rather than the 32k or 128k they
+were trained for. The ceiling is RAM, not the model.
+
+**The models on this machine**, as a worked example. 8 GB total, of which
+2–3 GB is realistically free:
+
+| Model | File | Context | Needs free | Verdict on 8 GB |
+|---|---|---|---|---|
+| Qwen3.5 2B XS `Q3_K_S` | 0.7 GB | 4096 | 900 MB | comfortable |
+| Qwen3.5 2B M `Q4_K_M` | 1.1 GB | 4096 | 1,150 MB | comfortable |
+| Ministral 3B `Q4_K_M` | 2.1 GB | 4096 | 1,900 MB | the day-to-day choice |
+| GLM-OCR `Q8_0` | 1.0 GB + 0.5 mmproj | 8192 | 1,150 MB | vision, on demand |
+| Qwen3 8B `Q4_K_M` | 5.0 GB | 4096 | 6,200 MB | **does not fit** — pages from disk |
+
+That last row is the honest one. The 8B model *runs*, and it was measured
+doing so: **~130 s to load, 3.7–5.5 tok/s prompt, 0.23–0.49 tok/s generation.**
+At a quarter of a token per second it is four seconds a word. Smaller models on
+the same machine generate at roughly **2 tok/s** — eight times faster, because
+they fit.
+
+**So, by machine:**
+
+| Free RAM | Sensible ceiling | Example |
+|---|---|---|
+| ~1 GB | a 2B at `Q3_K_S`, ~0.7 GB | scraping by; quality suffers |
+| ~1.5 GB | a 2B at `Q4_K_M`, ~1.1 GB | fine for chat and simple tools |
+| ~2–3 GB | a 3B at `Q4_K_M`, ~2.1 GB | the sweet spot on an 8 GB laptop |
+| ~6 GB | a 7–8B at `Q4_K_M`, ~5 GB | needs 16 GB total to be pleasant |
+| 12 GB+ | a 14B at `Q4_K_M`, ~9 GB | a different class of machine |
+
+**On quantisation.** `Q4_K_M` is the default answer: about half the size of
+`Q8_0` for a quality loss most people cannot pick out in chat. Drop to
+`Q3_K_S` only when the alternative is not running at all — it is noticeably
+worse at instruction-following, which matters here because the agent depends
+on the model emitting well-formed tool calls. `Q8_0` is worth it only for
+small models where accuracy is the whole point, which is why the OCR model
+uses it and the chat models do not.
+
+**Two things that are not about size.** A model must be an *instruct* or
+*chat* build, not a base model — a base model will not follow the system
+prompt or emit tool calls. And it needs tool-calling support in its chat
+template, or the agent degrades to a plain chatbot.
+
+**The guard warns, it does not refuse.** Starting a model with less free RAM
+than the formula asks for produces a warning, not a refusal, because a
+shortfall predicts *slow* rather than *broken* — measured: Ministral 3B
+started with 518 MB free and completed its turn. Only a genuinely tiny margin
+is fatal.
+
+Drop any `.gguf` into `weights/` and it is picked up on the next scan, with
+its context and RAM threshold worked out from its own header. Nothing needs
+editing. Good sources:
+[bartowski](https://huggingface.co/bartowski) and
+[unsloth](https://huggingface.co/unsloth) on Hugging Face both publish
+well-made GGUF quantisations of most open models.
 
 ### What it works out for itself
 
