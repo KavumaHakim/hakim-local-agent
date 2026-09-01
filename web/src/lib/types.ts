@@ -66,6 +66,8 @@ export interface Model {
   url: string
   context: number
   threads: number
+  /** Layers handed to the GPU. 0 unless there is an accelerator build. */
+  gpu_layers: number
   min_free_mb: number
   /** False when the GGUF is not on disk. */
   available: boolean
@@ -113,6 +115,8 @@ export interface ModelsResponse {
   online: boolean
   /** Where to drop a .gguf for it to be picked up. */
   models_dir: string
+  /** Which llama-server is being run. Read-only; setup.py owns it. */
+  server_exe: string
   /** True when several models exist and none has been chosen as primary. */
   setup_required: boolean
 }
@@ -132,6 +136,7 @@ export interface ModelOverride {
   description?: string
   context?: number
   threads?: number
+  gpu_layers?: number
   min_free_mb?: number
 }
 

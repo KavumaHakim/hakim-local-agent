@@ -37,7 +37,9 @@ SCHEMA_VERSION = 1
 # `role`: those decide what the model *is* and where it runs, and getting them
 # wrong from a settings panel produces a model that cannot start for reasons
 # the panel cannot explain.
-OVERRIDABLE = frozenset({"label", "context", "threads", "min_free_mb", "description"})
+OVERRIDABLE = frozenset(
+    {"label", "context", "threads", "gpu_layers", "min_free_mb", "description"}
+)
 
 # Guard rails for anything typed into the settings panel. A context of zero
 # means "the model's trained maximum" to llama.cpp, which on a 262k model is
@@ -45,6 +47,10 @@ OVERRIDABLE = frozenset({"label", "context", "threads", "min_free_mb", "descript
 LIMITS: dict[str, tuple[int, int]] = {
     "context": (512, 131_072),
     "threads": (1, 64),
+    # 999 rather than a real layer count because the count is the
+    # model's, not ours, and llama.cpp already reads "more layers than
+    # there are" as "all of them".
+    "gpu_layers": (0, 999),
     "min_free_mb": (0, 128_000),
 }
 

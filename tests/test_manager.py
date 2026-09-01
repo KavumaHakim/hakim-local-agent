@@ -379,6 +379,99 @@ class RamGuardTests(unittest.TestCase):
         self.assertEqual(self.manager.status("fast").warning, "")
 
 
+class GpuLayerTests(unittest.TestCase):
+    """Handing layers to the GPU, and not doing it by accident."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = write_registry(self.tmp)
+
+    def gpu_layers_on_the_command_line(self, manager) -> str:
+        manager.ensure("fast")
+        command = manager.spawned[0]
+        return command[command.index("-ngl") + 1]
+
+    def test_nothing_is_offloaded_unless_asked(self):
+        """The default has to be zero.
+
+        The CPU build is what the setup script installs, so a non-zero default
+        would be asking every fresh install to offload onto hardware it has no
+        way of knowing exists.
+        """
+        manager = ManagerHarness(self.path)
+        self.assertEqual(self.gpu_layers_on_the_command_line(manager), "0")
+
+    def test_the_flag_is_always_passed_even_at_zero(self):
+        """Explicit, so that swapping in an accelerator build changes nothing
+        on its own. A build whose default is to offload would otherwise start
+        offloading the moment `server_exe` moved."""
+        manager = ManagerHarness(self.path)
+        manager.ensure("fast")
+        self.assertIn("-ngl", manager.spawned[0])
+
+    def test_a_registry_entry_can_ask_for_layers(self):
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        raw["models"][0]["gpu_layers"] = 99
+        self.path.write_text(json.dumps(raw), encoding="utf-8")
+
+        manager = ManagerHarness(self.path)
+        self.assertEqual(self.gpu_layers_on_the_command_line(manager), "99")
+
+    def test_the_settings_panel_can_ask_for_layers(self):
+        manager = ManagerHarness(self.path)
+        manager.set_override("fast", {"gpu_layers": 99})
+        self.assertEqual(self.gpu_layers_on_the_command_line(manager), "99")
+
+    def test_zero_survives_being_set_deliberately(self):
+        """Turning offloading back off is a real edit, not an empty one - so
+        it must not be dropped the way a blank field is."""
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        raw["models"][0]["gpu_layers"] = 99
+        self.path.write_text(json.dumps(raw), encoding="utf-8")
+
+        manager = ManagerHarness(self.path)
+        manager.set_override("fast", {"gpu_layers": 0})
+        self.assertEqual(self.gpu_layers_on_the_command_line(manager), "0")
+
+    def test_clearing_the_override_goes_back_to_the_registry(self):
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        raw["models"][0]["gpu_layers"] = 32
+        self.path.write_text(json.dumps(raw), encoding="utf-8")
+
+        manager = ManagerHarness(self.path)
+        manager.set_override("fast", {"gpu_layers": 0})
+        manager.clear_override("fast")
+        self.assertEqual(self.gpu_layers_on_the_command_line(manager), "32")
+
+    def test_a_nonsense_value_is_clamped_rather_than_refused(self):
+        manager = ManagerHarness(self.path)
+        manager.set_override("fast", {"gpu_layers": 100_000})
+        self.assertEqual(self.gpu_layers_on_the_command_line(manager), "999")
+
+    def test_a_negative_value_becomes_none(self):
+        manager = ManagerHarness(self.path)
+        manager.set_override("fast", {"gpu_layers": -5})
+        self.assertEqual(self.gpu_layers_on_the_command_line(manager), "0")
+
+    def test_the_setting_survives_a_restart(self):
+        """It is written to preferences, not held in memory - otherwise the
+        one setting you have to restart a model to apply would be lost by
+        restarting the application."""
+        manager = ManagerHarness(self.path)
+        manager.set_override("fast", {"gpu_layers": 99})
+
+        reopened = ManagerHarness(self.path)
+        self.assertEqual(self.gpu_layers_on_the_command_line(reopened), "99")
+
+    def test_the_server_binary_is_reported(self):
+        """The panel cannot ask about GPU layers without saying which
+        llama-server they would be handed to."""
+        manager = ManagerHarness(self.path)
+        self.assertEqual(manager.server_exe, self.tmp / "llama-server.exe")
+
+
 class PlatformTests(unittest.TestCase):
     """The Linux halves of the process layer, exercised from any machine.
 

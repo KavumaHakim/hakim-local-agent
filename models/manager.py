@@ -76,6 +76,12 @@ class ModelSpec:
     min_free_mb: int
     description: str = ""
 
+    # Layers handed to the GPU. 0 - all of it on the CPU - is the default
+    # because the CPU build is what `get_llama.py` installs, and that is what
+    # `find_server` looks for. Raising it only means anything once `server_exe`
+    # points at a build with an accelerator compiled in.
+    gpu_layers: int = 0
+
     # --- what this model is for ---
     #
     # "chat" drives the agent loop and joins the one-at-a-time rotation.
@@ -339,6 +345,7 @@ def load_registry(
                     port=int(entry["port"]),
                     context=int(entry.get("context", 4096)),
                     threads=int(entry.get("threads", 4)),
+                    gpu_layers=int(entry.get("gpu_layers", 0)),
                     min_free_mb=int(entry.get("min_free_mb", 0)),
                     description=entry.get("description", ""),
                     role=entry.get("role", "chat"),
@@ -395,6 +402,10 @@ def load_registry(
                 port=item.port,
                 context=item.context,
                 threads=item.threads,
+                # Never guessed for a discovered model. Whether offloading
+                # helps depends on the machine, not the file, and the only
+                # honest default is the one that works everywhere.
+                gpu_layers=0,
                 min_free_mb=item.min_free_mb,
                 description=item.description,
                 role=item.role,
@@ -431,7 +442,15 @@ def load_registry(
             **{
                 name: value
                 for name, value in values.items()
-                if name in ("label", "context", "threads", "min_free_mb", "description")
+                if name
+                in (
+                    "label",
+                    "context",
+                    "threads",
+                    "gpu_layers",
+                    "min_free_mb",
+                    "description",
+                )
             },
         )
 
@@ -963,6 +982,17 @@ class ModelManager:
             )
         return ""
 
+    @property
+    def server_exe(self) -> Path:
+        """The llama-server this manager will run.
+
+        Surfaced because `gpu_layers` cannot be judged without it: the same
+        number means "offload" against one build and nothing at all against
+        another, and the settings panel would otherwise be asking for a
+        decision while withholding what it turns on.
+        """
+        return self._server_exe
+
     def _start(self, spec: ModelSpec) -> None:
         if not self._server_exe.is_file():
             raise ModelManagerError(
@@ -982,6 +1012,25 @@ class ModelManager:
             "--jinja",
             "-c", str(spec.context),
             "-t", str(spec.threads),
+            # Passed always, rather than left to whatever the build defaults
+            # to, so that pointing `server_exe` at an accelerator build cannot
+            # quietly change how an existing model runs.
+            #
+            # It is worth turning up only for prompt processing. Measured on
+            # this machine - Intel HD 520, which has no memory of its own -
+            # with Qwen3.5-2B Q3_K_S, averaged over two llama-bench runs:
+            #
+            #     -ngl 0     prompt 17.0 tok/s    generation 2.27 tok/s
+            #     -ngl 16    prompt 19.0 tok/s    generation 1.45 tok/s
+            #     -ngl 99    prompt 21.8 tok/s    generation 2.45 tok/s
+            #
+            # Prompt processing is compute-bound and gains about a quarter.
+            # Generation is bound by memory bandwidth, and an integrated GPU
+            # reads the same DIMMs through the same controller, so it has
+            # nothing to gain and gains nothing. Partial offload is the worst
+            # of the three: activations cross the boundary at every handover
+            # and none of it is won back. All or nothing.
+            "-ngl", str(spec.gpu_layers),
             "-np", "1",
             # No --cache-reuse here, and that is a measured decision rather
             # than an omission. The theory was that replaying history without

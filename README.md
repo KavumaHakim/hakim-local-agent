@@ -119,6 +119,45 @@ for prompt processing, which is the part that *is* compute-bound.
 > If you re-measure, do it that way — single timed requests on this hardware
 > vary by more than the effect being looked for.
 
+### The integrated GPU helps the prompt, not the tokens
+
+The same reasoning predicts what an integrated GPU can and cannot do, and it
+was worth checking rather than assuming. `llama-bench`, Qwen3.5-2B Q3_K_S, the
+**same Vulkan binary in every row** so that offloading is the only thing that
+changes:
+
+```
+                prompt (pp128)      generation (tg32)
+-ngl 0           19.40 / 14.67        2.51 / 2.03
+-ngl 16               18.96                1.45
+-ngl 99          22.57 / 21.01        2.44 / 2.45
+```
+
+Two runs where there are two numbers. Averaged: prompt processing **17.0 →
+21.8 tok/s, about a quarter faster**. Generation **2.27 → 2.45**, which is
+inside the noise and is not a result.
+
+That is the memory-bandwidth ceiling again. The HD 520 reports `uma: 1` — it
+has no memory of its own and reads the same DIMMs through the same controller,
+so there is nothing for it to win at generation. Prompt processing is the
+compute-bound half, and that is exactly the half that improves.
+
+**Partial offload is the worst of the three.** `-ngl 16` generated at 1.45
+tok/s, 40% *slower* than putting nothing on the GPU at all: the activations
+cross the boundary at every handover and none of it is won back on shared
+memory. It is all or nothing.
+
+> Honest about the noise: CPU-only measured 19.40 in one run and 14.67 in the
+> other, on identical settings. The machine had 504 MB free against a 694 MB
+> model and was paging. The prompt-processing gain is consistent enough in
+> direction and size to rely on; the generation numbers are not worth reading
+> to two decimal places.
+
+Turn it on with **GPU layers** in the model's tuner — but only after pointing
+`server_exe` at a build that has a GPU backend compiled in, because against
+the ordinary CPU build the number does nothing. The tuner names the binary it
+would be handed to, underneath the field, for that reason.
+
 ### The prefix is what makes the agent slower than raw llama-server
 
 Same server, same model, four shapes of request:
@@ -220,6 +259,10 @@ with a larger window for that work.
    spare and think in long pauses.
 5. **Use a smaller model.** At 2 tok/s the model is the ceiling, and the 8B is
    far slower still.
+6. **Offload to an integrated GPU, if you have one and a build that can reach
+   it.** Worth about a quarter off prompt processing, which is what the tool
+   prefix costs. It does nothing for generation, so it will not make answers
+   appear faster once they start.
 
 ---
 
@@ -429,12 +472,16 @@ pointed at deliberately (`setup.py`'s "I already have it", which remembers the
 path). An accelerator build that cannot reach its device is slower than the CPU
 one, not faster, which is why it is never picked up by accident.
 
-On whether it is worth trying: this machine's own `llama-bench` numbers say
-generation is **bound by memory bandwidth, not cores** — and an integrated GPU
-shares the same DIMMs and the same controller, so it cannot lift that ceiling.
-Prompt processing is the compute-bound half (7.81 → 16.70 tok/s from one thread
-to four), and that is where offloading could plausibly pay. Measure that, not
-tokens per second overall.
+Having fetched it, point `server_exe` at it (`setup.py`'s "I already have
+it") and set **GPU layers** on a model in Settings. Both steps are needed: the
+binary decides whether a GPU can be reached at all, the number decides whether
+anything is sent to it.
+
+It was worth trying, and the result was narrow: on this machine full offload
+took **a quarter off prompt processing and nothing off generation**, and a
+partial split was slower than either end. The measurement, and why the shape of
+it was predictable from memory bandwidth, is
+[in §2a](#the-integrated-gpu-helps-the-prompt-not-the-tokens).
 
 Three details, because llama.cpp's releases are not arranged the way you would
 guess:
@@ -531,7 +578,7 @@ By hand it is `cp .env.example .env` and fill in what you need.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-1025 tests, no model server needed, and none of them touch the network.
+1039 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -725,7 +772,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               1025 tests, no server required
+└── tests/               1039 tests, no server required
 ```
 
 ---
@@ -1150,8 +1197,18 @@ loading costs minutes on this hardware, so they are two buttons.
 ### What Settings can change
 
 Primary model, the router's two ends, and per-model `label`, `context`,
-`threads` and `min_free_mb`. Retuning applies the next time that model starts,
-because llama-server is given those on the command line.
+`threads`, `gpu_layers` and `min_free_mb`. Retuning applies the next time that
+model starts, because llama-server is given those on the command line.
+
+`gpu_layers` is `-ngl`, and it is passed **always**, including as `-ngl 0`.
+Explicit rather than left to the build's default, so that changing which
+llama-server runs cannot quietly change how an existing model runs. It is 0
+everywhere until somebody sets it: the CPU build is what `get_llama.py`
+installs, and a discovered model is never guessed at, because whether
+offloading helps is a fact about the machine rather than about the file.
+[What it actually bought here](#the-integrated-gpu-helps-the-prompt-not-the-tokens)
+— a quarter off prompt processing, nothing off generation, and a partial split
+slower than either end.
 
 Deliberately **not** editable: `file`, `port` and `role`. Those decide what a
 model *is* and where it runs, and getting them wrong from a settings panel
@@ -2447,8 +2504,8 @@ a connection failure.
 | `RAG_IDLE_SECONDS` | `120` | Before the embedding model is unloaded |
 | `RAG_MAX_FILE_BYTES` | `20000000` | Largest file indexed |
 
-Model paths, ports, contexts, threads, RAM thresholds and the router's
-fast/strong pair live in [`models.json`](models.json).
+Model paths, ports, contexts, threads, GPU layers, RAM thresholds and the
+router's fast/strong pair live in [`models.json`](models.json).
 
 ---
 
@@ -2458,7 +2515,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**1025 tests, no model server needed, and none of them touch the network.**
+**1039 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2609,7 +2666,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 1025 tests
+- 1039 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

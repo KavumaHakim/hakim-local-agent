@@ -660,7 +660,7 @@ function ModelSettings({
                 }
                 disabled={busyKey === model.key}
                 className="shrink-0 rounded px-1 text-[10.5px] text-faint hover:text-ink disabled:opacity-50"
-                title="Context, threads and RAM for this model"
+                title="Context, threads, GPU layers and RAM for this model"
               >
                 {editing === model.key ? 'close' : 'tune'}
               </button>
@@ -680,6 +680,7 @@ function ModelSettings({
             {editing === model.key && (
               <ModelTuner
                 model={model}
+                serverExe={models.server_exe}
                 busy={busyKey === model.key}
                 onApply={(values) => {
                   onOverride(model.key, values)
@@ -728,7 +729,7 @@ function ModelSettings({
 }
 
 /**
- * Context, threads and the RAM threshold for one model.
+ * Context, threads, GPU layers and the RAM threshold for one model.
  *
  * Context gets live feedback because it is the field that can quietly make a
  * model unstartable: the KV cache grows linearly with it, and on an 8 GB
@@ -736,16 +737,23 @@ function ModelSettings({
  * token is derived from what the server already reported for the current
  * setting, so the estimate is the model's real arithmetic rather than a guess.
  *
+ * GPU layers gets feedback for a different reason: on its own the number says
+ * nothing, because it only does anything against a llama-server with an
+ * accelerator compiled in. So the binary that will actually be run is named
+ * underneath it, and a partial value says what was measured of partial values.
+ *
  * Blank means "leave it alone" rather than "set it to zero" - only fields that
  * were actually typed into are sent.
  */
 function ModelTuner({
   model,
+  serverExe,
   busy,
   onApply,
   onReset,
 }: {
   model: Model
+  serverExe: string
   busy: boolean
   onApply: (values: ModelOverride) => void
   onReset: () => void
@@ -753,6 +761,7 @@ function ModelTuner({
   const [label, setLabel] = useState(model.label)
   const [context, setContext] = useState(String(model.context))
   const [threads, setThreads] = useState(String(model.threads))
+  const [gpuLayers, setGpuLayers] = useState(String(model.gpu_layers))
   const [minFree, setMinFree] = useState(String(model.min_free_mb))
 
   // Bytes of KV cache per token, from the figures already measured for the
@@ -769,6 +778,14 @@ function ModelTuner({
   const overTrained =
     model.training_context > 0 && wanted > model.training_context
 
+  // 99 is the idiom for "all of them", so anything between is a deliberate
+  // split - and a split was the slowest of the three configurations measured
+  // here. Said rather than blocked: a machine with real VRAM to fill is a
+  // different case from this one.
+  const layers = Number(gpuLayers)
+  const offloading = Number.isFinite(layers) && layers > 0
+  const splitting = offloading && layers < 99
+
   function apply() {
     const values: ModelOverride = {}
     if (label.trim() && label.trim() !== model.label) values.label = label.trim()
@@ -776,6 +793,8 @@ function ModelTuner({
       values.context = Number(context)
     if (threads && Number(threads) !== model.threads)
       values.threads = Number(threads)
+    if (gpuLayers !== '' && Number(gpuLayers) !== model.gpu_layers)
+      values.gpu_layers = Number(gpuLayers)
     if (minFree && Number(minFree) !== model.min_free_mb)
       values.min_free_mb = Number(minFree)
     onApply(values)
@@ -791,7 +810,7 @@ function ModelTuner({
         />
       </Field>
 
-      <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+      <div className="mt-1.5 grid grid-cols-2 gap-1.5">
         <Field label="Context">
           <input
             type="number"
@@ -809,6 +828,16 @@ function ModelTuner({
             min={1}
             max={64}
             onChange={(event) => setThreads(event.target.value)}
+            className="w-full rounded border border-line bg-base px-1.5 py-0.5 text-[11px]"
+          />
+        </Field>
+        <Field label="GPU layers">
+          <input
+            type="number"
+            value={gpuLayers}
+            min={0}
+            max={999}
+            onChange={(event) => setGpuLayers(event.target.value)}
             className="w-full rounded border border-line bg-base px-1.5 py-0.5 text-[11px]"
           />
         </Field>
@@ -840,6 +869,18 @@ function ModelTuner({
           <p className="text-danger">
             Above the {model.training_context.toLocaleString()} tokens this
             model was trained for.
+          </p>
+        )}
+        {offloading && (
+          <p>
+            Needs a llama-server with a GPU backend built in. Running{' '}
+            <span className="font-mono break-all">{serverExe}</span>.
+          </p>
+        )}
+        {splitting && (
+          <p className="text-danger">
+            A partial split was the slowest setting measured here — slower at
+            generation than either all layers (99) or none (0).
           </p>
         )}
         <p>Applies the next time this model starts.</p>

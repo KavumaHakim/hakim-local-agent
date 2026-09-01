@@ -107,6 +107,9 @@ class ModelOut(BaseModel):
     url: str
     context: int
     threads: int
+    # Layers on the GPU. 0 everywhere unless somebody has both an accelerator
+    # build and a reason.
+    gpu_layers: int = 0
     min_free_mb: int
     # False when the GGUF is not on disk. The UI greys these out rather than
     # hiding them, so a missing file looks like a missing file.
@@ -157,6 +160,10 @@ class ModelsOut(BaseModel):
     online: bool = False
     # Where to drop a .gguf file for it to be picked up.
     models_dir: str = ""
+    # Which llama-server is being run. Read-only here: it is a property of one
+    # computer, so setup.py owns it. Shown because `gpu_layers` is unreadable
+    # without knowing whether this build has a GPU backend in it at all.
+    server_exe: str = ""
     # True when several chat models exist and no primary has been chosen yet.
     # The UI shows the first-launch picker on this; a single-model install
     # never sets it, because one model is not a choice.
@@ -187,6 +194,7 @@ class ModelOverrideRequest(BaseModel):
     description: str | None = Field(default=None, max_length=200)
     context: int | None = Field(default=None, ge=512, le=131_072)
     threads: int | None = Field(default=None, ge=1, le=64)
+    gpu_layers: int | None = Field(default=None, ge=0, le=999)
     min_free_mb: int | None = Field(default=None, ge=0, le=128_000)
 
 

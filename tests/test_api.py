@@ -475,6 +475,35 @@ class ModelRouteTests(ApiTestCase):
             self.client.post("/api/models/nope/unload").status_code, 404
         )
 
+    def test_gpu_layers_and_the_server_binary_are_both_reported(self):
+        """One is useless without the other. The number only does anything
+        against a llama-server with a GPU backend compiled in, so a panel that
+        asked for it without naming the binary would be asking blind."""
+        body = self.client.get("/api/models").json()
+        fast = next(m for m in body["models"] if m["key"] == "fast")
+        self.assertEqual(fast["gpu_layers"], 0)
+        self.assertTrue(body["server_exe"])
+
+    def test_gpu_layers_can_be_retuned(self):
+        body = self.client.patch(
+            "/api/models/fast", json={"gpu_layers": 99}
+        ).json()
+        fast = next(m for m in body["models"] if m["key"] == "fast")
+        self.assertEqual(fast["gpu_layers"], 99)
+        self.assertTrue(fast["customised"])
+
+    def test_turning_offloading_back_off_is_not_mistaken_for_no_change(self):
+        """0 is a value, not an empty field. `exclude_none` has to be what
+        drops an untouched field, never falsiness."""
+        self.client.patch("/api/models/fast", json={"gpu_layers": 99})
+        body = self.client.patch("/api/models/fast", json={"gpu_layers": 0}).json()
+        fast = next(m for m in body["models"] if m["key"] == "fast")
+        self.assertEqual(fast["gpu_layers"], 0)
+
+    def test_a_negative_layer_count_is_refused_at_the_edge(self):
+        response = self.client.patch("/api/models/fast", json={"gpu_layers": -1})
+        self.assertEqual(response.status_code, 422)
+
 
 class ReasoningTests(ApiTestCase):
     """Thinking is shown to the user but never fed back to the model."""

@@ -115,6 +115,7 @@ def _snapshot(runtime: Runtime) -> ModelsOut:
                 url=spec.url,
                 context=spec.context,
                 threads=spec.threads,
+                gpu_layers=spec.gpu_layers,
                 min_free_mb=spec.min_free_mb,
                 available=spec.available,
                 state=entry.state.value,
@@ -156,6 +157,10 @@ def _snapshot(runtime: Runtime) -> ModelsOut:
         available_ram_mb=available_ram_mb(),
         online=online,
         models_dir=str(manager.models_dir),
+        # Resolved, because the registry stores it relative to the project and
+        # the panel shows it to a person: '..\LLAMA CP\llama-server.exe' in the
+        # middle of an absolute path is legible to a filesystem, not a reader.
+        server_exe=str(manager.server_exe.resolve()),
         setup_required=manager.setup_required,
     )
 
@@ -268,10 +273,10 @@ def override(
     body: ModelOverrideRequest,
     runtime: Runtime = Depends(get_runtime),
 ):
-    """Retune one model: its label, context, threads or RAM threshold.
+    """Retune one model: its label, context, threads, GPU layers or RAM floor.
 
-    Applies from that model's next start, because llama-server is told its
-    context and thread count on the command line.
+    Applies from that model's next start, because llama-server is told all of
+    them on the command line.
     """
     values = body.model_dump(exclude_none=True)
     if not values:
