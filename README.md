@@ -246,11 +246,18 @@ setup.bat
 ./setup.sh
 ```
 
-That creates the virtualenv, installs everything, sets up the front end,
-writes a starter `.env`, runs the tests, and then tells you plainly which of
-the two external pieces are missing. Add `--with-rag` for document search
-(pulls in torch, about 2 GB) and `--build-web` to build the UI instead of
-running Vite in development mode.
+That creates the virtualenv, installs the Python and front-end dependencies,
+**downloads llama.cpp**, writes a starter `.env` and runs the tests.
+
+**The only thing left for you is a model.** Drop any `.gguf` into `weights/`
+and it is picked up on the next scan, sized from its own header.
+
+| Flag | Effect |
+|---|---|
+| `--with-rag` | also install document search (torch, about 2 GB) |
+| `--build-web` | build the UI instead of running Vite in development |
+| `--no-llama` | do not download llama.cpp |
+| `--skip-tests` | do not run the verification tests |
 
 It is safe to run again at any time; nothing it does is destructive.
 
@@ -262,8 +269,8 @@ It is safe to run again at any time; nothing it does is destructive.
 |---|---|---|
 | Python | 3.11+ | 3.11, 3.12, 3.13 and 3.14 all tested here |
 | Node | 20+ | only for the web UI; the terminal client works without it |
-| `llama-server` | build 10373 verified | from llama.cpp — **not bundled** |
-| A GGUF model | any | **not bundled** |
+| `llama-server` | build 10373 verified | from llama.cpp — **fetched by the setup script** |
+| A GGUF model | any | **the one thing you supply** |
 
 On Debian or Ubuntu, Python needs its venv module separately:
 
@@ -297,14 +304,35 @@ python3 -m venv .venv
 npm --prefix web install
 ```
 
-**4. Get `llama-server`.** It is part of
-[llama.cpp](https://github.com/ggml-org/llama.cpp/releases) and this project
-does not ship it — it is someone else's binary with its own release cadence and
-its own hardware-specific builds.
+**4. Get `llama-server`.** The setup script does this for you; by hand it is:
 
-Put it on `PATH` and nothing else is needed: a `server_exe` in `models.json`
-that does not exist falls back to whatever `llama-server` is on `PATH`. Or set
-the path explicitly:
+```bash
+python scripts/get_llama.py
+```
+
+It lands in `vendor/llama/`, which is git-ignored. `--build b10731` pins a
+release, `--force` re-downloads, and `--list` shows what would be fetched
+without fetching it.
+
+Three details, because llama.cpp's releases are not arranged the way you would
+guess:
+
+- **The binary releases are prereleases**, so `/releases/latest` returns a tag
+  with no binaries at all. The release list has to be walked until one with
+  assets turns up.
+- **There is a build per platform per accelerator** — 27 assets in a typical
+  release. Only the plain CPU build is wanted; a CUDA or ROCm build is ten
+  times the size and needs a runtime that is not installed here.
+- **No checksums are published** alongside these archives, so there is nothing
+  to verify them against. What is done instead: HTTPS to GitHub, the download
+  must match the advertised byte count, the archive must open, it must contain
+  a `llama-server`, and that binary must answer `--version`. That is weaker
+  than a signature, and it is said here rather than implied.
+
+Where it looks, in order: the `server_exe` in `models.json` if that path
+exists, then `vendor/llama/`, then `PATH`. So a checkout works without editing
+a path someone else committed, and a build you downloaded deliberately is not
+quietly overridden by a stale one on `PATH`. To point it somewhere else:
 
 ```json
 { "server_exe": "../llama.cpp/llama-server", "models_dir": "weights" }
@@ -325,14 +353,19 @@ RAM, a 2–3B instruct model quantised to Q4_K_M is the sensible starting point.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-910 tests, no model server needed, and none of them touch the network.
+923 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
-It never downloads `llama-server` or a model. Both are large, both belong to
-other projects with their own instructions and their own licences, and a setup
-script that quietly pulls gigabytes over someone's connection is not being
-helpful. It checks for them and names exactly what is missing.
+**It never downloads a model.** Which model to run is the one genuinely
+personal decision in this project — it depends on your RAM, your language, and
+what you want the agent for — and several gigabytes is not something a setup
+script should pull over someone's connection on their behalf. It names what is
+missing and points at where to look.
+
+It does fetch `llama.cpp`, because that choice is not personal: there is
+exactly one right build for a given machine, it is 18 MB, and getting it by
+hand means picking correctly out of 27 similarly-named archives.
 
 ### If something goes wrong
 
@@ -344,6 +377,7 @@ helpful. It checks for them and names exactly what is missing.
 | `llama-server not found` | Not on `PATH` and not at the `server_exe` path. See step 4 |
 | No models listed | No `.gguf` in `weights/`. See step 5 |
 | Port 8000 or 5173 in use | An earlier run is still going. Both launchers name the process holding it |
+| `GitHub is rate-limiting this connection` | Unauthenticated API calls are capped per IP. Wait, or fetch a build by hand and put it on `PATH` |
 
 ---
 
@@ -442,6 +476,8 @@ Hakim Local Agent/
 ├── setup.bat/.sh        one-command install, both platforms
 ├── start.bat/.sh        run the API and the UI together
 ├── scripts/setup.py     what both setup wrappers actually run
+├── scripts/get_llama.py fetches the right llama.cpp build for this machine
+├── vendor/llama/        that build, once fetched (git-ignored)
 │
 ├── api/                 the HTTP layer the front end talks to
 │   ├── main.py          app, lifespan, static serving
@@ -509,7 +545,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               910 tests, no server required
+└── tests/               923 tests, no server required
 ```
 
 ---
@@ -2102,7 +2138,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**910 tests, no model server needed, and none of them touch the network.**
+**923 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2253,7 +2289,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 910 tests
+- 923 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

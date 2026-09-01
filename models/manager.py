@@ -303,6 +303,16 @@ def load_registry(
             configured = anchor(value)
             if configured.is_file():
                 return configured
+
+        # What the setup script downloads, before PATH: someone who ran it
+        # meant to use that build, and a stale llama-server left on PATH from
+        # some other project should not quietly take precedence over it.
+        for name in ("llama-server.exe", "llama-server"):
+            vendored = PROJECT_ROOT / "vendor" / "llama"
+            for found in sorted(vendored.rglob(name)) if vendored.is_dir() else []:
+                if found.is_file():
+                    return found
+
         for name in ("llama-server", "llama-server.exe"):
             found = shutil.which(name)
             if found:

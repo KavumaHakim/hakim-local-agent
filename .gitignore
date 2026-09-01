@@ -1,6 +1,10 @@
 # Model weights: gigabytes of binaries that must never enter a repo.
 weights/
 
+# llama.cpp, fetched by the setup script. Someone else's binaries, and
+# tens of megabytes of them - they belong in a release, not in here.
+vendor/
+
 # Generated state.
 data/
 *.db

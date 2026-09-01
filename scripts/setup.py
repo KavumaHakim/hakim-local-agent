@@ -177,11 +177,9 @@ def install_web(*, build: bool) -> bool:
     return True
 
 
-def check_llama_server() -> bool:
-    """Is there a llama-server to run models with?"""
-    step("Looking for llama-server")
+def find_llama_server() -> Path | None:
+    """An existing llama-server: configured, vendored, or on PATH."""
     registry = ROOT / "models.json"
-    configured = ""
     if registry.is_file():
         try:
             configured = json.loads(registry.read_text(encoding="utf-8")).get(
@@ -189,25 +187,52 @@ def check_llama_server() -> bool:
             )
         except (ValueError, OSError):
             configured = ""
+        if configured:
+            candidate = Path(configured)
+            if not candidate.is_absolute():
+                candidate = (registry.parent / candidate).resolve()
+            if candidate.is_file():
+                return candidate
 
-    if configured:
-        candidate = Path(configured)
-        if not candidate.is_absolute():
-            candidate = (registry.parent / candidate).resolve()
-        if candidate.is_file():
-            ok(f"models.json points at {candidate}")
-            return True
+    vendored = ROOT / "vendor" / "llama"
+    if vendored.is_dir():
+        for name in ("llama-server.exe", "llama-server"):
+            for found in sorted(vendored.rglob(name)):
+                if found.is_file():
+                    return found
 
     found = shutil.which("llama-server") or shutil.which("llama-server.exe")
-    if found:
-        ok(f"found on PATH at {found}")
+    return Path(found) if found else None
+
+
+def check_llama_server(*, download: bool) -> bool:
+    """Is there a llama-server to run models with? Fetch one if not."""
+    step("Looking for llama-server")
+
+    existing = find_llama_server()
+    if existing is not None:
+        ok(str(existing))
         return True
 
-    warn("llama-server was not found, so no local model can start yet.")
-    warn("It is part of llama.cpp, and this project does not bundle it:")
-    warn("    https://github.com/ggml-org/llama.cpp/releases")
-    warn("Put it on PATH, or set \"server_exe\" in models.json to its path.")
-    return False
+    if not download:
+        warn("not found, and --no-llama said not to fetch one.")
+        warn("    https://github.com/ggml-org/llama.cpp/releases")
+        return False
+
+    say("  not found - fetching the CPU build for this machine from GitHub")
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import get_llama
+
+        server = get_llama.install()
+    except Exception as exc:  # noqa: BLE001 - report whatever went wrong
+        fail(f"could not fetch llama.cpp: {exc}")
+        warn("Download one by hand and put it on PATH:")
+        warn("    https://github.com/ggml-org/llama.cpp/releases")
+        return False
+
+    ok(str(server))
+    return True
 
 
 def check_weights() -> bool:
@@ -267,6 +292,13 @@ def summary(*, llama: bool, weights: bool) -> None:
 
     if llama and weights:
         say("  Everything needed to run locally is in place.")
+    elif llama and not weights:
+        say("  Everything is installed except a model, which is the one thing")
+        say("  you have to choose yourself. Any .gguf dropped into weights/ is")
+        say("  picked up automatically - it is sized from its own header.")
+        say("")
+        say("  On 8 GB of RAM, a 2-3B instruct model at Q4_K_M is a good start.")
+        say("  https://huggingface.co/models?library=gguf")
     else:
         say("  The project is installed, but a local model cannot start yet:")
         if not llama:
@@ -307,6 +339,11 @@ def main() -> int:
     parser.add_argument(
         "--skip-tests", action="store_true", help="do not run the verification tests"
     )
+    parser.add_argument(
+        "--no-llama",
+        action="store_true",
+        help="do not download llama.cpp (about 18 MB from GitHub)",
+    )
     arguments = parser.parse_args()
 
     say("Hakim AI System - setup")
@@ -321,7 +358,7 @@ def main() -> int:
     if not install_web(build=arguments.build_web):
         return 1
 
-    llama = check_llama_server()
+    llama = check_llama_server(download=not arguments.no_llama)
     weights = check_weights()
     make_env_file()
 
