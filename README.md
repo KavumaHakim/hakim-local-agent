@@ -291,6 +291,45 @@ Here is the plan
 **The only thing left for you is a model.** Drop any `.gguf` into `weights/`
 and it is picked up on the next scan, sized from its own header.
 
+It does not just exit when it finishes. It prints where everything went, what
+was and was not installed, and how to start — then waits for you to close it:
+
+```
+-- where everything is -------------------------------------------------
+
+   project          /home/you/hakim-local-agent
+   python           /home/you/hakim-local-agent/.venv/bin/python
+   llama.cpp        /home/you/hakim-local-agent/vendor/llama/build/bin/llama-server
+   models           /home/you/hakim-local-agent/weights
+                    - Ministral-3-3B-Instruct-Q4_K_M.gguf (2.1 GB)
+   settings         /home/you/hakim-local-agent/.env
+   your data        /home/you/hakim-local-agent/data
+   workspace        /home/you/hakim-local-agent
+
+-- what was set up ------------------------------------------------------
+
+   Python packages  installed into .venv, nothing system-wide
+   Document search  skipped - add it with --with-rag
+   Web interface    ready for development mode
+   llama.cpp        ready
+   A model          1 found
+   Hosted models    none - everything runs locally
+
+-- how to start it ------------------------------------------------------
+
+   Everything it needs is in place.
+
+   ./start.sh   starts both servers and opens the browser
+   ...
+
+  All done - press Enter to close
+```
+
+The hosted-model line reports a **count**, never a key. And the pause is
+skipped entirely without a terminal, or with `--yes`: a setup script waiting
+on a keypress in CI never finishes, which is worse than one that scrolls
+past.
+
 **Piped, redirected or in CI it asks nothing**, takes the defaults, and prints
 plain lines — no cursor tricks, no carriage returns, no prompt waiting for
 input that will never come. `--yes` forces that mode in a terminal too.
@@ -474,7 +513,7 @@ By hand it is `cp .env.example .env` and fill in what you need.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-966 tests, no model server needed, and none of them touch the network.
+974 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -667,7 +706,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               966 tests, no server required
+└── tests/               974 tests, no server required
 ```
 
 ---
@@ -2348,7 +2387,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**966 tests, no model server needed, and none of them touch the network.**
+**974 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2499,7 +2538,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 966 tests
+- 974 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

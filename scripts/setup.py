@@ -534,41 +534,162 @@ def plan(arguments) -> dict:
     return choices
 
 
-def summary(*, llama: bool, weights: bool) -> None:
+def _size(path: Path) -> str:
+    try:
+        return f"{path.stat().st_size / 1e9:.1f} GB"
+    except OSError:
+        return "?"
+
+
+def report(*, llama: bool, weights: bool, choices: dict) -> None:
+    """Say where everything went, what was done, and how to start it.
+
+    Printed in full every time rather than only when something is missing. A
+    setup script that finishes silently leaves someone with a working install
+    and no idea what it did to their machine or what to type next, which is
+    most of the reason people distrust them.
+    """
     launcher = "start.bat" if os.name == "nt" else "./start.sh"
     activate = (
         r".venv\Scripts\activate" if os.name == "nt" else "source .venv/bin/activate"
     )
 
     ui.say()
-    ui.rule()
-    if llama and weights:
-        ui.say(f"\n  {ui.GREEN}{ui.BOLD}All set.{ui.RESET} Start it whenever you like:\n")
-        ui.say(f"      {ui.ACCENT}{ui.BOLD}{launcher}{ui.RESET}")
-    elif llama and not weights:
-        ui.say(f"\n  {ui.BOLD}Almost there - it just needs a model.{ui.RESET}\n")
-        ui.say(f"  Put any {ui.BOLD}.gguf{ui.RESET} file into {ui.BOLD}weights/{ui.RESET} "
-               f"and it will be found on its own.")
-        ui.say("  Nothing to configure: the size and context are read from the")
-        ui.say("  file itself.")
-        ui.say(f"\n  {ui.DIM}Not sure which one? The README has a section called{ui.RESET}")
-        ui.say(f"  {ui.DIM}'Choosing a model for your hardware' with the arithmetic.{ui.RESET}")
-        ui.say(f"\n  Then:  {ui.ACCENT}{ui.BOLD}{launcher}{ui.RESET}")
-    else:
-        ui.say(f"\n  {ui.BOLD}Installed, but it cannot run a model yet.{ui.RESET}\n")
-        if not llama:
-            ui.say("    llama.cpp is missing - see the note further up")
-        if not weights:
-            ui.say("    there is no .gguf file in weights/")
-        ui.say("\n  Sort those out and run this again; it will pick up where it")
-        ui.say("  left off and tell you what is still needed.")
+    ui.rule("where everything is")
+    ui.say()
+    ui.field("project", str(ROOT))
+    ui.field("python", str(venv_python()))
 
-    ui.say(f"\n  {ui.DIM}If you would rather start it by hand, in two terminals:{ui.RESET}")
+    server = find_llama_server()
+    ui.field("llama.cpp", str(server) if server else "not installed yet")
+
+    models = sorted(WEIGHTS.glob("*.gguf"))
+    if models:
+        ui.field("models", f"{WEIGHTS}")
+        for path in models:
+            ui.say(f"   {' ' * 16} {ui.DIM}- {path.name} ({_size(path)}){ui.RESET}")
+    else:
+        ui.field("models", f"{WEIGHTS} {ui.DIM}(empty){ui.RESET}")
+
+    ui.field("settings", str(ROOT / ".env"))
+    ui.field("your data", str(ROOT / "data"))
+    ui.say(
+        f"   {' ' * 16} {ui.DIM}- chat_history.db, and anything the agent "
+        f"remembers{ui.RESET}"
+    )
+    ui.say(
+        f"   {' ' * 16} {ui.DIM}- models.local.json, your own model choices"
+        f"{ui.RESET}"
+    )
+    ui.field("workspace", str(ROOT))
+    ui.say(
+        f"   {' ' * 16} {ui.DIM}the only folder the file tools may touch; "
+        f"changeable in the UI{ui.RESET}"
+    )
+
+    ui.say()
+    ui.rule("what was set up")
+    ui.say()
+    web = (ROOT / "web" / "node_modules").is_dir()
+    built = (ROOT / "web" / "dist").is_dir()
+    keys = [name for _, name in hosted_providers() if name in existing_keys()]
+
+    lines = [
+        ("Python packages", "installed into .venv, nothing system-wide"),
+        (
+            "Document search",
+            "installed" if choices.get("rag") else "skipped - add it with --with-rag",
+        ),
+        (
+            "Web interface",
+            ("built for production" if built else "ready for development mode")
+            if web
+            else "skipped - npm was not found",
+        ),
+        (
+            "llama.cpp",
+            "ready" if llama else "still needed - nothing local runs without it",
+        ),
+        (
+            "A model",
+            f"{len(models)} found" if models else "still needed - your choice to make",
+        ),
+        (
+            "Hosted models",
+            f"{len(keys)} key(s) saved" if keys else "none - everything runs locally",
+        ),
+    ]
+    for name, state in lines:
+        ui.field(name, state)
+
+    ui.say()
+    ui.rule("how to start it")
+    ui.say()
+
+    if llama and weights:
+        ui.say(f"   {ui.GREEN}Everything it needs is in place.{ui.RESET}")
+    elif llama and not weights:
+        ui.say(f"   {ui.BOLD}One thing left: a model.{ui.RESET}")
+        ui.say(
+            f"   Put any {ui.BOLD}.gguf{ui.RESET} into {ui.BOLD}weights/{ui.RESET} "
+            f"and it is found on its own -"
+        )
+        ui.say("   nothing to configure, it is measured from the file itself.")
+        ui.say(
+            f"   {ui.DIM}The README's 'Choosing a model' section has the "
+            f"arithmetic.{ui.RESET}"
+        )
+    else:
+        ui.say(f"   {ui.BOLD}Not runnable yet:{ui.RESET}")
+        if not llama:
+            ui.say("     llama.cpp is missing - run this again to fetch it")
+        if not weights:
+            ui.say("     there is no .gguf in weights/")
+
+    ui.say()
+    ui.say(f"   {ui.ACCENT}{ui.BOLD}{launcher}{ui.RESET}   starts both servers "
+           f"and opens the browser")
+    ui.say()
+    ui.say(f"   {ui.DIM}The web UI is at {ui.RESET}http://127.0.0.1:5173")
+    ui.say(f"   {ui.DIM}The API is at    {ui.RESET}http://127.0.0.1:8000"
+           f"{ui.DIM}  (docs at /docs){ui.RESET}")
+    ui.say(
+        f"   {ui.DIM}Both bind to 127.0.0.1 only, and are meant to stay that "
+        f"way.{ui.RESET}"
+    )
+    ui.say()
+    ui.say(f"   {ui.DIM}By hand instead, in two terminals:{ui.RESET}")
     ui.note(activate)
     ui.note("python -m uvicorn api.main:app --host 127.0.0.1 --port 8000")
     ui.note("npm --prefix web run dev")
-    ui.say(f"\n  {ui.DIM}Or skip the browser entirely:{ui.RESET}")
+    ui.say()
+    ui.say(f"   {ui.DIM}Or without a browser at all:{ui.RESET}")
     ui.note("python main.py")
+
+    ui.say()
+    ui.rule("worth knowing")
+    ui.say()
+    ui.say(
+        f"   {ui.DIM}Models load when first used, not at startup, and unload "
+        f"when idle.{ui.RESET}"
+    )
+    ui.say(
+        f"   {ui.DIM}The risky tools - shell, Python, file writes - are all off "
+        f"until you{ui.RESET}"
+    )
+    ui.say(
+        f"   {ui.DIM}switch them on in the sidebar, and each explains what it "
+        f"allows.{ui.RESET}"
+    )
+    ui.say(
+        f"   {ui.DIM}Nothing leaves this machine unless you pick a hosted "
+        f"model, and it{ui.RESET}"
+    )
+    ui.say(f"   {ui.DIM}asks first when it would.{ui.RESET}")
+    ui.say()
+    ui.say(f"   {ui.DIM}Run this script again any time - it is safe to repeat "
+           f"and will{ui.RESET}")
+    ui.say(f"   {ui.DIM}only do what is still missing.{ui.RESET}")
     ui.say()
 
 
@@ -674,7 +795,12 @@ def main() -> int:
         ui.say("\n  Stopped part-way. Run this again to carry on where it left off.")
         return 1
 
-    summary(llama=llama, weights=weights)
+    report(llama=llama, weights=weights, choices=choices)
+    # --yes means unattended, so it must not hold at the end either: someone
+    # scripting this in a terminal would otherwise wait forever on a keypress
+    # they never asked to be prompted for.
+    if not arguments.yes:
+        ui.pause("All done - press Enter to close")
     return 0
 
 

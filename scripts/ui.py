@@ -487,6 +487,27 @@ def toggle(title: str, items: list[dict], *, assume: bool = False) -> list[dict]
         complaint = f"That is not one of them - pick 1 to {len(items)}, or press Enter."
 
 
+def field(name: str, value: str, *, width_of_name: int = 16) -> None:
+    """One aligned `name: value` line, for the closing report."""
+    say(f"   {DIM}{name.ljust(width_of_name)}{RESET} {value}")
+
+
+def pause(message: str = "Press Enter to close") -> None:
+    """Hold until the person says they are done reading.
+
+    Returns at once when there is no terminal. A setup script that waits for a
+    keypress in CI does not finish, and a job that never finishes is a worse
+    outcome than one that scrolls past - so this is the one place where having
+    nobody there has to be checked rather than assumed.
+    """
+    if not interactive():
+        return
+    try:
+        input(f"\n  {DIM}{message}{RESET} ")
+    except (EOFError, KeyboardInterrupt):
+        say()
+
+
 def ask_secret(question: str) -> str:
     """Read something that must not appear on screen or in scrollback.
 

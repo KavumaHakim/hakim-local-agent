@@ -464,5 +464,82 @@ class ApiKeyTests(unittest.TestCase):
         self.assertIn("CEREBRAS_API_KEY", variables)
 
 
+class PauseTests(unittest.TestCase):
+    """Holding at the end, and the one place it must not."""
+
+    def test_it_returns_at_once_without_a_terminal(self):
+        """A setup script waiting for a keypress in CI never finishes, which
+        is worse than one that scrolls past."""
+        with mock.patch.object(ui, "interactive", return_value=False):
+            with mock.patch("builtins.input", side_effect=AssertionError("hung!")):
+                ui.pause()
+
+    def test_it_waits_when_somebody_is_there(self):
+        seen = []
+        with mock.patch.object(ui, "interactive", return_value=True):
+            with mock.patch("builtins.input", lambda prompt="": seen.append(prompt)):
+                with redirect_stdout(io.StringIO()):
+                    ui.pause("press Enter")
+        self.assertEqual(len(seen), 1)
+        self.assertIn("press Enter", seen[0])
+
+    def test_a_stray_ctrl_c_does_not_crash_the_end_of_setup(self):
+        with mock.patch.object(ui, "interactive", return_value=True):
+            with mock.patch("builtins.input", side_effect=KeyboardInterrupt):
+                with redirect_stdout(io.StringIO()):
+                    ui.pause()
+
+
+class ReportTests(unittest.TestCase):
+    """The closing report: it has to say where things went."""
+
+    def setUp(self):
+        import setup as setup_script
+
+        self.setup = setup_script
+
+    def render(self, **kwargs) -> str:
+        defaults = {
+            "llama": True,
+            "weights": True,
+            "choices": {"rag": False, "tests": True, "llama": True, "web_build": False},
+        }
+        defaults.update(kwargs)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.setup.report(**defaults)
+        return re.sub(r"\033\[[0-9;]*m", "", output.getvalue())
+
+    def test_it_names_every_place_something_was_put(self):
+        text = self.render()
+        for label in ("project", "python", "llama.cpp", "models", "settings",
+                      "your data", "workspace"):
+            self.assertIn(label, text)
+
+    def test_it_says_how_to_start_it(self):
+        text = self.render()
+        self.assertIn("127.0.0.1:5173", text)
+        self.assertIn("uvicorn", text)
+        self.assertIn("main.py", text)
+
+    def test_it_says_what_is_still_missing(self):
+        text = self.render(llama=False, weights=False)
+        self.assertIn("Not runnable yet", text)
+        self.assertIn("llama.cpp is missing", text)
+
+    def test_a_missing_model_is_the_headline_when_it_is_the_only_gap(self):
+        text = self.render(llama=True, weights=False)
+        self.assertIn("One thing left", text)
+
+    def test_it_never_prints_an_api_key(self):
+        """It reports how many are set, which is all anybody needs to know."""
+        with mock.patch.object(
+            self.setup, "existing_keys", return_value={"GEMINI_API_KEY"}
+        ):
+            text = self.render()
+        self.assertIn("key(s) saved", text)
+        self.assertNotIn("=", text.split("Hosted models")[1].splitlines()[0])
+
+
 if __name__ == "__main__":
     unittest.main()
