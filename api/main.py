@@ -52,14 +52,21 @@ SWEEP_SECONDS = 30.0
 
 
 def _embeddings():
-    """The embeddings module, imported on use.
+    """The embeddings module, or None when it is not installed.
 
     Kept out of the import graph so the API starts without numpy and
     sentence-transformers installed. Document search is optional, and its
     dependencies are the largest in the project by a wide margin.
-    """
-    from rag import embeddings
 
+    Returns None rather than raising, because both callers are housekeeping:
+    a sweep that has nothing to sweep and a shutdown with nothing to unload.
+    Raising made the promise above false on a fresh clone - the API started
+    and then threw on the way out.
+    """
+    try:
+        from rag import embeddings
+    except ImportError:
+        return None
     return embeddings
 
 
@@ -83,7 +90,9 @@ def _sweeper(runtime: Runtime, stop: threading.Event) -> None:
             # The embedding worker is a model too, and it is idle far more
             # often than it is busy: one search, then nothing. Same sweep, so
             # there is one answer in this project to "a model nobody is using".
-            _embeddings().sweep_shared()
+            embeddings = _embeddings()
+            if embeddings is not None:
+                embeddings.sweep_shared()
             # Memory processing is the one thing here that may START a model.
             # It is last, it is skipped whenever a turn is running, and it is
             # off unless AGENT_ENABLE_MEMORY_PROCESSING says otherwise.
@@ -118,8 +127,12 @@ def _lifespan_for(supplied: Runtime | None):
             stop.set()
             runtime.queue.stop()
             # Leaks a Python process holding torch otherwise, the same way a
-            # missed stop_all() leaks a llama-server holding gigabytes.
-            _embeddings().unload_shared()
+            # missed stop_all() leaks a llama-server holding gigabytes. Absent
+            # when document search was never installed, which is a supported
+            # way to run this.
+            embeddings = _embeddings()
+            if embeddings is not None:
+                embeddings.unload_shared()
             # Without this, every restart leaks a llama-server holding
             # gigabytes. It is also why `--reload` is a bad idea here: the
             # reloader kills the worker in a way that does not always reach

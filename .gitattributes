@@ -1,0 +1,32 @@
+# Line endings, which decide whether a clone runs at all.
+#
+# This project is developed on Windows, so without these rules every shell
+# script would be committed with CRLF and a Linux clone would fail on the very
+# first line:
+#
+#     ./setup.sh: /usr/bin/env: 'bash\r': No such file or directory
+#
+# That is not a cosmetic problem - it is the whole Linux path broken by an
+# invisible character. So the rule is set here rather than left to whatever
+# core.autocrlf each machine happens to have.
+
+# Sensible default: normalise text in the repository, check it out natively.
+* text=auto
+
+# Scripts are run by an interpreter that reads the shebang literally, so these
+# must be LF everywhere, including in a Windows checkout.
+*.sh   text eol=lf
+
+# And these are read by cmd.exe, which wants CRLF.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Binaries git must never touch.
+*.gguf binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.pdf  binary
+*.f32  binary
+*.db   binary

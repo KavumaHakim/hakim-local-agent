@@ -224,49 +224,126 @@ with a larger window for that work.
 
 ## 3. Setup
 
-### Prerequisites
+Windows and Linux both. macOS should work — same code paths as Linux — but has
+not been tested, so it is not claimed.
 
-- Python 3.11+
-- Node 20+ for the front end (verified on 26.7.0)
-- `llama-server.exe` from llama.cpp — this project was verified against
-  **build 10373**
-- GGUF model files
-
-### Install
+### The short version
 
 ```bash
-cd "C:\path\to\Hakim Local Agent"
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
+git clone https://github.com/KavumaHakim/hakim-local-agent.git
+cd hakim-local-agent
 ```
 
-Python dependencies are only `requests`, `fastapi` and `uvicorn`. Everything
-else is standard library.
+**Windows**
 
-The front end needs Node (verified on 26.7.0):
+```bash
+setup.bat
+```
+
+**Linux / macOS**
+
+```bash
+./setup.sh
+```
+
+That creates the virtualenv, installs everything, sets up the front end,
+writes a starter `.env`, runs the tests, and then tells you plainly which of
+the two external pieces are missing. Add `--with-rag` for document search
+(pulls in torch, about 2 GB) and `--build-web` to build the UI instead of
+running Vite in development mode.
+
+It is safe to run again at any time; nothing it does is destructive.
+
+### Step by step, if you would rather do it by hand
+
+**1. Prerequisites.**
+
+| Needed | Version | Notes |
+|---|---|---|
+| Python | 3.11+ | 3.11, 3.12, 3.13 and 3.14 all tested here |
+| Node | 20+ | only for the web UI; the terminal client works without it |
+| `llama-server` | build 10373 verified | from llama.cpp — **not bundled** |
+| A GGUF model | any | **not bundled** |
+
+On Debian or Ubuntu, Python needs its venv module separately:
+
+```bash
+sudo apt install python3 python3-venv nodejs npm
+```
+
+**2. Create the virtualenv and install.**
+
+Windows:
+
+```bash
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt -r requirements-dev.txt
+```
+
+Linux / macOS:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt
+```
+
+`requirements.txt` is four packages: `requests`, `fastapi`, `uvicorn` and
+`python-multipart`. Everything else is standard library.
+`requirements-dev.txt` is only needed to run the tests.
+
+**3. Install the front end.** Skip this if you only want the terminal client.
 
 ```bash
 npm --prefix web install
 ```
 
-### Point it at your files
+**4. Get `llama-server`.** It is part of
+[llama.cpp](https://github.com/ggml-org/llama.cpp/releases) and this project
+does not ship it — it is someone else's binary with its own release cadence and
+its own hardware-specific builds.
 
-Edit [`models.json`](models.json):
+Put it on `PATH` and nothing else is needed: a `server_exe` in `models.json`
+that does not exist falls back to whatever `llama-server` is on `PATH`. Or set
+the path explicitly:
 
 ```json
-{
-  "server_exe": "../LLAMA CP/llama-server.exe",
-  "models_dir": "weights"
-}
+{ "server_exe": "../llama.cpp/llama-server", "models_dir": "weights" }
 ```
 
-No model paths are hardcoded anywhere in the Python.
+**Paths in `models.json` are relative to that file**, not to the working
+directory, so the project folder can be renamed or moved without editing
+anything. That is not a style choice: they were absolute once, the folder was
+renamed, and the hardcoded path was the one thing that broke.
 
-**Paths here are relative to `models.json` itself**, not to the working
-directory — so the project folder can be renamed or moved and nothing needs
-editing. That is not a style choice: these were absolute, the folder was
-renamed, and the hardcoded path was the one thing that broke. An absolute path
-still works if the weights live on another drive.
+**5. Get a model.** Drop any `.gguf` into `weights/` and it is picked up on the
+next scan — sized from its own GGUF header, no configuration needed. On 8 GB of
+RAM, a 2–3B instruct model quantised to Q4_K_M is the sensible starting point.
+
+**6. Check it.**
+
+```bash
+.venv/bin/python -m unittest discover -s tests -t .
+```
+
+910 tests, no model server needed, and none of them touch the network.
+
+### What the setup script deliberately does not do
+
+It never downloads `llama-server` or a model. Both are large, both belong to
+other projects with their own instructions and their own licences, and a setup
+script that quietly pulls gigabytes over someone's connection is not being
+helpful. It checks for them and names exactly what is missing.
+
+### If something goes wrong
+
+| Symptom | Cause |
+|---|---|
+| `/usr/bin/env: 'bash\r'` | The scripts are committed with LF via `.gitattributes`; this means a checkout converted them. Re-clone, or `dos2unix setup.sh` |
+| `Permission denied: ./setup.sh` | `chmod +x setup.sh start.sh`, or just run `bash setup.sh` |
+| `ensurepip is not available` | Debian/Ubuntu split it out: `sudo apt install python3-venv` |
+| `llama-server not found` | Not on `PATH` and not at the `server_exe` path. See step 4 |
+| No models listed | No `.gguf` in `weights/`. See step 5 |
+| Port 8000 or 5173 in use | An earlier run is still going. Both launchers name the process holding it |
 
 ---
 
@@ -274,15 +351,31 @@ still works if the weights live on another drive.
 
 ### Web UI
 
-Two processes: the API, and the front end that talks to it.
+One command, either platform:
 
 ```bash
-cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+start.bat
 ```
 
 ```bash
-cd "C:\path\to\Hakim Local Agent" && npm --prefix web run dev
+./start.sh
 ```
+
+Each starts both servers, checks the ports first, and names the process holding
+one if it is busy. `start.bat` opens a window per server; `start.sh` runs them
+in the foreground and stops both on Ctrl-C.
+
+By hand it is two processes — the API, and the front end that talks to it:
+
+```bash
+.venv\Scripts\python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+
+```bash
+npm --prefix web run dev
+```
+
+On Linux the interpreter is `.venv/bin/python` instead.
 
 Opens on <http://127.0.0.1:5173>. Vite proxies `/api` to the API, so the
 browser sees one origin. Pick a model in the sidebar, click **Load**, then
@@ -346,6 +439,9 @@ Hakim Local Agent/
 ├── uploads/             images attached in the UI (git-ignored)
 ├── samples/             example images for the OCR tool
 ├── .env                 API keys for hosted models (git-ignored)
+├── setup.bat/.sh        one-command install, both platforms
+├── start.bat/.sh        run the API and the UI together
+├── scripts/setup.py     what both setup wrappers actually run
 │
 ├── api/                 the HTTP layer the front end talks to
 │   ├── main.py          app, lifespan, static serving
@@ -413,7 +509,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               903 tests, no server required
+└── tests/               910 tests, no server required
 ```
 
 ---
@@ -2006,7 +2102,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**903 tests, no model server needed, and none of them touch the network.**
+**910 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2157,7 +2253,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 903 tests
+- 910 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

@@ -23,6 +23,8 @@ import ctypes
 import dataclasses
 import json
 import os
+import signal
+import shutil
 import socket
 import subprocess
 import threading
@@ -156,9 +158,20 @@ class ModelStatus:
 def available_ram_mb() -> int | None:
     """Free physical RAM in MB, or None if it cannot be determined.
 
-    Uses GlobalMemoryStatusEx directly rather than adding psutil for one call.
-    """
+    The platform call on each side rather than a psutil dependency for one
+    number: Windows has GlobalMemoryStatusEx, Linux has /proc/meminfo.
 
+    "Available" rather than "free" on both. Linux's MemFree excludes the page
+    cache, which the kernel hands back on demand, so a machine with plenty of
+    room can report almost none - and this number decides whether a model is
+    allowed to start.
+    """
+    if os.name == "nt":
+        return _windows_ram_mb()
+    return _proc_meminfo_ram_mb()
+
+
+def _windows_ram_mb() -> int | None:
     class MemoryStatusEx(ctypes.Structure):
         _fields_ = [
             ("dwLength", ctypes.c_ulong),
@@ -179,7 +192,60 @@ def available_ram_mb() -> int | None:
             return None
         return int(status.ullAvailPhys // (1024 * 1024))
     except (AttributeError, OSError):
-        return None  # not Windows, or the call is unavailable
+        return None
+
+
+def _proc_meminfo_ram_mb() -> int | None:
+    """MemAvailable from /proc/meminfo, in MB. None where there is no procfs."""
+    try:
+        with open("/proc/meminfo", "r", encoding="ascii") as handle:
+            return parse_meminfo(handle.read())
+    except OSError:
+        return None
+
+
+def parse_meminfo(text: str) -> int | None:
+    """MemAvailable, in MB, from the contents of /proc/meminfo.
+
+    Split from the file read so the Linux path can be tested from any machine.
+    Untested platform code is a promise rather than a feature.
+    """
+    for line in text.splitlines():
+        if line.startswith("MemAvailable:"):
+            try:
+                # "MemAvailable:    1908736 kB"
+                return int(line.split()[1]) // 1024
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def parse_ss_pid(output: str) -> int | None:
+    """The pid out of `ss -lntp` output, or None.
+
+    A line looks like:
+
+        LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:* users:(("llama-server",pid=8123,fd=7))
+
+    Split out from the call so the parsing is testable without Linux.
+    """
+    marker = "pid="
+    for line in output.splitlines():
+        if marker not in line:
+            continue
+        tail = line.split(marker, 1)[1]
+        digits = ""
+        for character in tail:
+            if character.isdigit():
+                digits += character
+            else:
+                break
+        if digits:
+            try:
+                return int(digits)
+            except ValueError:
+                continue
+    return None
 
 
 def load_registry(
@@ -220,6 +286,30 @@ def load_registry(
     def anchor(value: str) -> Path:
         candidate = Path(value).expanduser()
         return candidate if candidate.is_absolute() else (here / candidate)
+
+    def find_server(value: str) -> Path:
+        """Where llama-server is, preferring the registry but not insisting.
+
+        A fresh clone has whatever path the last person committed, which is
+        almost certainly wrong on someone else's machine. So a configured path
+        that does not exist falls back to PATH - if `llama-server` is
+        installed the way its own instructions suggest, the checkout works
+        without editing anything.
+
+        A configured path that DOES exist always wins: someone who wrote one
+        down meant it, including when a different build is also on PATH.
+        """
+        if value:
+            configured = anchor(value)
+            if configured.is_file():
+                return configured
+        for name in ("llama-server", "llama-server.exe"):
+            found = shutil.which(name)
+            if found:
+                return Path(found)
+        # Nothing found. Return the configured path anyway so the error names
+        # what was actually looked for rather than something invented here.
+        return anchor(value) if value else Path("llama-server")
 
     # Defaults to weights/ rather than the registry's own folder. `models/`
     # would be the obvious name but it is the Python package, and a data
@@ -370,7 +460,7 @@ def load_registry(
         return chosen if chosen in offered else fallback
 
     return {
-        "server_exe": anchor(raw.get("server_exe", "")),
+        "server_exe": find_server(raw.get("server_exe", "")),
         "specs": specs,
         "offered": offered,
         "default": fallback,
@@ -854,7 +944,11 @@ class ModelManager:
 
     def _start(self, spec: ModelSpec) -> None:
         if not self._server_exe.is_file():
-            raise ModelManagerError(f"llama-server not found: {self._server_exe}")
+            raise ModelManagerError(
+                f"llama-server not found: {self._server_exe}. Install it and "
+                f"put it on PATH, or set \"server_exe\" in models.json to "
+                f"where it actually is."
+            )
 
         status = self._statuses[spec.key]
         status.state = ModelState.STARTING
@@ -928,7 +1022,17 @@ class ModelManager:
         return completed.stdout or ""
 
     def listener_pid(self, port: int) -> int | None:
-        """PID of whatever is listening on `port`, or None."""
+        """PID of whatever is listening on `port`, or None.
+
+        Used to decide whether a server already on one of our ports is a
+        llama-server worth adopting, or something else that must be left
+        alone. Both halves of that question need a pid.
+        """
+        if os.name == "nt":
+            return self._listener_pid_windows(port)
+        return self._listener_pid_posix(port)
+
+    def _listener_pid_windows(self, port: int) -> int | None:
         for line in self._run_quiet(["netstat", "-ano", "-p", "TCP"]).splitlines():
             parts = line.split()
             if len(parts) >= 5 and parts[3].upper() == "LISTENING":
@@ -939,14 +1043,46 @@ class ModelManager:
                         return None
         return None
 
+    def _listener_pid_posix(self, port: int) -> int | None:
+        """`ss` first, then `lsof`.
+
+        `ss` is part of iproute2 and present on essentially every modern
+        Linux; `lsof` covers the rest and macOS. Parsing /proc/net/tcp by hand
+        would avoid both, but it means matching socket inodes against every
+        process's file descriptors, which is a great deal of code for a
+        question two standard tools answer directly.
+        """
+        pid = parse_ss_pid(self._run_quiet(["ss", "-lntpH", f"sport = :{port}"]))
+        if pid is not None:
+            return pid
+
+        out = self._run_quiet(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"]
+        )
+        for line in out.splitlines():
+            try:
+                return int(line.strip())
+            except ValueError:
+                continue
+        return None
+
     def process_name(self, pid: int) -> str:
         """Image name for a pid, lowercased. Empty when unknown."""
-        out = self._run_quiet(
-            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"]
-        ).strip()
-        if not out or "No tasks" in out:
-            return ""
-        return out.splitlines()[0].split(",")[0].strip('"').lower()
+        if os.name == "nt":
+            out = self._run_quiet(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"]
+            ).strip()
+            if not out or "No tasks" in out:
+                return ""
+            return out.splitlines()[0].split(",")[0].strip('"').lower()
+
+        # procfs knows without spawning anything.
+        try:
+            with open(f"/proc/{int(pid)}/comm", "r", encoding="utf-8") as handle:
+                return handle.read().strip().lower()
+        except OSError:
+            pass
+        return self._run_quiet(["ps", "-p", str(pid), "-o", "comm="]).strip().lower()
 
     def _stop_foreign(self, spec: ModelSpec) -> bool:
         """Stop a llama-server on one of our ports that we did not start.
@@ -962,11 +1098,26 @@ class ModelManager:
         if "llama-server" not in self.process_name(pid):
             return False
 
-        self._run_quiet(["taskkill", "/F", "/PID", str(pid)])
+        self._kill(pid)
         deadline = time.time() + 10
         while time.time() < deadline and self._healthy(spec.port):
             time.sleep(0.5)
         return not self._healthy(spec.port)
+
+    def _kill(self, pid: int) -> None:
+        """Stop a process we did not start, by pid.
+
+        Only ever called after `process_name` has confirmed it is a
+        llama-server, which is what keeps this from killing whatever happens
+        to be holding the port.
+        """
+        if os.name == "nt":
+            self._run_quiet(["taskkill", "/F", "/PID", str(pid)])
+            return
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except (OSError, ValueError, AttributeError):
+            pass
 
     def _spawn(self, command: list[str]) -> subprocess.Popen:
         """Launch llama-server. Overridden in tests to avoid real processes."""

@@ -22,6 +22,19 @@ import sqlite3
 import tempfile
 import time
 import unittest
+
+# These need the optional document-search dependencies, and must be checked
+# BEFORE the imports that use them: an import error reads as a broken test
+# suite rather than as "that part is not installed", which is a supported way
+# to run this project. unittest turns a SkipTest raised here into a skipped
+# module.
+try:
+    import numpy  # noqa: F401
+except ImportError:  # pragma: no cover - depends on what is installed
+    raise unittest.SkipTest(
+        "document search dependencies are not installed "
+        "(pip install -r requirements-rag.txt)"
+    )
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -45,6 +58,7 @@ from memory import extraction, retrieval
 from tests.test_manager import ManagerHarness, write_registry
 from tools.base import ToolRegistry
 from tools.memory_tool import MemoryToolError, build_memory_tools
+
 
 DIMENSION = 384
 

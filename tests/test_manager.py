@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 
 from models.manager import (
+    parse_meminfo,
+    parse_ss_pid,
     HARD_FLOOR_MB,
     ModelManager,
     ModelManagerError,
@@ -375,3 +377,54 @@ class RamGuardTests(unittest.TestCase):
         self.manager.fake_ram = 8000
         self.manager.ensure("fast")
         self.assertEqual(self.manager.status("fast").warning, "")
+
+
+class PlatformTests(unittest.TestCase):
+    """The Linux halves of the process layer, exercised from any machine.
+
+    These parse what `ss` and /proc/meminfo produce. The calls themselves
+    cannot be made on Windows, but the parsing is where the bugs live, and
+    untested platform code is a promise rather than a feature.
+    """
+
+    MEMINFO = (
+        "MemTotal:        8123456 kB\n"
+        "MemFree:          123456 kB\n"
+        "MemAvailable:    1908736 kB\n"
+        "Buffers:           45678 kB\n"
+    )
+
+    def test_available_memory_is_read_from_meminfo(self):
+        self.assertEqual(parse_meminfo(self.MEMINFO), 1864)
+
+    def test_it_reads_available_not_free(self):
+        """MemFree excludes the page cache, which the kernel hands back on
+        demand - using it would refuse to start a model on a machine with
+        plenty of room."""
+        self.assertNotEqual(parse_meminfo(self.MEMINFO), 120)
+
+    def test_meminfo_without_the_field_is_unknown_rather_than_zero(self):
+        self.assertIsNone(parse_meminfo("MemTotal: 8123456 kB\n"))
+        self.assertIsNone(parse_meminfo(""))
+
+    def test_a_malformed_meminfo_line_is_unknown(self):
+        self.assertIsNone(parse_meminfo("MemAvailable:    not-a-number kB\n"))
+
+    def test_the_listening_pid_is_read_from_ss(self):
+        line = (
+            'LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:* '
+            'users:(("llama-server",pid=8123,fd=7))'
+        )
+        self.assertEqual(parse_ss_pid(line), 8123)
+
+    def test_ss_output_with_no_process_column_yields_nothing(self):
+        """Without root, ss omits the users:(...) column entirely."""
+        self.assertIsNone(parse_ss_pid("LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:*"))
+        self.assertIsNone(parse_ss_pid(""))
+
+    def test_the_first_listener_wins_when_several_are_reported(self):
+        output = (
+            'LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:* users:(("first",pid=11,fd=7))\n'
+            'LISTEN 0 4096 [::1]:8080 [::]:* users:(("second",pid=22,fd=8))\n'
+        )
+        self.assertEqual(parse_ss_pid(output), 11)

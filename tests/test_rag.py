@@ -21,6 +21,19 @@ import os
 import sqlite3
 import tempfile
 import unittest
+
+# These need the optional document-search dependencies, and must be checked
+# BEFORE the imports that use them: an import error reads as a broken test
+# suite rather than as "that part is not installed", which is a supported way
+# to run this project. unittest turns a SkipTest raised here into a skipped
+# module.
+try:
+    import numpy  # noqa: F401
+except ImportError:  # pragma: no cover - depends on what is installed
+    raise unittest.SkipTest(
+        "document search dependencies are not installed "
+        "(pip install -r requirements-rag.txt)"
+    )
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +55,7 @@ from tests.pdf_fixture import (
 from tools.base import ToolRegistry
 from tools.document_search import DocumentSearchError, DocumentSearchTools
 from tools.registry import build_default_registry
+
 
 DIMENSION = 384
 

@@ -23,6 +23,38 @@ class DisabledTool:
     reason: str
 
 
+# Said when a tool is switched on but the packages it needs are not there.
+# A fresh clone installs the small dependency set by default, so this is what
+# someone sees after turning on memory or document search without having run
+# the setup script with --with-rag.
+MISSING_DEPS = (
+    "switched on, but its dependencies are not installed. They are optional "
+    "and large (numpy, torch, sentence-transformers), so they are a separate "
+    "install: `pip install -r requirements-rag.txt`, or re-run the setup "
+    "script with --with-rag."
+)
+
+
+def _installed(category: str) -> bool:
+    """Whether an optional tool's dependencies are importable.
+
+    Checked rather than assumed, because the alternative is an ImportError out
+    of `build_default_registry` - which is called by /api/tools, so a missing
+    package would turn the whole roster endpoint into a 500 instead of one
+    tool reporting itself unavailable.
+    """
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        return False
+    if category == "documents":
+        try:
+            import sentence_transformers  # noqa: F401
+        except ImportError:
+            return False
+    return True
+
+
 def build_default_registry(config: Config) -> tuple[ToolRegistry, list[DisabledTool]]:
     """Build the registry, plus the list of tools deliberately left out.
 
@@ -147,7 +179,7 @@ def build_default_registry(config: Config) -> tuple[ToolRegistry, list[DisabledT
             )
         )
 
-    if config.memory_tool_enabled:
+    if config.memory_tool_enabled and _installed("memory"):
         # Imported here so the CLI does not pull in numpy when memory is
         # off, exactly as document search does.
         from memory.manager import shared_manager
@@ -167,6 +199,8 @@ def build_default_registry(config: Config) -> tuple[ToolRegistry, list[DisabledT
         )
         for tool in build_memory_tools(memory):
             registry.register(tool)
+    elif config.memory_tool_enabled:
+        disabled.append(DisabledTool(category="memory", reason=MISSING_DEPS))
     else:
         disabled.append(
             DisabledTool(
@@ -182,7 +216,7 @@ def build_default_registry(config: Config) -> tuple[ToolRegistry, list[DisabledT
             )
         )
 
-    if config.rag_enabled:
+    if config.rag_enabled and _installed("documents"):
         # Imported here, not at the top: this module pulls in numpy and
         # the whole rag package, and the CLI is supposed to run on
         # `requests` alone when document search is off.
@@ -206,6 +240,8 @@ def build_default_registry(config: Config) -> tuple[ToolRegistry, list[DisabledT
             idle_seconds=config.rag_idle_seconds,
         ):
             registry.register(tool)
+    elif config.rag_enabled:
+        disabled.append(DisabledTool(category="documents", reason=MISSING_DEPS))
     else:
         disabled.append(
             DisabledTool(

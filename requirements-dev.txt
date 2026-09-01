@@ -1,0 +1,8 @@
+# Only needed to run the test suite. The application itself does not import
+# any of this, which is why it is not in requirements.txt.
+
+# Starlette's TestClient drives the app in-process, and needs an HTTP client
+# to do it. httpx2 rather than httpx: starlette accepts both, but warns on
+# every single test that httpx is deprecated, and a suite of 900 tests should
+# not print 900 warnings about its own plumbing.
+httpx2>=0.28

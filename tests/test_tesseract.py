@@ -413,8 +413,19 @@ class RegistryTests(StubCase):
         self.assertEqual(result.payload["backend"], "tesseract")
 
 
+def _pillow_installed() -> bool:
+    """The generated-image test draws with Pillow, which ships with the
+    optional document-search dependencies rather than the base install."""
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 @unittest.skipUnless(
-    find_tesseract(""), "Tesseract is not installed on this machine"
+    find_tesseract("") and _pillow_installed(),
+    "needs Tesseract and Pillow, which are both optional",
 )
 class RealTesseractTests(unittest.TestCase):
     """Against a real Tesseract, when there is one.
