@@ -64,6 +64,13 @@ ASSUMED_CACHE_MB = 200
 # to the last byte takes the machine down with it.
 DISK_MARGIN_MB = 500
 
+# How many times to pick a dropped download back up, and how long to wait in
+# between. A model is gigabytes over a connection that is not reliable for
+# that long, so this is the difference between a large model finishing and one
+# that never can.
+ATTEMPTS = 5
+BACKOFF_SECONDS = 2.0
+
 
 class HubError(Exception):
     """Searching or downloading failed, with something worth reading."""
@@ -355,6 +362,11 @@ class Downloads:
         self._thread.start()
         return download
 
+    def _raise_if_cancelled(self, download: Download) -> None:
+        with self._lock:
+            if download.id in self._cancelled:
+                raise _Cancelled()
+
     def cancel(self, download_id: str) -> bool:
         with self._lock:
             download = self._downloads.get(download_id)
@@ -368,38 +380,13 @@ class Downloads:
         url = f"{HOST}/{download.repo}/resolve/main/{download.path}"
 
         try:
-            with requests.get(
-                url, headers=HEADERS, stream=True, timeout=DOWNLOAD_TIMEOUT
-            ) as response:
-                if response.status_code in (401, 403):
-                    raise HubError(
-                        "That file needs a Hugging Face login. Accept the "
-                        "repository's terms on the website, then download it "
-                        "by hand into weights/."
-                    )
-                if response.status_code >= 400:
-                    raise HubError(f"Download returned HTTP {response.status_code}.")
-
-                declared = int(response.headers.get("Content-Length") or 0)
-                if declared and not download.total_bytes:
-                    download.total_bytes = declared
-
-                # 64 KB rather than a megabyte. Cancellation is only checked
-                # between blocks, and on the slow connection where somebody
-                # actually wants to cancel, a 1 MB block is seven seconds of a
-                # button that looks broken.
-                with partial.open("wb") as handle:
-                    for block in response.iter_content(chunk_size=1 << 16):
-                        with self._lock:
-                            if download.id in self._cancelled:
-                                raise _Cancelled()
-                        handle.write(block)
-                        download.seen_bytes += len(block)
+            self._fetch(download, url, partial)
 
             if download.total_bytes and download.seen_bytes != download.total_bytes:
                 raise HubError(
                     f"Got {download.seen_bytes:,} bytes, expected "
-                    f"{download.total_bytes:,}. The connection was interrupted."
+                    f"{download.total_bytes:,} after {ATTEMPTS} tries. The "
+                    f"connection kept dropping; try again later."
                 )
 
             # Renamed only now. A .part file cannot be mistaken for a model,
@@ -422,6 +409,83 @@ class Downloads:
             download.finished = time.time()
             with self._lock:
                 self._cancelled.discard(download.id)
+
+
+    def _fetch(self, download: Download, url: str, partial: Path) -> None:
+        """Stream the file, picking it back up whenever the connection drops.
+
+        A model is gigabytes and a domestic connection is not reliable for
+        that long. Without `Range` a drop at 90% costs the whole thing, which
+        on a slow link means a large model can never finish at all.
+
+        The part-file is kept between attempts precisely because it is the
+        thing being resumed; it is deleted only on cancellation or final
+        failure, where it would otherwise be litter nothing will pick up.
+        """
+        last_error = ""
+
+        for attempt in range(ATTEMPTS):
+            self._raise_if_cancelled(download)
+
+            headers = dict(HEADERS)
+            if download.seen_bytes:
+                headers["Range"] = f"bytes={download.seen_bytes}-"
+
+            try:
+                with requests.get(
+                    url, headers=headers, stream=True, timeout=DOWNLOAD_TIMEOUT
+                ) as response:
+                    if response.status_code in (401, 403):
+                        raise HubError(
+                            "That file needs a Hugging Face login. Accept the "
+                            "repository's terms on the website, then download "
+                            "it by hand into weights/."
+                        )
+                    if response.status_code == 416:
+                        return  # nothing left to send
+                    if response.status_code >= 400:
+                        raise HubError(
+                            f"Download returned HTTP {response.status_code}."
+                        )
+
+                    # 206 means the range was honoured. A plain 200 to a ranged
+                    # request means it was not, and the file is coming from the
+                    # start again - so the part-file has to go with it.
+                    append = download.seen_bytes > 0 and response.status_code == 206
+                    if not append:
+                        download.seen_bytes = 0
+
+                    declared = int(response.headers.get("Content-Length") or 0)
+                    if declared and not download.total_bytes and not append:
+                        download.total_bytes = declared
+
+                    # 64 KB rather than a megabyte. Cancellation is only
+                    # checked between blocks, and on the slow connection where
+                    # somebody actually wants to cancel, a 1 MB block is seven
+                    # seconds of a button that looks broken.
+                    with partial.open("ab" if append else "wb") as handle:
+                        for block in response.iter_content(chunk_size=1 << 16):
+                            self._raise_if_cancelled(download)
+                            handle.write(block)
+                            download.seen_bytes += len(block)
+
+                if not download.total_bytes or download.seen_bytes >= download.total_bytes:
+                    return
+                last_error = "the connection ended early"
+
+            except (_Cancelled, HubError):
+                raise
+            except requests.RequestException as exc:
+                last_error = str(exc)
+                # Trust the file rather than the counter: a partial write may
+                # have landed after the last increment.
+                download.seen_bytes = partial.stat().st_size if partial.exists() else 0
+
+            if attempt < ATTEMPTS - 1:
+                time.sleep(BACKOFF_SECONDS)
+
+        if last_error:
+            download.error = last_error
 
 
 class _Cancelled(Exception):

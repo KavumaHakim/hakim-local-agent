@@ -14,7 +14,9 @@ import os
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 import zipfile
 from pathlib import Path
@@ -166,6 +168,126 @@ class BackendTests(unittest.TestCase):
                 with self.assertRaises(get_llama.LlamaError) as caught:
                     get_llama.platform_tokens("vulkan")
         self.assertIn("Metal", str(caught.exception))
+
+
+class _Flaky(BaseHTTPRequestHandler):
+    """Drops the first attempt half-way, then honours Range like a real CDN.
+
+    Not a hypothetical failure: fetching the 35 MB Vulkan archive over a
+    domestic connection died three times in a row exactly this way, at 2 MB,
+    then 20 MB, then part-way again.
+    """
+
+    BODY = b"PK\x03\x04" + bytes(range(256)) * 400
+    served = 0
+    honour_range = True
+    # Set when a test wants every attempt cut short rather than just the
+    # first: the link that never finishes however patient you are.
+    always_cut = False
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        type(self).served += 1
+        start = 0
+        header = self.headers.get("Range")
+
+        if header and self.honour_range:
+            start = int(header.split("=", 1)[1].split("-", 1)[0])
+            self.send_response(206)
+            self.send_header(
+                "Content-Range",
+                f"bytes {start}-{len(self.BODY) - 1}/{len(self.BODY)}",
+            )
+        else:
+            self.send_response(200)
+
+        body = self.BODY[start:]
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+
+        first = type(self).served == 1
+        cut = len(body) // 2 if (first or type(self).always_cut) else len(body)
+        try:
+            self.wfile.write(body[:cut])
+            self.wfile.flush()
+        except OSError:
+            pass
+        if cut < len(body):
+            self.close_connection = True
+
+
+class DownloadResumeTests(unittest.TestCase):
+    """Picking the archive back up instead of losing all of it.
+
+    Both transports are exercised. `requests` is what actually runs through
+    the virtualenv, but urllib is the fallback for a machine where nothing is
+    installed yet - which is precisely the machine running the setup script,
+    so it is the path least able to afford being broken.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+        _Flaky.served = 0
+        _Flaky.honour_range = True
+        _Flaky.always_cut = False
+        self.server = HTTPServer(("127.0.0.1", 0), _Flaky)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/build.zip"
+
+        # No point waiting two seconds a try in a test.
+        backoff = mock.patch.object(get_llama, "BACKOFF_SECONDS", 0.01)
+        backoff.start()
+        self.addCleanup(backoff.stop)
+        quiet = mock.patch.object(get_llama, "say", lambda *a, **k: None)
+        quiet.start()
+        self.addCleanup(quiet.stop)
+
+    def use_urllib(self):
+        patch = mock.patch.object(get_llama, "_requests", lambda: None)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_dropped_connection_is_picked_back_up(self):
+        target = self.tmp / "build.zip"
+        get_llama.download(self.url, target, len(_Flaky.BODY))
+        self.assertEqual(target.read_bytes(), _Flaky.BODY)
+
+    def test_it_took_more_than_one_request(self):
+        """Proof it resumed rather than getting lucky on the first try."""
+        get_llama.download(self.url, self.tmp / "build.zip", len(_Flaky.BODY))
+        self.assertGreater(_Flaky.served, 1)
+
+    def test_the_urllib_fallback_resumes_too(self):
+        self.use_urllib()
+        target = self.tmp / "build.zip"
+        get_llama.download(self.url, target, len(_Flaky.BODY))
+        self.assertEqual(target.read_bytes(), _Flaky.BODY)
+        self.assertGreater(_Flaky.served, 1)
+
+    def test_a_server_that_ignores_the_range_starts_over_cleanly(self):
+        """A 200 to a ranged request means the whole file is coming again.
+        Appending it to what is already on disk would double the archive."""
+        _Flaky.honour_range = False
+        target = self.tmp / "build.zip"
+        get_llama.download(self.url, target, len(_Flaky.BODY))
+        self.assertEqual(target.read_bytes(), _Flaky.BODY)
+
+    def test_giving_up_says_so_rather_than_leaving_a_short_file(self):
+        """A truncated archive that is treated as complete unpacks into a
+        broken toolchain, which is a worse failure than a failed download."""
+        _Flaky.always_cut = True
+        with self.assertRaises(get_llama.LlamaError) as caught:
+            get_llama.download(
+                self.url, self.tmp / "build.zip", len(_Flaky.BODY), attempts=2
+            )
+        self.assertIn("tries", str(caught.exception))
 
 
 class UnpackTests(unittest.TestCase):

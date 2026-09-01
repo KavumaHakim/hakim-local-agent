@@ -417,7 +417,9 @@ python scripts/get_llama.py
 
 It lands in `vendor/llama/`, which is git-ignored. `--build b10731` pins a
 release, `--force` re-downloads, and `--list` shows what would be fetched
-without fetching it.
+without fetching it. It resumes a dropped connection the same way the model
+browser does, over both transports — `requests` when it is installed, urllib
+when nothing is yet, which is exactly the machine running this script.
 
 `--backend vulkan` fetches the Vulkan build instead, into `vendor/llama-vulkan/`
 **beside** the CPU one rather than replacing it — because the only way to know
@@ -529,7 +531,7 @@ By hand it is `cp .env.example .env` and fill in what you need.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-1016 tests, no model server needed, and none of them touch the network.
+1025 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -723,7 +725,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               1016 tests, no server required
+└── tests/               1025 tests, no server required
 ```
 
 ---
@@ -957,6 +959,19 @@ That figure is the arithmetic below, applied to the file size **before** the
 file is downloaded, and compared against what is free right now. Being told a
 4.8 GB file wants 6.2 GB free is worth more than any download speed.
 
+Downloads resume, and that is not a nicety. A model is gigabytes and a
+domestic connection is not reliable for that long; without `Range` a drop at
+90% costs the whole thing, which on a slow link means a large model can never
+finish at all. This was measured the hard way — fetching a 35 MB archive here
+failed three times in a row, at 2 MB, then 20 MB, then part-way again. The
+`.part` file is what gets resumed, so it survives between attempts and is
+deleted only on cancellation or final failure.
+
+Two server behaviours are handled rather than assumed: answering **200** to a
+ranged request, which means the range was ignored and the whole file is coming
+again — so what is on disk has to be thrown away rather than appended to — and
+answering **416**, which means there was nothing left to send.
+
 Downloads run on their own thread, so a two-hour fetch does not block a
 conversation, and one at a time for the reason the model manager runs one
 server at a time. Progress, speed and an estimate are polled once a second.
@@ -972,6 +987,7 @@ What is enforced, because this reaches the network and writes to disk:
 | Name | rebuilt from the basename — `../../.ssh/x.gguf` saves as `x.gguf` |
 | Disk | checked before any bytes move, keeping 500 MB spare |
 | Atomicity | written to `.part`, renamed only when complete, so discovery never sees a half-model |
+| Resume | a dropped connection is picked back up with `Range`, five tries, keeping the bytes already on disk |
 | Gated repos | reported as gated; this app holds no credentials |
 
 ### Choosing a model for your hardware
@@ -2442,7 +2458,7 @@ fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**1016 tests, no model server needed, and none of them touch the network.**
+**1025 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2593,7 +2609,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 1016 tests
+- 1025 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

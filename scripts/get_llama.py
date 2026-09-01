@@ -39,6 +39,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -268,54 +269,131 @@ def find_asset(build: str | None, backend: str = "cpu") -> tuple[str, str, str, 
 # --- fetching and unpacking -----------------------------------------------
 
 
-def download(url: str, target: Path, size: int, on_progress=None) -> None:
-    # A bar when the caller supplied one, a line when it did not. This module
-    # knows nothing about the terminal; the caller hands in something with
-    # advance() and done(), or nothing at all.
+# How many times to pick a download back up before giving in, and how long to
+# wait between tries. Measured need rather than caution: this archive failed
+# three times in a row on a domestic connection, at 2 MB, then 20 MB, then
+# part-way again, each time with the connection simply dropping.
+ATTEMPTS = 5
+BACKOFF_SECONDS = 2.0
+
+# Per-attempt timeout. Generous because it covers a whole 35 MB transfer on a
+# slow link, and a resumed attempt is shorter than the one before it.
+DOWNLOAD_TIMEOUT = 300
+
+
+def download(
+    url: str, target: Path, size: int, on_progress=None, attempts: int = ATTEMPTS
+) -> None:
+    """Fetch `url` into `target`, picking up where it left off if cut off.
+
+    A dropped connection part-way through a 35 MB archive used to lose all of
+    it. With `Range` the bytes already on disk are kept and the rest is asked
+    for, which is the difference between a download that eventually finishes on
+    a bad link and one that never does.
+
+    Two things the server may do have to be handled rather than assumed:
+    answering 200 to a ranged request, which means it ignored the range and is
+    sending the whole file again, and answering 416, which means there was
+    nothing left to send.
+    """
     bar = on_progress("downloading", size) if on_progress else None
     if bar is None:
         say(f"  downloading {size / 1e6:.1f} MB ...")
-    session = _requests()
 
-    if session is not None:
+    session = _requests()
+    done = 0
+    last_error = ""
+
+    for attempt in range(attempts):
         try:
-            with session.get(url, headers=HEADERS, stream=True, timeout=300) as response:
-                if response.status_code >= 400:
-                    raise LlamaError(f"Download returned HTTP {response.status_code}")
-                with target.open("wb") as handle:
-                    for block in response.iter_content(chunk_size=1 << 18):
-                        handle.write(block)
-                        if bar is not None:
-                            bar.advance(len(block))
-        except LlamaError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - requests' own error tree
-            raise LlamaError(f"Download failed: {exc}") from None
+            if session is not None:
+                done = _fetch_requests(session, url, target, done, bar)
+            else:
+                done = _fetch_urllib(url, target, done, bar)
+
+            if not size or done >= size:
+                break
+            # A clean end short of the total is still a truncated file.
+            last_error = f"stopped at {done:,} of {size:,} bytes"
+        except Exception as exc:  # noqa: BLE001 - any transport failure retries
+            last_error = str(exc)
+            done = target.stat().st_size if target.exists() else 0
+
+        if attempt < attempts - 1:
+            remaining = f"{(size - done) / 1e6:.1f} MB left" if size else ""
+            say(f"  connection dropped; resuming {remaining}")
+            time.sleep(BACKOFF_SECONDS)
     else:
-        request = urllib.request.Request(
-            url, headers={"User-Agent": "hakim-local-agent-setup"}
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=300) as response:
-                with target.open("wb") as handle:
-                    while True:
-                        block = response.read(1 << 18)
-                        if not block:
-                            break
-                        handle.write(block)
-                        if bar is not None:
-                            bar.advance(len(block))
-        except (urllib.error.URLError, OSError) as exc:
-            raise LlamaError(f"Download failed: {exc}") from None
+        raise LlamaError(f"Download failed after {attempts} tries: {last_error}")
 
     if bar is not None:
         bar.done()
 
     if size and target.stat().st_size != size:
         raise LlamaError(
-            f"Downloaded {target.stat().st_size} bytes, expected {size}. "
-            f"The connection was probably interrupted; try again."
+            f"Got {target.stat().st_size:,} bytes, expected {size:,}, after "
+            f"{attempts} tries. Try again later, or download it by hand."
         )
+
+
+def _range_headers(done: int) -> dict:
+    headers = dict(HEADERS)
+    if done:
+        headers["Range"] = f"bytes={done}-"
+    return headers
+
+
+def _fetch_requests(session, url: str, target: Path, done: int, bar) -> int:
+    with session.get(
+        url, headers=_range_headers(done), stream=True, timeout=DOWNLOAD_TIMEOUT
+    ) as response:
+        if response.status_code == 416:
+            return done  # nothing left to send
+        if response.status_code >= 400:
+            raise LlamaError(f"Download returned HTTP {response.status_code}")
+
+        # 206 means the range was honoured; a plain 200 to a ranged request
+        # means it was not, and the file is arriving from the beginning again.
+        append = done > 0 and response.status_code == 206
+        if not append:
+            done = 0
+            if bar is not None:
+                bar.seen = 0
+
+        with target.open("ab" if append else "wb") as handle:
+            for block in response.iter_content(chunk_size=1 << 16):
+                handle.write(block)
+                done += len(block)
+                if bar is not None:
+                    bar.advance(len(block))
+    return done
+
+
+def _fetch_urllib(url: str, target: Path, done: int, bar) -> int:
+    request = urllib.request.Request(url, headers=_range_headers(done))
+    try:
+        response = urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 416:
+            return done
+        raise
+
+    with response:
+        append = done > 0 and response.status == 206
+        if not append:
+            done = 0
+            if bar is not None:
+                bar.seen = 0
+        with target.open("ab" if append else "wb") as handle:
+            while True:
+                block = response.read(1 << 16)
+                if not block:
+                    break
+                handle.write(block)
+                done += len(block)
+                if bar is not None:
+                    bar.advance(len(block))
+    return done
 
 
 def unpack(archive: Path, into: Path) -> None:

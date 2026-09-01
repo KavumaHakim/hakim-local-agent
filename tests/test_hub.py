@@ -183,6 +183,125 @@ class _Serve(BaseHTTPRequestHandler):
             time.sleep(self.DELAY)
 
 
+class _Flaky(BaseHTTPRequestHandler):
+    """Drops the first attempt half-way, then honours Range like a real CDN.
+
+    This is the condition the resume logic exists for, and it is not
+    hypothetical: fetching a 35 MB archive over a domestic connection failed
+    three times in a row this way.
+    """
+
+    BODY = b"GGUF" + bytes(range(256)) * 800
+    served = 0
+    honour_range = True
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        type(self).served += 1
+        start = 0
+        header = self.headers.get("Range")
+
+        if header and self.honour_range:
+            start = int(header.split("=", 1)[1].split("-", 1)[0])
+            self.send_response(206)
+            self.send_header(
+                "Content-Range",
+                f"bytes {start}-{len(self.BODY) - 1}/{len(self.BODY)}",
+            )
+        elif header and not self.honour_range:
+            # A server that ignores the range and sends the whole thing again.
+            self.send_response(200)
+        else:
+            self.send_response(200)
+
+        body = self.BODY[start:]
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+
+        # The first attempt stops half-way with no explanation, as a dropped
+        # connection does.
+        cut = len(body) // 2 if type(self).served == 1 else len(body)
+        try:
+            self.wfile.write(body[:cut])
+            self.wfile.flush()
+        except OSError:
+            pass
+        if cut < len(body):
+            self.close_connection = True
+
+
+class ResumeTests(unittest.TestCase):
+    """Picking a download back up rather than losing all of it."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+        _Flaky.served = 0
+        _Flaky.honour_range = True
+        self.server = HTTPServer(("127.0.0.1", 0), _Flaky)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+        patch = mock.patch.object(hub, "HOST", f"http://127.0.0.1:{self.server.server_address[1]}")
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        # No point waiting two seconds a try in a test.
+        backoff = mock.patch.object(hub, "BACKOFF_SECONDS", 0.01)
+        backoff.start()
+        self.addCleanup(backoff.stop)
+
+        self.downloads = Downloads(self.tmp)
+
+    def wait(self, download, timeout: float = 20.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline and download.state == "running":
+            time.sleep(0.02)
+
+    def test_a_dropped_connection_is_picked_back_up(self):
+        download = self.downloads.start(
+            "owner/repo", "resumed.gguf", size_bytes=len(_Flaky.BODY)
+        )
+        self.wait(download)
+
+        self.assertEqual(download.state, "done", download.error)
+        landed = self.tmp / "resumed.gguf"
+        self.assertEqual(landed.read_bytes(), _Flaky.BODY)
+
+    def test_it_took_more_than_one_request(self):
+        """Proof it actually resumed rather than getting lucky."""
+        download = self.downloads.start(
+            "owner/repo", "resumed.gguf", size_bytes=len(_Flaky.BODY)
+        )
+        self.wait(download)
+        self.assertGreater(_Flaky.served, 1)
+
+    def test_a_server_that_ignores_the_range_starts_over_cleanly(self):
+        """Answering 200 to a ranged request means the whole file is coming
+        again - appending it to what is already there doubles the file."""
+        _Flaky.honour_range = False
+        download = self.downloads.start(
+            "owner/repo", "restarted.gguf", size_bytes=len(_Flaky.BODY)
+        )
+        self.wait(download)
+
+        self.assertEqual(download.state, "done", download.error)
+        self.assertEqual((self.tmp / "restarted.gguf").read_bytes(), _Flaky.BODY)
+
+    def test_progress_does_not_go_backwards_across_a_resume(self):
+        download = self.downloads.start(
+            "owner/repo", "watched.gguf", size_bytes=len(_Flaky.BODY)
+        )
+        self.wait(download)
+        self.assertEqual(download.seen_bytes, len(_Flaky.BODY))
+        self.assertEqual(download.as_dict()["percent"], 100.0)
+
+
 class DownloadTests(unittest.TestCase):
     """The machinery, against a local server rather than a real 2 GB file."""
 
@@ -205,9 +324,13 @@ class DownloadTests(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
+        backoff = mock.patch.object(hub, "BACKOFF_SECONDS", 0.01)
+        backoff.start()
+        self.addCleanup(backoff.stop)
+
         self.downloads = Downloads(self.tmp)
 
-    def wait(self, download, timeout: float = 10.0) -> None:
+    def wait(self, download, timeout: float = 25.0) -> None:
         deadline = time.time() + timeout
         while time.time() < deadline and download.state == "running":
             time.sleep(0.02)
@@ -291,7 +414,7 @@ class DownloadTests(unittest.TestCase):
         )
         self.wait(download)
         self.assertEqual(download.state, "failed")
-        self.assertIn("interrupted", download.error)
+        self.assertIn("kept dropping", download.error)
         self.assertFalse((self.tmp / "short.gguf").exists())
 
 
