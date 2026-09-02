@@ -191,15 +191,21 @@ def choose_context(
 
 
 def estimate_min_free_mb(
-    file_bytes: int, info: GgufInfo | None, context: int
+    file_bytes: int, info: GgufInfo | None, context: int, projector_bytes: int = 0
 ) -> int:
     """Free RAM to insist on before starting this model.
 
     Weights plus cache plus headroom. Deliberately an over-estimate: the cost
     of being wrong high is a warning the user can override, and the cost of
     being wrong low is a machine that swaps.
+
+    `projector_bytes` counts because a vision model loads its mmproj alongside
+    the language half and holds both. Qwen3-VL 2B is a 1,056 MB model with a
+    445 MB projector, so leaving it out under-states what the model needs by
+    two fifths - which on 8 GB is the difference between a guard that works
+    and a guard that waves through the thing it exists to catch.
     """
-    weights_mb = int(file_bytes / (1024 * 1024) * WEIGHT_RESIDENCY)
+    weights_mb = int((file_bytes + projector_bytes) / (1024 * 1024) * WEIGHT_RESIDENCY)
     cache_mb = info.kv_cache_mb(context) if info is not None else 0
     if not cache_mb:
         # Unknown cache: assume the same order as a mid-sized model here
@@ -285,6 +291,10 @@ def discover(
             continue
 
         projector = _match_projector(path, projectors, sole=len(candidates) == 1)
+        try:
+            projector_size = projector.stat().st_size if projector else 0
+        except OSError:
+            projector_size = 0
         notes = [note] if note else []
         if info is None:
             notes.append(
@@ -300,7 +310,9 @@ def discover(
                 port=allocate_port(ports),
                 context=context,
                 threads=threads,
-                min_free_mb=estimate_min_free_mb(size, info, context),
+                min_free_mb=estimate_min_free_mb(
+                    size, info, context, projector_bytes=projector_size
+                ),
                 # A dropped-in vision model stays a chat model. It was
                 # briefly given GLM-OCR's role instead, on the reasoning that a
                 # projector means a vision backend - but that is only true of

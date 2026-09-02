@@ -260,6 +260,24 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(found[0].file.name, "Vision-7B.gguf")
         self.assertIsNotNone(found[0].mmproj)
 
+    def test_a_paired_projector_counts_towards_the_ram_a_model_needs(self):
+        """A vision model holds both halves at once. Qwen3-VL 2B is a 1,056 MB
+        model with a 445 MB projector, so leaving the projector out under-states
+        it by two fifths - and on 8 GB that is the guard waving through exactly
+        what it exists to catch."""
+        write_gguf(self.tmp / "Vision-2B-Q4_K_M.gguf", padding=4 * 1024 * 1024)
+        alone = discover(self.tmp)[0].min_free_mb
+
+        write_gguf(
+            self.tmp / "mmproj-Vision-2B-F16.gguf",
+            architecture="clip",
+            padding=4 * 1024 * 1024,
+        )
+        paired = discover(self.tmp)[0]
+
+        self.assertIsNotNone(paired.mmproj)
+        self.assertGreater(paired.min_free_mb, alone)
+
     def test_a_dropped_in_vision_model_is_still_a_chat_model(self):
         """It was briefly given GLM-OCR's role, which took it out of the model
         picker: discovered, listed, and impossible to talk to. GLM-OCR is an
