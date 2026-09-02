@@ -295,6 +295,10 @@ class RemoteClient:
             ) from None
 
         with response:
+            # Name the encoding before anything reads the body: requests
+            # decodes a charset-less text/event-stream as ISO-8859-1, which
+            # turns every multi-byte character into mojibake. SSE is UTF-8.
+            response.encoding = "utf-8"
             if response.status_code != 200:
                 raise RemoteHTTPError(
                     self._spec.label, response.status_code, self._scrub(response.text)

@@ -1,9 +1,17 @@
-"""Streaming client tests: SSE assembly, without a live server."""
+"""Streaming client tests: SSE assembly, and the decode beneath it.
+
+Almost everything here runs against a fake session, because the parser is
+the part worth testing. The exception is the encoding test, which needs a
+real socket to reproduce what a real server's headers do.
+"""
 
 from __future__ import annotations
 
+import http.server
 import json
+import threading
 import unittest
+from dataclasses import replace
 
 from config import Config
 from models.qwen import QwenClient, _merge_tool_call
@@ -346,6 +354,74 @@ class AgentStreamingTests(unittest.TestCase):
         agent.load_history([{"role": "user", "content": "earlier"}])
 
         self.assertEqual(agent.history, [{"role": "user", "content": "earlier"}])
+
+
+class SSEEncodingTests(unittest.TestCase):
+    """Decoding the wire, over a real socket.
+
+    The fakes above hand back text that is already `str`, so they can only
+    exercise the SSE parser and never the decode that happens under it. That
+    is where mojibake came from: llama-server labels the stream
+    `text/event-stream` and names no charset, and requests answers a missing
+    charset on any `text/*` body with ISO-8859-1. So this one test pays for a
+    real HTTP server.
+    """
+
+    text = "It’s a “quote” — café → 100%"
+
+    @classmethod
+    def setUpClass(cls):
+        # Two well-formed events, as a real server sends them.
+        body = b""
+        for piece in (cls.text[:9], cls.text[9:]):
+            chunk = {"choices": [{"delta": {"content": piece}}]}
+            # Raw UTF-8 in the JSON, not \u escapes - what llama-server sends,
+            # and the reason a wrong charset is able to do any damage.
+            line = json.dumps(chunk, ensure_ascii=False)
+            body += b"data: " + line.encode("utf-8") + b"\n\n"
+        body += b"data: [DONE]\n\n"
+
+        # Then cut the byte stream inside a character. Nothing stops a server
+        # from flushing mid-sequence, and only an incremental decoder survives
+        # it, so the wire split belongs in the test.
+        cut = body.index("’".encode("utf-8")) + 1
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                # Read the prompt before answering. Windows resets a socket
+                # that is closed with an undrained request body, and the reset
+                # reaches the client before the reply does.
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+
+                self.send_response(200)
+                # No charset, which is the whole point.
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for part in (body[:cut], body[cut:]):
+                    self.wfile.write(part)
+                    self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        cls.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+
+    def test_punctuation_survives_the_stream(self):
+        host, port = self.server.server_address
+        config = replace(Config(), qwen_url=f"http://{host}:{port}")
+        client = QwenClient(config)
+
+        message = client.chat_stream([])
+
+        self.assertEqual(message["content"], self.text)
 
 
 if __name__ == "__main__":

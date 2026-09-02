@@ -246,6 +246,12 @@ class QwenClient:
             raise QwenError(f"Request to {url} failed: {exc}") from exc
 
         with response:
+            # Server-sent events are always UTF-8; the spec gives the charset
+            # parameter no say. requests does not know that, and falls back to
+            # ISO-8859-1 for any text/* response that declares no charset -
+            # which is every llama-server stream. Left alone, every apostrophe,
+            # dash and quotation mark the model writes arrives as mojibake.
+            response.encoding = "utf-8"
             if response.status_code >= 400:
                 raise QwenHTTPError(response.status_code, response.text)
 
