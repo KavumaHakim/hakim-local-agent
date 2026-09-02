@@ -21,6 +21,7 @@ from api.schemas import (
     ModelRouterRequest,
     ModelsOut,
     RescanOut,
+    ServerExeRequest,
 )
 from models.manager import ModelManagerError, ModelState, available_ram_mb
 
@@ -302,6 +303,30 @@ def clear_override(key: str, runtime: Runtime = Depends(get_runtime)):
     except ModelManagerError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
     runtime.manager.clear_override(key)
+    return _snapshot(runtime)
+
+
+@router.post("/server", response_model=ModelsOut)
+def set_server_exe(body: ServerExeRequest, runtime: Runtime = Depends(get_runtime)):
+    """Point this machine at a different llama-server build.
+
+    Above the `/{key}` routes on purpose: "server" would otherwise be read as
+    a model key and answer 404.
+
+    Refused while a turn is running, for the same reason switching models is:
+    the next start would use a different binary from the one generating the
+    answer, and nothing about that is worth the confusion.
+    """
+    if runtime.queue.busy():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "A turn is running. Changing the server now would leave it "
+            "answering from a binary that is no longer the configured one.",
+        )
+    try:
+        runtime.manager.set_server_exe(body.path)
+    except ModelManagerError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
     return _snapshot(runtime)
 
 

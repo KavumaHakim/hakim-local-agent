@@ -476,6 +476,25 @@ class ModelRouteTests(ApiTestCase):
             self.client.post("/api/models/nope/unload").status_code, 404
         )
 
+    def test_the_server_binary_can_be_changed(self):
+        replacement = Path(self._tmp.name) / "llama-server-vulkan.exe"
+        replacement.write_text("x", encoding="utf-8")
+        body = self.client.post(
+            "/api/models/server", json={"path": str(replacement)}
+        ).json()
+        self.assertEqual(body["server_exe"], str(replacement.resolve()))
+
+    def test_a_server_path_that_is_not_there_is_a_400(self):
+        response = self.client.post(
+            "/api/models/server", json={"path": "/nowhere/llama-server"}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_server_is_not_read_as_a_model_key(self):
+        """`/models/server` sits above `/models/{key}`, or it would 404."""
+        response = self.client.post("/api/models/server", json={"path": ""})
+        self.assertEqual(response.status_code, 200)
+
     def test_gpu_layers_and_the_server_binary_are_both_reported(self):
         """One is useless without the other. The number only does anything
         against a llama-server with a GPU backend compiled in, so a panel that

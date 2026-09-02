@@ -131,6 +131,20 @@ export function useModels() {
     }
   }, [])
 
+  const setServerExe = useCallback(async (path: string) => {
+    // A sentinel rather than a key, because this is not about one model -
+    // one binary runs all of them, and every row would otherwise look busy.
+    setBusyKey('__server__')
+    setError(null)
+    try {
+      setData(await api.setServerExe(path))
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setBusyKey(null)
+    }
+  }, [])
+
   const load = useCallback(async (key: string) => {
     setBusyKey(key)
     setError(null)
@@ -169,6 +183,7 @@ export function useModels() {
     setHidden,
     override,
     clearOverride,
+    setServerExe,
   }
 }
 

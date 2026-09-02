@@ -153,10 +153,49 @@ memory. It is all or nothing.
 > direction and size to rely on; the generation numbers are not worth reading
 > to two decimal places.
 
-Turn it on with **GPU layers** in the model's tuner — but only after pointing
-`server_exe` at a build that has a GPU backend compiled in, because against
-the ordinary CPU build the number does nothing. The tuner names the binary it
-would be handed to, underneath the field, for that reason.
+**It is not free on RAM**, which is the easy thing to get wrong. The device
+has no memory of its own, so a weight handed to the GPU is still in the same
+DIMMs, and the backend keeps staging buffers besides. Peak resident, same
+binary, same model:
+
+```
+                    -ngl 0      -ngl 99
+738 MB model         944 MB     1,169 MB
+1,073 MB model     1,258 MB     1,540 MB
+```
+
+It does not double — but it is +225 MB and +282 MB, and two points fit about
+**100 MB flat plus a sixth of the file**. That is what the RAM guard now
+charges a model that offloads, because otherwise it asks for the same free
+memory whether or not it is offloading and under-states by a couple of hundred
+megabytes on a machine with eight gigabytes. Two points are two points: it is
+a straight line through them, not a law, and like the rest of this sizing it
+is deliberately the kind of over-estimate you can ignore.
+
+Extrapolated, that is roughly +450 MB for a 2 GB model and +900 MB for the 8B
+— which settles it for the large ones. **Offload the small models; leave the
+8B alone.** It already wants 6.2 GB.
+
+Turn it on with **GPU layers** in the model's tuner. It does nothing unless
+`Server` (just below the model list in Settings) points at a build with a GPU
+backend compiled in, which is why the tuner names that binary underneath the
+field.
+
+### Which llama-server runs
+
+`Server` in Settings, under the model list. One binary runs every model, so it
+is not a per-model setting.
+
+It is kept in `data/models.local.json` rather than `models.json`, because it is
+a property of one computer and `models.json` is in version control — a path
+committed from somebody's laptop is wrong on every other machine. Empty goes
+back to searching: the configured path, then `vendor/llama`, then PATH.
+`vendor/llama-vulkan` is **never** searched, so an accelerator build is only
+ever used deliberately.
+
+Changing it takes effect on the next model start. A running server keeps the
+binary it was started from, which is the honest behaviour — it is that process,
+and it cannot become another one.
 
 ### The prefix is what makes the agent slower than raw llama-server
 
@@ -472,10 +511,9 @@ pointed at deliberately (`setup.py`'s "I already have it", which remembers the
 path). An accelerator build that cannot reach its device is slower than the CPU
 one, not faster, which is why it is never picked up by accident.
 
-Having fetched it, point `server_exe` at it (`setup.py`'s "I already have
-it") and set **GPU layers** on a model in Settings. Both steps are needed: the
-binary decides whether a GPU can be reached at all, the number decides whether
-anything is sent to it.
+Having fetched it, point **Server** at it in Settings and set **GPU layers**
+on a model. Both steps are needed: the binary decides whether a GPU can be
+reached at all, the number decides whether anything is sent to it.
 
 It was worth trying, and the result was narrow: on this machine full offload
 took **a quarter off prompt processing and nothing off generation**, and a
@@ -578,7 +616,7 @@ By hand it is `cp .env.example .env` and fill in what you need.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-1080 tests, no model server needed, and none of them touch the network.
+1094 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -777,7 +815,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               1080 tests, no server required
+└── tests/               1094 tests, no server required
 ```
 
 ---
@@ -824,7 +862,7 @@ decide. See [section 11](#11-the-web-ui).
 result is never orphaned from the call it belongs to — which the chat template
 would reject.
 
-### Verified llama.cpp behaviour (build 10373)
+### Verified llama.cpp behaviour (builds 10373 and 10750)
 
 - `--jinja` is **on by default**. The server applies Qwen3's chat template,
   parses the model's native tool syntax, and returns standard OpenAI
@@ -834,6 +872,14 @@ would reject.
   `--reasoning-format deepseek`.
 - `chat_template_kwargs` is supported, which is how `enable_thinking` is sent.
 - `--alias` is unset, so the server ignores the `model` field in requests.
+
+All four were **re-checked against b10750** before that build was made the
+default here, against a real server and a real model rather than by reading a
+changelog: a tool call came back as a standard `tool_calls` entry naming the
+function with its arguments, `chat_template_kwargs` was accepted, reasoning
+arrived in `reasoning_content` separately from `content`, and a nonsense
+`model` field was ignored rather than rejected. If you pin a different build,
+this is the list worth re-running.
 
 ---
 
@@ -1227,8 +1273,8 @@ loading costs minutes on this hardware, so they are two buttons.
 
 ### What Settings can change
 
-Primary model, the router's two ends, and per-model `label`, `context`,
-`threads`, `gpu_layers` and `min_free_mb`. Retuning applies the next time that
+Primary model, the router's two ends, which llama-server runs, and per-model
+`label`, `context`, `threads`, `gpu_layers` and `min_free_mb`. Retuning applies the next time that
 model starts, because llama-server is given those on the command line.
 
 `gpu_layers` is `-ngl`, and it is passed **always**, including as `-ngl 0`.
@@ -1252,6 +1298,7 @@ and the primary cannot be hidden.
 POST   /api/models/rescan          re-read the folder
 POST   /api/models/primary         {"key": "..."}
 POST   /api/models/router          {"fast": "...", "strong": "..."}
+POST   /api/models/server          {"path": "..."} - which llama-server runs
 PATCH  /api/models/{key}           retune one model
 DELETE /api/models/{key}/override  back to registry values
 POST   /api/models/{key}/hidden    {"hidden": true}
@@ -2614,7 +2661,7 @@ router's fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**1080 tests, no model server needed, and none of them touch the network.**
+**1094 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2765,7 +2812,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 1080 tests
+- 1094 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

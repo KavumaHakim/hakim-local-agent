@@ -12,6 +12,7 @@ skipped otherwise.
 from __future__ import annotations
 
 import json
+import os
 import struct
 import tempfile
 import unittest
@@ -613,6 +614,40 @@ class RegistryLayeringTests(unittest.TestCase):
         with self.assertRaises(ModelManagerError) as caught:
             load_registry(path)
         self.assertIn("port", str(caught.exception).lower())
+
+
+class PreferenceLocationTests(unittest.TestCase):
+    """Where preferences are kept, given how the registry was named."""
+
+    def test_the_same_registry_by_two_names_shares_its_preferences(self):
+        """A relative path and an absolute one are the same file. Comparing
+        them unspelt sent settings made from a script into a second file the
+        running application never reads - silently, which is the bad part."""
+        from models.manager import DEFAULT_PREFERENCES_DIR, DEFAULT_REGISTRY
+
+        if not DEFAULT_REGISTRY.is_file():
+            self.skipTest("no shipped registry to compare against")
+
+        relative = Path(os.path.relpath(DEFAULT_REGISTRY, Path.cwd()))
+        registry = load_registry(relative)
+        self.assertEqual(
+            registry["preferences"].path.parent.resolve(),
+            DEFAULT_PREFERENCES_DIR.resolve(),
+        )
+
+    def test_a_registry_somewhere_else_keeps_its_preferences_beside_it(self):
+        """This is what stops the suite reading and rewriting the real user's
+        settings, so it matters as much as the case above."""
+        with tempfile.TemporaryDirectory() as name:
+            tmp = Path(name)
+            (tmp / "llama-server.exe").write_text("x", encoding="utf-8")
+            write_gguf(tmp / "something.gguf")
+            path = tmp / "models.json"
+            path.write_text(
+                json.dumps({"models_dir": str(tmp), "models": []}), encoding="utf-8"
+            )
+            registry = load_registry(path)
+            self.assertEqual(registry["preferences"].path.parent, tmp)
 
 
 class ManagerSettingsTests(unittest.TestCase):

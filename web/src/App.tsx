@@ -338,6 +338,7 @@ export default function App() {
           }
           onOverrideModel={(key, values) => void models.override(key, values)}
           onClearModelOverride={(key) => void models.clearOverride(key)}
+          onSetServerExe={(path) => void models.setServerExe(path)}
           tools={tools.data}
           toolPending={tools.pending}
           onSetOcrBackend={(backend) => void tools.setOcrBackend(backend)}

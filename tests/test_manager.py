@@ -465,11 +465,97 @@ class GpuLayerTests(unittest.TestCase):
         reopened = ManagerHarness(self.path)
         self.assertEqual(self.gpu_layers_on_the_command_line(reopened), "99")
 
+    def test_offloading_raises_what_the_model_wants_free(self):
+        """An integrated GPU has no memory of its own, so a weight handed to
+        it is still in the same DIMMs. Measured: a 738 MB model peaked at
+        944 MB with nothing offloaded and 1,169 MB with all of it."""
+        manager = ManagerHarness(self.path)
+        # The fixture guards nothing by default, and 0 means "do not guard".
+        manager.set_override("fast", {"min_free_mb": 1000})
+        plain = manager._ram_wanted(manager.get_spec("fast"))
+
+        manager.set_override("fast", {"gpu_layers": 99})
+        offloaded = manager._ram_wanted(manager.get_spec("fast"))
+        self.assertGreater(offloaded, plain)
+
+    def test_not_offloading_changes_nothing_about_the_guard(self):
+        manager = ManagerHarness(self.path)
+        manager.set_override("fast", {"min_free_mb": 1000})
+        spec = manager.get_spec("fast")
+        self.assertEqual(manager._ram_wanted(spec), spec.min_free_mb)
+
+    def test_a_model_with_no_threshold_gains_no_offload_charge(self):
+        """0 means "do not guard this one". Adding an offload charge to it
+        would invent a threshold nobody asked for."""
+        manager = ManagerHarness(self.path)
+        manager.set_override("fast", {"gpu_layers": 99, "min_free_mb": 0})
+        self.assertEqual(manager._ram_wanted(manager.get_spec("fast")), 0)
+
+    def test_the_warning_reports_the_higher_figure_when_offloading(self):
+        """Saying 900 MB while wanting 1,119 MB is worse than not warning."""
+        manager = ManagerHarness(self.path)
+        manager.set_override("fast", {"gpu_layers": 99, "min_free_mb": 1000})
+        manager.fake_ram = 1050
+        manager.ensure("fast")
+
+        warning = manager._statuses["fast"].warning
+        self.assertIn("1050 MB", warning)
+        self.assertNotIn("about 1000 MB", warning)
+
     def test_the_server_binary_is_reported(self):
         """The panel cannot ask about GPU layers without saying which
         llama-server they would be handed to."""
         manager = ManagerHarness(self.path)
         self.assertEqual(manager.server_exe, self.tmp / "llama-server.exe")
+
+
+class ServerChoiceTests(unittest.TestCase):
+    """Pointing this machine at a different llama-server build."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = write_registry(self.tmp)
+        self.other = self.tmp / "llama-server-vulkan.exe"
+        self.other.write_text("x", encoding="utf-8")
+
+    def test_the_chosen_binary_is_what_gets_run(self):
+        manager = ManagerHarness(self.path)
+        manager.set_server_exe(str(self.other))
+        manager.ensure("fast")
+        self.assertEqual(manager.spawned[0][0], str(self.other))
+
+    def test_the_choice_survives_a_restart(self):
+        """It goes to preferences, not to models.json: models.json is in
+        version control, and a path committed from one laptop is wrong on
+        every other machine."""
+        ManagerHarness(self.path).set_server_exe(str(self.other))
+        self.assertEqual(ManagerHarness(self.path).server_exe, self.other)
+
+    def test_an_empty_path_goes_back_to_searching(self):
+        manager = ManagerHarness(self.path)
+        original = manager.server_exe
+        manager.set_server_exe(str(self.other))
+        manager.set_server_exe("")
+        self.assertEqual(manager.server_exe, original)
+
+    def test_a_path_with_nothing_at_it_is_refused(self):
+        """Refused rather than remembered. A stored path to nothing would turn
+        every later start into the same confusing failure."""
+        manager = ManagerHarness(self.path)
+        original = manager.server_exe
+        with self.assertRaises(ModelManagerError):
+            manager.set_server_exe(str(self.tmp / "ghost.exe"))
+        self.assertEqual(manager.server_exe, original)
+
+    def test_models_are_not_forgotten_when_the_server_changes(self):
+        """It rescans, and a rescan that lost the catalogue would be worse
+        than the setting is worth."""
+        manager = ManagerHarness(self.path)
+        before = {spec.key for spec in manager.specs()}
+        manager.set_server_exe(str(self.other))
+        self.assertEqual({spec.key for spec in manager.specs()}, before)
 
 
 class PlatformTests(unittest.TestCase):

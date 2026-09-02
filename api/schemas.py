@@ -197,6 +197,16 @@ class ModelPrimaryRequest(BaseModel):
     key: str = Field(min_length=1)
 
 
+class ServerExeRequest(BaseModel):
+    """Which llama-server this machine should run.
+
+    Empty means "go back to searching": the configured path, then
+    vendor/llama, then PATH.
+    """
+
+    path: str = Field(default="", max_length=4096)
+
+
 class ModelRouterRequest(BaseModel):
     fast: str = ""
     strong: str = ""

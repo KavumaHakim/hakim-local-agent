@@ -53,6 +53,13 @@ DEFAULT_PREFERENCES_DIR = PROJECT_ROOT / "data"
 HARD_FLOOR_MB = 250
 
 
+# What offloading costs in RAM, on top of what the model already wanted.
+# Measured, not guessed - see `_ram_wanted`. An integrated GPU shares the
+# machine's memory, so "on the GPU" is not "out of RAM".
+OFFLOAD_FIXED_MB = 100
+OFFLOAD_SHARE = 0.17
+
+
 class ModelState(str, Enum):
     STOPPED = "stopped"
     STARTING = "starting"
@@ -418,9 +425,16 @@ def load_registry(
     # passes a temporary registry it is a temporary directory, which is what
     # keeps the suite from reading and rewriting the real user's settings.
     if preferences_dir is None:
-        preferences_dir = (
-            DEFAULT_PREFERENCES_DIR if path == DEFAULT_REGISTRY else path.parent
-        )
+        # Resolved before comparing. `Path("models.json")` and the absolute
+        # DEFAULT_REGISTRY are the same file and compare unequal, and the
+        # consequence is silent and confusing: settings made through a script
+        # that passed the relative path land in a second preferences file the
+        # running application never reads. Found by doing exactly that.
+        try:
+            same = path.resolve() == DEFAULT_REGISTRY.resolve()
+        except OSError:
+            same = path == DEFAULT_REGISTRY
+        preferences_dir = DEFAULT_PREFERENCES_DIR if same else path.parent
     preferences = ModelPreferences.load(preferences_dir)
 
     # A remembered path wins over everything the search would guess at. It is
@@ -642,6 +656,34 @@ class ModelManager:
             self._setup_required = False
             if self.router_fast not in self._offered:
                 self.router_fast = key
+
+    def set_server_exe(self, path: str) -> str:
+        """Point this machine at a different llama-server, and remember it.
+
+        Kept in preferences rather than models.json because it is a property
+        of one computer, and models.json is in version control - a path
+        committed from somebody's laptop is wrong on every other machine.
+
+        Takes effect on the next start, like every other command-line setting.
+        A running server keeps the binary it was started from, which is the
+        honest behaviour: it is that process, and it cannot become another one.
+
+        Passing "" forgets the choice and goes back to searching.
+        """
+        wanted = str(path or "").strip()
+        if wanted:
+            candidate = Path(wanted).expanduser()
+            if not candidate.is_file():
+                raise ModelManagerError(f"There is no file at {candidate}.")
+            # Named rather than sniffed. A wrapper script, a symlink or a
+            # renamed build are all legitimate, and the only real check -
+            # whether it speaks the API - happens when a model starts.
+            wanted = str(candidate.resolve())
+
+        with self._lock:
+            self._preferences.set_server_exe(wanted)
+        self.rescan()
+        return str(self._server_exe)
 
     def set_router(self, *, fast: str = "", strong: str = "") -> None:
         """Point the auto-router's cheap and capable ends at chosen models."""
@@ -973,14 +1015,45 @@ class ModelManager:
                 f"rest of the system. Close something first."
             )
 
-        if spec.min_free_mb > 0 and free < spec.min_free_mb:
+        wanted = self._ram_wanted(spec)
+        if wanted > 0 and free < wanted:
             return (
-                f"{spec.label} runs best with about {spec.min_free_mb} MB "
+                f"{spec.label} runs best with about {wanted} MB "
                 f"available and there is {free} MB. It will still start, but "
                 f"the weights cannot all stay resident, so expect slower "
                 f"generation while pages are read back from disk."
             )
         return ""
+
+    def _ram_wanted(self, spec: ModelSpec) -> int:
+        """What this model wants free, including the cost of offloading it.
+
+        Offloading to an integrated GPU is not free on RAM, which is the thing
+        that is easy to get wrong about it: the device has no memory of its
+        own, so a weight handed to the GPU is still in the same DIMMs, and the
+        backend keeps staging buffers besides. It does not double - measured
+        peaks on this machine, same binary, same model:
+
+            738 MB model     944 MB at -ngl 0     1169 MB at -ngl 99
+            1073 MB model   1258 MB at -ngl 0     1540 MB at -ngl 99
+
+        Two points fit about 100 MB flat plus a sixth of the file, which is
+        what is charged below. Without it a model that offloads asks for the
+        same RAM as one that does not, and the guard silently under-states by
+        a couple of hundred megabytes - on 8 GB, the case it exists for.
+
+        Two points are two points. It is a straight line through them, not a
+        law, and it is deliberately the kind of over-estimate the rest of this
+        sizing already is: being wrong high costs a warning somebody can
+        ignore, being wrong low costs a machine that swaps.
+        """
+        if spec.min_free_mb <= 0 or spec.gpu_layers <= 0:
+            return spec.min_free_mb
+        try:
+            file_mb = spec.path.stat().st_size / (1024 * 1024)
+        except OSError:
+            file_mb = 0
+        return spec.min_free_mb + OFFLOAD_FIXED_MB + int(file_mb * OFFLOAD_SHARE)
 
     @property
     def server_exe(self) -> Path:

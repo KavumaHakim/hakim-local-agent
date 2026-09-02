@@ -6,7 +6,7 @@
  * one column, so every section was cramped and the panel always scrolled.
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type {
   Conversation,
   Model,
@@ -51,6 +51,7 @@ interface Props {
   onSetModelHidden: (key: string, hidden: boolean) => void
   onOverrideModel: (key: string, values: ModelOverride) => void
   onClearModelOverride: (key: string) => void
+  onSetServerExe: (path: string) => void
 
   tools: ToolsResponse | null
   toolPending: string | null
@@ -468,6 +469,7 @@ function SettingsPane({
   onSetModelHidden,
   onOverrideModel,
   onClearModelOverride,
+  onSetServerExe,
   autoRoute,
   onAutoRoute,
   thinking,
@@ -512,6 +514,7 @@ function SettingsPane({
           onSetHidden={onSetModelHidden}
           onOverride={onOverrideModel}
           onClearOverride={onClearModelOverride}
+          onSetServerExe={onSetServerExe}
         />
       )}
 
@@ -559,6 +562,7 @@ function ModelSettings({
   onSetHidden,
   onOverride,
   onClearOverride,
+  onSetServerExe,
 }: {
   models: ModelsResponse
   busyKey: string | null
@@ -567,6 +571,7 @@ function ModelSettings({
   onSetHidden: (key: string, hidden: boolean) => void
   onOverride: (key: string, values: ModelOverride) => void
   onClearOverride: (key: string) => void
+  onSetServerExe: (path: string) => void
 }) {
   // Only chat models can be the primary. A vision backend runs alongside one
   // and cannot drive the agent loop, so offering it here would be a trap.
@@ -724,6 +729,102 @@ function ModelSettings({
         <span className="font-mono break-all">{models.models_dir}</span> and
         press Rescan. Context and RAM are read from the file&apos;s own header.
       </p>
+
+      <ServerPicker
+        path={models.server_exe}
+        busy={busyKey === '__server__'}
+        onApply={onSetServerExe}
+      />
+    </div>
+  )
+}
+
+/**
+ * Which llama-server runs.
+ *
+ * Not in the per-model tuner, because it is not a property of a model: one
+ * binary runs all of them. It lives here because GPU layers cannot be judged
+ * without it — the same number means "offload" against a build with an
+ * accelerator compiled in and nothing at all against one without.
+ *
+ * Read-only until you press "change", because this is the setting most able
+ * to leave the application unable to start anything, and a text box that
+ * looks editable invites a typo into exactly that.
+ */
+function ServerPicker({
+  path,
+  busy,
+  onApply,
+}: {
+  path: string
+  busy: boolean
+  onApply: (path: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(path)
+
+  // Follows the server when it changes underneath — after an apply, or a
+  // rescan that found a different one.
+  useEffect(() => setDraft(path), [path])
+
+  if (!editing) {
+    return (
+      <div className="mt-2 flex items-baseline gap-1.5 text-[10.5px] text-faint">
+        <span className="shrink-0">Server</span>
+        <span className="min-w-0 flex-1 truncate font-mono" title={path}>
+          {path}
+        </span>
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          className="shrink-0 rounded px-1 hover:text-ink"
+        >
+          change
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-2">
+      <Field label="llama-server">
+        <input
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          spellCheck={false}
+          placeholder="Leave empty to search for one"
+          className="w-full rounded border border-line bg-base px-1.5 py-0.5 font-mono text-[10.5px]"
+        />
+      </Field>
+      <p className="mt-1 text-[10px] leading-snug text-faint">
+        A build with a GPU backend compiled in is what makes{' '}
+        <span className="font-mono">GPU layers</span> mean anything. Empty
+        goes back to searching: the configured path, then{' '}
+        <span className="font-mono">vendor/llama</span>, then PATH.
+      </p>
+      <div className="mt-1.5 flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => {
+            onApply(draft.trim())
+            setEditing(false)
+          }}
+          disabled={busy}
+          className="rounded border border-accent px-2 py-0.5 text-[11px] disabled:opacity-50"
+        >
+          {busy ? 'Saving…' : 'Use this'}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setDraft(path)
+            setEditing(false)
+          }}
+          className="rounded border border-line px-2 py-0.5 text-[11px] text-faint hover:text-ink"
+        >
+          Cancel
+        </button>
+      </div>
     </div>
   )
 }

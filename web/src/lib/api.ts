@@ -242,6 +242,17 @@ export const api = {
     return (await response.json()) as UploadResult
   },
 
+  /**
+   * Point this machine at a different llama-server build.
+   *
+   * Empty goes back to searching for one.
+   */
+  setServerExe: (path: string) =>
+    request<ModelsResponse>('/models/server', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+
   /** Whether speech to text is installed. Asked once, on load. */
   speechStatus: () => request<SpeechStatus>('/speech'),
 
