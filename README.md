@@ -578,7 +578,7 @@ By hand it is `cp .env.example .env` and fill in what you need.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-1039 tests, no model server needed, and none of them touch the network.
+1047 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -772,7 +772,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               1039 tests, no server required
+└── tests/               1047 tests, no server required
 ```
 
 ---
@@ -1152,8 +1152,34 @@ reproduces GLM-OCR's 52,224 bytes/token exactly, puts GLM-OCR on 8192 and
 Ministral on 4096 — the contexts those entries use — and estimates the 8B at
 6,290 MB against the 6,200 MB someone measured for it.
 
+### Pairing a vision model with its projector
+
 An `mmproj-*.gguf` is recognised as a vision projector, paired with its model,
-and never offered as something to talk to.
+and never offered as something to talk to. Two things about that pairing were
+got wrong first and are worth stating, because both produce a model that loads
+and then cannot see — which reads as a broken model rather than a misfiled
+file.
+
+**The names will not match, and that is normal.** A projector ships at F16 or
+Q8_0 while the model it belongs to is Q4_K_M, and two uploaders will spell the
+same model `Qwen3VL` and `Qwen3-VL`. Comparing the stems whole misses almost
+every real pair, so the quantisation suffix and all punctuation come off both
+sides before they are compared.
+
+**A projector may name no model at all.** The most-downloaded Qwen3-VL
+repository calls its projector `mmproj-F16.gguf` — named for what it is, not
+what it is for. With one model in the folder there is only one thing it can
+belong to and it is paired. With several it is left alone, because handing it
+to the wrong model is worse than not handing it to any: rename it after its
+model and it pairs.
+
+**A model with a projector is still a chat model.** It was briefly given
+GLM-OCR's `ocr` role on the reasoning that a projector means a vision backend.
+That is true only of GLM-OCR, which cannot call tools and so could never drive
+the agent loop; Qwen3-VL Instruct is an ordinary chat model that can also see.
+Filing it as OCR took it out of the model picker entirely — installed,
+discovered, listed, and impossible to talk to. `role` is curated in
+`models.json`, which is where GLM-OCR gets its own, and is never inferred.
 
 ### Three layers, in this order
 
@@ -2515,7 +2541,7 @@ router's fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**1039 tests, no model server needed, and none of them touch the network.**
+**1047 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2666,7 +2692,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 1039 tests
+- 1047 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

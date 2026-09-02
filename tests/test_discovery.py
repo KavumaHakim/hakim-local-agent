@@ -259,9 +259,88 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].file.name, "Vision-7B.gguf")
         self.assertIsNotNone(found[0].mmproj)
-        # A model with a projector is a vision backend, so it stays out of the
-        # one-at-a-time chat rotation.
-        self.assertEqual(found[0].role, "ocr")
+
+    def test_a_dropped_in_vision_model_is_still_a_chat_model(self):
+        """It was briefly given GLM-OCR's role, which took it out of the model
+        picker: discovered, listed, and impossible to talk to. GLM-OCR is an
+        OCR backend because it cannot call tools, not because it has a
+        projector - and that entry is curated, so it keeps its own role."""
+        write_gguf(self.tmp / "Qwen3-VL-2B-Instruct-Q4_K_M.gguf")
+        write_gguf(
+            self.tmp / "mmproj-Qwen3-VL-2B-Instruct-F16.gguf", architecture="clip"
+        )
+        found = discover(self.tmp)
+        self.assertEqual(found[0].role, "chat")
+        self.assertIsNotNone(found[0].mmproj)
+
+    def test_a_projector_at_a_different_quantisation_still_pairs(self):
+        """The normal case, not the exception: a projector ships at F16 or Q8_0
+        while the model it belongs to is Q4_K_M. Comparing the stems whole
+        misses every real pair."""
+        write_gguf(self.tmp / "Qwen3-VL-2B-Instruct-Q4_K_M.gguf")
+        write_gguf(
+            self.tmp / "mmproj-Qwen3-VL-2B-Instruct-Q8_0.gguf", architecture="clip"
+        )
+        found = discover(self.tmp)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].mmproj.name, "mmproj-Qwen3-VL-2B-Instruct-Q8_0.gguf")
+
+    def test_punctuation_does_not_stop_a_pair_from_matching(self):
+        """`Qwen3VL` and `Qwen3-VL` are the same model named by two different
+        uploaders, and people mix the two in one folder without noticing."""
+        write_gguf(self.tmp / "Qwen3VL-2B-Instruct-Q4_K_M.gguf")
+        write_gguf(
+            self.tmp / "mmproj-Qwen3-VL-2B-Instruct-Q8_0.gguf", architecture="clip"
+        )
+        found = discover(self.tmp)
+        self.assertIsNotNone(found[0].mmproj)
+
+    def test_a_projector_naming_no_model_pairs_when_there_is_only_one(self):
+        """`mmproj-F16.gguf` is what the most-downloaded Qwen3-VL repository
+        calls its projector. It says what it is, not what it is for."""
+        write_gguf(self.tmp / "Qwen3-VL-2B-Instruct-Q4_K_M.gguf")
+        write_gguf(self.tmp / "mmproj-F16.gguf", architecture="clip")
+        found = discover(self.tmp)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].mmproj.name, "mmproj-F16.gguf")
+
+    def test_a_projector_naming_no_model_is_left_alone_when_several_could_claim_it(self):
+        """Guessing would hand it to the wrong model, which then loads and
+        reports no vision - which reads as a broken model rather than as a file
+        that wants renaming."""
+        write_gguf(self.tmp / "Qwen3-VL-2B-Instruct-Q4_K_M.gguf")
+        write_gguf(self.tmp / "Ministral-3B-Q4_K_M.gguf")
+        write_gguf(self.tmp / "mmproj-F16.gguf", architecture="clip")
+        found = discover(self.tmp)
+        self.assertEqual(len(found), 2)
+        self.assertTrue(all(item.mmproj is None for item in found))
+
+    def test_a_curated_model_does_not_count_as_the_one_candidate(self):
+        """`sole` is about models this scan is actually offering. A folder whose
+        other model is already in models.json still has one candidate."""
+        write_gguf(self.tmp / "Qwen3-VL-2B-Instruct-Q4_K_M.gguf")
+        write_gguf(self.tmp / "already-curated.gguf")
+        write_gguf(self.tmp / "mmproj-F16.gguf", architecture="clip")
+        found = discover(self.tmp, known_files=["already-curated.gguf"])
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].mmproj.name, "mmproj-F16.gguf")
+
+    def test_the_wrong_projector_is_not_handed_to_a_model(self):
+        """Two vision models in one folder, each with its own projector."""
+        write_gguf(self.tmp / "Qwen3-VL-2B-Instruct-Q4_K_M.gguf")
+        write_gguf(self.tmp / "GLM-OCR-Q8_0.gguf")
+        write_gguf(
+            self.tmp / "mmproj-Qwen3-VL-2B-Instruct-F16.gguf", architecture="clip"
+        )
+        write_gguf(self.tmp / "mmproj-GLM-OCR-Q8_0.gguf", architecture="clip")
+        pairs = {item.file.name: item.mmproj.name for item in discover(self.tmp)}
+        self.assertEqual(
+            pairs,
+            {
+                "Qwen3-VL-2B-Instruct-Q4_K_M.gguf": "mmproj-Qwen3-VL-2B-Instruct-F16.gguf",
+                "GLM-OCR-Q8_0.gguf": "mmproj-GLM-OCR-Q8_0.gguf",
+            },
+        )
 
     def test_a_projector_named_by_convention_is_recognised_without_a_header(self):
         (self.tmp / "mmproj-thing.gguf").write_bytes(b"not really gguf")
@@ -531,6 +610,7 @@ class ManagerSettingsTests(unittest.TestCase):
         write_gguf(weights / "Beta.gguf")
         write_gguf(weights / "Vision.gguf")
         write_gguf(weights / "mmproj-Vision.gguf", architecture="clip")
+        write_gguf(weights / "Reader.gguf")
 
         self.path = self.tmp / "models.json"
         self.path.write_text(
@@ -538,7 +618,20 @@ class ManagerSettingsTests(unittest.TestCase):
                 "server_exe": str(self.tmp / "llama-server.exe"),
                 "models_dir": "weights",
                 "max_active": 1,
-                "models": [],
+                # Curated, because `role` is curated. A dropped-in vision model
+                # is an ordinary chat model that can also see; an OCR backend
+                # is one that cannot drive the loop at all, and only the person
+                # writing models.json knows which they have.
+                "models": [
+                    {
+                        "key": "reader",
+                        "label": "Reader",
+                        "file": "Reader.gguf",
+                        "port": 8188,
+                        "role": "ocr",
+                        "min_free_mb": 0,
+                    }
+                ],
             }),
             encoding="utf-8",
         )
@@ -568,8 +661,16 @@ class ManagerSettingsTests(unittest.TestCase):
 
     def test_a_vision_backend_cannot_be_the_primary(self):
         with self.assertRaises(ModelManagerError) as caught:
-            self.manager().set_primary("vision")
+            self.manager().set_primary("reader")
         self.assertIn("not a chat model", str(caught.exception))
+
+    def test_a_dropped_in_vision_model_can_be_the_primary(self):
+        """It is a chat model that can also see, so there is nothing to stop
+        it. Inferring an OCR role from the projector used to, which made a
+        model you had just installed impossible to select."""
+        manager = self.manager()
+        manager.set_primary("vision")
+        self.assertEqual(manager.default_key, "vision")
 
     def test_an_unknown_key_cannot_be_the_primary(self):
         with self.assertRaises(ModelManagerError):

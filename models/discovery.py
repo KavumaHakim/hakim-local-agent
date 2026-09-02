@@ -261,6 +261,10 @@ def discover(
     projectors = [path for path in files if is_projector(path, headers[path])]
     models = [path for path in files if path not in projectors]
 
+    # Worked out once, because it decides whether a projector that names no
+    # model can be attributed to one - see `_match_projector`.
+    candidates = [path for path in models if path.name.lower() not in claimed]
+
     found: list[Discovered] = []
     for path in models:
         if path.name.lower() in claimed:
@@ -280,7 +284,7 @@ def discover(
         except OSError:
             continue
 
-        projector = _match_projector(path, projectors)
+        projector = _match_projector(path, projectors, sole=len(candidates) == 1)
         notes = [note] if note else []
         if info is None:
             notes.append(
@@ -297,10 +301,17 @@ def discover(
                 context=context,
                 threads=threads,
                 min_free_mb=estimate_min_free_mb(size, info, context),
-                # A model shipped with a projector is a vision backend. It is
-                # given the same role GLM-OCR has, which keeps it out of the
-                # one-at-a-time chat rotation and out of the model picker.
-                role="ocr" if projector is not None else "chat",
+                # A dropped-in vision model stays a chat model. It was
+                # briefly given GLM-OCR's role instead, on the reasoning that a
+                # projector means a vision backend - but that is only true of
+                # GLM-OCR, which cannot call tools and so could never drive the
+                # loop. Qwen3-VL Instruct is an ordinary chat model that can
+                # also see, and filing it as OCR took it out of the model
+                # picker entirely: dropped in, discovered, and unreachable.
+                #
+                # `role` is still curated in models.json, which is where
+                # GLM-OCR gets its own, so nothing about that changed.
+                role="chat",
                 mmproj=projector,
                 info=info,
                 description=_describe(path, info, size),
@@ -321,23 +332,66 @@ def _unique_key(base: str, taken: set[str]) -> str:
     return candidate
 
 
-def _match_projector(model: Path, projectors: list[Path]) -> Path | None:
+def _match_projector(
+    model: Path, projectors: list[Path], sole: bool = False
+) -> Path | None:
     """Find the mmproj that belongs to `model`, if there is one.
 
-    Matched on the stem, because the convention is `mmproj-<model>.gguf`. A
-    folder with one model and one projector pairs them regardless of naming,
-    which is what people actually have.
+    Matched on the stem, because the convention is `mmproj-<model>.gguf`. Two
+    things have to be normalised away first, and both were found by watching a
+    real pairing fail rather than by imagining one:
+
+    **The quantisation.** A projector ships at F16 or Q8_0 while the model it
+    belongs to is Q4_K_M, so `mmproj-Qwen3-VL-2B-Instruct-Q8_0` and
+    `Qwen3-VL-2B-Instruct-Q4_K_M` are the same pair with different tails. This
+    is the normal case, not the exception.
+
+    **The punctuation.** `Qwen3VL` and `Qwen3-VL` are the same model named by
+    two different uploaders, and a substring test says they are not.
+
+    `sole` says the folder holds exactly one model the curated registry has
+    not already spoken for, which is the only case in which a projector naming
+    no model at all can be attributed to one.
     """
     if not projectors:
         return None
 
-    stem = model.stem.lower()
+    stem = _pairing_name(model.stem)
     for projector in projectors:
-        name = projector.stem.lower()
-        cleaned = _PROJECTOR_NAME.sub("", name).strip("-_.")
+        cleaned = _pairing_name(_PROJECTOR_NAME.sub("", projector.stem))
         if cleaned and (cleaned in stem or stem in cleaned):
             return projector
+
+    # `mmproj-F16.gguf` - what the most-downloaded Qwen3-VL repository calls
+    # its projector - carries no model name at all. It is named for what it is
+    # rather than for what it belongs to, so nothing above can match it.
+    #
+    # With one model in the folder there is only one thing it can be for. With
+    # several, guessing would hand it to the wrong model, which then loads and
+    # reports no vision - a failure that reads as a broken model rather than a
+    # misfiled file. Better to leave it unpaired and let the person rename it
+    # after the model it belongs to.
+    if sole:
+        anonymous = [
+            projector
+            for projector in projectors
+            if not _pairing_name(_PROJECTOR_NAME.sub("", projector.stem))
+        ]
+        if len(anonymous) == 1:
+            return anonymous[0]
     return None
+
+
+def _pairing_name(stem: str) -> str:
+    """A filename stem reduced to the part that identifies the model."""
+    without_quant = _QUANT_SUFFIX.sub("", stem)
+    # Repeatedly, because `...-Instruct-Q4_K_M-F16` has two tails to lose.
+    while True:
+        shorter = _QUANT_SUFFIX.sub("", without_quant)
+        if shorter == without_quant:
+            break
+        without_quant = shorter
+    return re.sub(r"[^a-z0-9]", "", without_quant.lower())
 
 
 def _describe(path: Path, info: GgufInfo | None, size: int) -> str:
