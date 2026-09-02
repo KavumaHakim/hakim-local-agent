@@ -19,7 +19,9 @@ import type {
   RescanResponse,
   RewindResult,
   OcrBackend,
+  SpeechStatus,
   StopTurnResult,
+  Transcript,
   ToolsResponse,
   UploadResult,
   WorkspaceInfo,
@@ -238,6 +240,29 @@ export const api = {
       throw new ApiError(response.status, message, detail)
     }
     return (await response.json()) as UploadResult
+  },
+
+  /** Whether speech to text is installed. Asked once, on load. */
+  speechStatus: () => request<SpeechStatus>('/speech'),
+
+  /**
+   * Transcribe a recorded clip.
+   *
+   * Multipart for the same reason as `upload`: the browser has to set the
+   * content type itself, boundary and all.
+   */
+  transcribe: async (clip: Blob): Promise<Transcript> => {
+    const form = new FormData()
+    form.append('file', clip, 'dictation.wav')
+    const response = await fetch('/api/speech/transcribe', {
+      method: 'POST',
+      body: form,
+    })
+    if (!response.ok) {
+      const { message, detail } = await readError(response)
+      throw new ApiError(response.status, message, detail)
+    }
+    return (await response.json()) as Transcript
   },
 
   conversations: (limit = 30) =>

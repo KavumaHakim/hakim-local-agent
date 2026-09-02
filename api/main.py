@@ -39,6 +39,7 @@ from api.routes import (
     meta,
     models,
     rag,
+    speech,
     uploads,
     workspace,
 )
@@ -158,6 +159,7 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
     app.include_router(hub.router, prefix="/api")
     app.include_router(meta.router, prefix="/api")
     app.include_router(uploads.router, prefix="/api")
+    app.include_router(speech.router, prefix="/api")
     app.include_router(workspace.router, prefix="/api")
     app.include_router(rag.router, prefix="/api")
     app.include_router(memory.router, prefix="/api")

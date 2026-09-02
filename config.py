@@ -125,6 +125,22 @@ class Config:
     # Shared by both backends, but they are worlds apart: Tesseract should
     # finish in under a second, the model takes tens of seconds.
     ocr_timeout: float = 120.0
+    # --- speech to text ---
+    #
+    # No enabled flag, unlike OCR. There is nothing to turn off: whisper runs
+    # only while a clip is being transcribed, holds no RAM between times, and
+    # the microphone is hidden outright when no build is installed. A switch
+    # would be a switch for nothing.
+    #
+    # Empty means "find it": vendor/whisper first, then PATH.
+    whisper_cmd: str = ""
+    # Empty means "find one": whisper/, then weights/, smallest first.
+    whisper_model: str = ""
+    # Four, like the model servers, and for the same measured reason - this
+    # machine has four hardware threads and nothing gains from oversubscribing
+    # them.
+    whisper_threads: int = 4
+
     ocr_allowed_extensions: tuple[str, ...] = (
         ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
     )
@@ -374,6 +390,9 @@ class Config:
             ),
             ocr_backend=_env_str("OCR_BACKEND", defaults.ocr_backend).lower(),
             tesseract_cmd=_env_str("TESSERACT_CMD", defaults.tesseract_cmd),
+            whisper_cmd=_env_str("WHISPER_CMD", defaults.whisper_cmd),
+            whisper_model=_env_str("WHISPER_MODEL", defaults.whisper_model),
+            whisper_threads=_env_int("WHISPER_THREADS", defaults.whisper_threads),
             tesseract_lang=_env_str("TESSERACT_LANG", defaults.tesseract_lang),
             tesseract_psm=_env_int("TESSERACT_PSM", defaults.tesseract_psm),
             ocr_timeout=_env_float("OCR_TIMEOUT", defaults.ocr_timeout),

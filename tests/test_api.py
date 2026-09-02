@@ -17,6 +17,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any, Iterable
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -503,6 +504,103 @@ class ModelRouteTests(ApiTestCase):
     def test_a_negative_layer_count_is_refused_at_the_edge(self):
         response = self.client.patch("/api/models/fast", json={"gpu_layers": -1})
         self.assertEqual(response.status_code, 422)
+
+
+class SpeechRouteTests(ApiTestCase):
+    """Dictation, with whisper itself replaced.
+
+    What is worth testing at this layer is what the route refuses and what it
+    leaves behind - not whether whisper.cpp transcribes, which has its own
+    tests in test_speech.py.
+    """
+
+    def test_the_status_says_it_is_off_when_nothing_is_installed(self):
+        with mock.patch("api.routes.speech.probe", return_value=None):
+            body = self.client.get("/api/speech").json()
+        self.assertFalse(body["available"])
+        # Says what is missing, because the person can fix this and the UI
+        # otherwise just silently has no microphone.
+        self.assertIn("whisper", body["detail"].lower())
+
+    def test_the_status_names_the_model_when_it_is_installed(self):
+        from speech.whisper import WhisperInfo
+
+        found = WhisperInfo(path="/x/whisper-cli", model="/x/ggml-base.en.bin")
+        with mock.patch("api.routes.speech.probe", return_value=found):
+            body = self.client.get("/api/speech").json()
+        self.assertTrue(body["available"])
+        self.assertEqual(body["model"], "base.en")
+
+    def test_a_clip_comes_back_as_text(self):
+        with mock.patch(
+            "api.routes.speech.transcribe", return_value="open the file"
+        ):
+            response = self.client.post(
+                "/api/speech/transcribe",
+                files={"file": ("dictation.wav", b"RIFF" + b"\0" * 100, "audio/wav")},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["text"], "open the file")
+
+    def test_the_clip_is_deleted_whether_or_not_it_worked(self):
+        """A recording of somebody's voice is the most personal thing this
+        handles, and the only reason to keep one would be to debug this
+        route."""
+        seen = {}
+
+        def remember(path, **kwargs):
+            seen["path"] = Path(path)
+            seen["existed"] = Path(path).is_file()
+            return "hello"
+
+        with mock.patch("api.routes.speech.transcribe", side_effect=remember):
+            self.client.post(
+                "/api/speech/transcribe",
+                files={"file": ("dictation.wav", b"RIFF" + b"\0" * 100, "audio/wav")},
+            )
+        self.assertTrue(seen["existed"], "the clip was never written")
+        self.assertFalse(seen["path"].exists(), "the clip was left behind")
+
+    def test_the_clip_is_deleted_even_when_transcription_fails(self):
+        from speech.whisper import WhisperError
+
+        seen = {}
+
+        def blow_up(path, **kwargs):
+            seen["path"] = Path(path)
+            raise WhisperError("no model")
+
+        with mock.patch("api.routes.speech.transcribe", side_effect=blow_up):
+            response = self.client.post(
+                "/api/speech/transcribe",
+                files={"file": ("dictation.wav", b"RIFF" + b"\0" * 100, "audio/wav")},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(seen["path"].exists())
+
+    def test_something_that_is_not_audio_is_refused(self):
+        response = self.client.post(
+            "/api/speech/transcribe",
+            files={"file": ("clip.exe", b"MZ", "application/octet-stream")},
+        )
+        self.assertEqual(response.status_code, 415)
+
+    def test_an_empty_clip_is_refused(self):
+        response = self.client.post(
+            "/api/speech/transcribe",
+            files={"file": ("dictation.wav", b"", "audio/wav")},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_an_oversized_clip_is_refused_while_it_is_still_arriving(self):
+        """Enforced during the read, not after: the cap exists so a large body
+        is never materialised, and checking afterwards would defeat it."""
+        with mock.patch("api.routes.speech.MAX_BYTES", 1024):
+            response = self.client.post(
+                "/api/speech/transcribe",
+                files={"file": ("dictation.wav", b"\0" * 8192, "audio/wav")},
+            )
+        self.assertEqual(response.status_code, 413)
 
 
 class ReasoningTests(ApiTestCase):

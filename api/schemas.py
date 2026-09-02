@@ -40,6 +40,26 @@ class ChatRequest(BaseModel):
     attachments: list[str] = []
 
 
+class SpeechStatusOut(BaseModel):
+    """Whether dictation can run, and on what."""
+
+    available: bool
+    # The model's short name ("base.en"), for the microphone's tooltip.
+    model: str = ""
+    detail: str = ""
+
+
+class SpeechOut(BaseModel):
+    """One transcribed clip.
+
+    Goes to the message box, never straight to the agent: whisper invents
+    words when it hears no speech, so this is always read before it is sent.
+    """
+
+    text: str
+    bytes_received: int = 0
+
+
 class UploadOut(BaseModel):
     """An image stored in the workspace, ready to be named in a prompt."""
 

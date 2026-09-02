@@ -116,6 +116,25 @@ export default function App() {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
+  // Asked once. Whether whisper.cpp is installed does not change while the
+  // page is open, and the answer only decides whether a button is drawn.
+  const [dictation, setDictation] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    void api
+      .speechStatus()
+      .then((status) => {
+        if (!cancelled) setDictation(status.available)
+      })
+      .catch(() => {
+        // An older backend has no /api/speech at all, and that is a fine
+        // reason to have no microphone rather than an error to report.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   useHotkey('k', () => setPaletteOpen((open) => !open), { meta: true })
 
   const bottom = useRef<HTMLDivElement>(null)
@@ -460,6 +479,7 @@ export default function App() {
               onToggleThinking={() => setThinking((value) => !value)}
               workspace={workspace.workspace}
               onOpenWorkspace={() => setPickingWorkspace(true)}
+              dictation={dictation}
             />
           </div>
         </div>

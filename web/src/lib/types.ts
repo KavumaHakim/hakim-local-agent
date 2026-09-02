@@ -140,6 +140,20 @@ export interface ModelOverride {
   min_free_mb?: number
 }
 
+/** Whether dictation can run at all, and on what. */
+export interface SpeechStatus {
+  available: boolean
+  /** Short model name, e.g. "base.en". */
+  model: string
+  detail: string
+}
+
+/** One transcribed clip. Goes to the message box, never straight to a turn. */
+export interface Transcript {
+  text: string
+  bytes_received: number
+}
+
 export interface Tool {
   name: string
   category: string

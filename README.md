@@ -578,7 +578,7 @@ By hand it is `cp .env.example .env` and fill in what you need.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-1047 tests, no model server needed, and none of them touch the network.
+1080 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -704,6 +704,8 @@ Hakim Local Agent/
 ├── scripts/ui.py        menus, spinners and progress bars, stdlib only
 ├── scripts/get_llama.py fetches the right llama.cpp build for this machine
 ├── vendor/llama/        that build, once fetched (git-ignored)
+├── vendor/whisper/      a whisper.cpp build, if you want dictation (git-ignored)
+├── whisper/             ggml-*.bin speech models (git-ignored)
 │
 ├── api/                 the HTTP layer the front end talks to
 │   ├── main.py          app, lifespan, static serving
@@ -711,7 +713,7 @@ Hakim Local Agent/
 │   ├── turns.py         the queue: one turn at a time, with positions
 │   ├── schemas.py       request and response bodies
 │   └── routes/          chat (SSE), conversations, models, hub, meta,
-│                        uploads, workspace, rag, memory
+│                        uploads, speech, workspace, rag, memory
 │
 ├── web/                 React + TypeScript + Vite + Tailwind
 │   ├── src/lib/         api client, SSE reader, markdown, commands
@@ -747,6 +749,9 @@ Hakim Local Agent/
 │   ├── context.py       assembling a turn under a token budget
 │   └── manager.py       the object everything else talks to
 │
+├── speech/              dictation - no server, no state
+│   └── whisper.py       shells out to whisper-cli, one clip at a time
+│
 ├── rag/                 document search (disabled by default)
 │   ├── __main__.py      `python -m rag` - index without a model server
 │   ├── extractor.py     file to text, page by page for PDFs
@@ -772,7 +777,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               1047 tests, no server required
+└── tests/               1080 tests, no server required
 ```
 
 ---
@@ -1612,6 +1617,74 @@ tables, which produces clean line-by-line output. Pass `prompt` yourself when
 you want something else.
 
 Sample images to try are in `samples/`.
+
+### Dictating a message
+
+A microphone beside the paperclip in the composer. Press it, speak, press it
+again; the words land **in the message box**, not in a turn. That is the whole
+design decision, and it is not politeness — see below.
+
+Nothing leaves the machine. `whisper-cli` is run as a subprocess, the clip goes
+to a temporary file that is deleted whether or not transcription worked, and
+the transcript comes back over loopback like everything else.
+
+**No resident server, and that is measured rather than assumed.** Every other
+model here runs as a long-lived server, so the obvious thing would be to run
+`whisper-server` the same way. With `ggml-base.en.bin`:
+
+```
+2 s of audio      4.9 s
+10 s of audio     5.2 s
+30 s of audio     4.1 s
+```
+
+The wall clock barely moves with the length of the clip, because nearly all of
+it is loading a 148 MB model — whisper decodes in 30-second windows, so a short
+clip and a long one are one window of work either way. A resident server would
+save about four seconds a clip and hold roughly 200 MB for as long as it lived.
+On 8 GB, where a chat model is the thing that actually wants the RAM, four
+seconds is the cheaper side of that trade. It also means nothing to supervise,
+nothing to reconcile after a crash, and no second idle timeout.
+
+**Whisper invents speech when it hears none.** Two seconds of digital silence
+transcribes as " you"; a synthetic tone comes back as " (dramatic music)". This
+is whisper doing what it was trained to do. `-sns` asks it to suppress
+non-speech tokens and `clean_transcript` strips the bracketed annotations, but
+an invented ordinary word is indistinguishable from a spoken one — which is
+exactly why the transcript goes into the box to be read and corrected, and
+never straight to the agent.
+
+The browser records WebM/Opus in Chrome and Ogg/Opus in Firefox, and whisper
+reads neither reliably. Rather than add ffmpeg to the install, the clip is
+decoded and re-encoded in the browser as the 16 kHz mono WAV whisper resamples
+to anyway — `web/src/lib/dictation.ts`, about forty lines, using the audio
+decoder the browser already has.
+
+**Setting it up.** Two files, both found automatically:
+
+```
+vendor/whisper/whisper-cli.exe    a whisper.cpp build   (or on PATH)
+whisper/ggml-base.en.bin          a model               (weights/ works too)
+```
+
+Get them from [whisper.cpp releases](https://github.com/ggml-org/whisper.cpp/releases)
+and [the ggml models](https://huggingface.co/ggerganov/whisper.cpp). `base.en`
+is 148 MB and is the right first choice on this hardware; `tiny.en` is 75 MB
+and faster if four seconds a clip is too long. With neither installed the
+microphone is not drawn at all, rather than drawn and broken.
+
+| | |
+|---|---|
+| Formats | `.wav`, `.mp3`, `.ogg`, `.flac` — the browser always sends `.wav` |
+| Size | 25 MB, about 13 minutes, enforced while reading rather than after |
+| Length | recording stops itself at 2 minutes and keeps what it has |
+| Retention | none — the clip is deleted in a `finally`, worked or not |
+| Microphone | released explicitly on stop, cancel, and unmount |
+
+```
+GET  /api/speech             whether it can run, and on what model
+POST /api/speech/transcribe  one clip in, text out
+```
 
 ### memory — what the agent remembers about you
 
@@ -2541,7 +2614,7 @@ router's fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**1047 tests, no model server needed, and none of them touch the network.**
+**1080 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2692,7 +2765,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 1047 tests
+- 1080 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3
