@@ -253,8 +253,28 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
 
-  /** Whether speech to text is installed. Asked once, on load. */
+  /** Whether speech to text and a voice are installed. Asked once, on load. */
   speechStatus: () => request<SpeechStatus>('/speech'),
+
+  /**
+   * Read text aloud. Resolves with the audio itself.
+   *
+   * Not routed through `request`: the body is a WAV, not JSON. The first call
+   * after an idle period waits for the voice to load - about seven seconds -
+   * so callers show that rather than assuming it returns quickly.
+   */
+  speak: async (text: string): Promise<Blob> => {
+    const response = await fetch('/api/speech/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    })
+    if (!response.ok) {
+      const { message, detail } = await readError(response)
+      throw new ApiError(response.status, message, detail)
+    }
+    return await response.blob()
+  },
 
   /**
    * Transcribe a recorded clip.

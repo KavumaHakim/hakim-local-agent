@@ -146,6 +146,10 @@ export interface SpeechStatus {
   /** Short model name, e.g. "base.en". */
   model: string
   detail: string
+  /** Reading aloud is a separate install and is reported separately. */
+  voice_available: boolean
+  voice: string
+  voice_detail: string
 }
 
 /** One transcribed clip. Goes to the message box, never straight to a turn. */

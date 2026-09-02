@@ -5,6 +5,10 @@ weights/
 # ggml-*.bin whisper models, not GGUFs, and model discovery ignores them.
 whisper/
 
+# Piper voices: a .onnx and its .json, tens of megabytes each.
+tts/
+TTS/
+
 # llama.cpp, fetched by the setup script. Someone else's binaries, and
 # tens of megabytes of them - they belong in a release, not in here.
 vendor/

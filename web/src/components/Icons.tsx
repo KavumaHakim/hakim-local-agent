@@ -81,6 +81,13 @@ export const SparkIcon = svg(
   <path d="M12 3v4M12 17v4M3 12h4M17 12h4M6.3 6.3l2.8 2.8M14.9 14.9l2.8 2.8M17.7 6.3l-2.8 2.8M9.1 14.9l-2.8 2.8" />,
 )
 
+export const SpeakerIcon = svg(
+  <>
+    <path d="M11 5 6 9H3v6h3l5 4z" />
+    <path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" />
+  </>,
+)
+
 export const MicIcon = svg(
   <>
     <rect x="9" y="3" width="6" height="11" rx="3" />

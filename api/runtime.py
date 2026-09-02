@@ -259,6 +259,36 @@ class Runtime:
         # the one the environment chose. In memory for the same reason the
         # switches are: nothing here should outlive the process quietly.
         self._recent_workspaces: list[Path] = [self.config.workspace]
+        self._voice = None
+
+    @property
+    def voice(self):
+        """The Piper voice, started on first use and swept when idle.
+
+        Lazy for the same reason as `downloads`: a session where nobody
+        presses the speaker button should not pay for the import, let alone
+        the 175 MB.
+        """
+        if self._voice is None:
+            from speech.piper import Voice
+
+            config = self.effective_config()
+            self._voice = Voice(
+                voice=config.piper_voice,
+                idle_seconds=config.piper_idle_seconds,
+            )
+        return self._voice
+
+    def sweep_voice(self) -> bool:
+        """Give the voice's memory back when nobody is listening.
+
+        Only touches a voice that was actually started - asking for one here
+        would load a model on a machine that has never used it, which is the
+        opposite of what a sweep is for.
+        """
+        if self._voice is None:
+            return False
+        return self._voice.unload_if_idle()
 
     @property
     def downloads(self):

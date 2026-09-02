@@ -616,7 +616,7 @@ By hand it is `cp .env.example .env` and fill in what you need.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-1094 tests, no model server needed, and none of them touch the network.
+1121 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -744,6 +744,7 @@ Hakim Local Agent/
 ├── vendor/llama/        that build, once fetched (git-ignored)
 ├── vendor/whisper/      a whisper.cpp build, if you want dictation (git-ignored)
 ├── whisper/             ggml-*.bin speech models (git-ignored)
+├── tts/                 Piper voices, .onnx + .onnx.json (git-ignored)
 │
 ├── api/                 the HTTP layer the front end talks to
 │   ├── main.py          app, lifespan, static serving
@@ -787,8 +788,10 @@ Hakim Local Agent/
 │   ├── context.py       assembling a turn under a token budget
 │   └── manager.py       the object everything else talks to
 │
-├── speech/              dictation - no server, no state
-│   └── whisper.py       shells out to whisper-cli, one clip at a time
+├── speech/              dictation and reading aloud
+│   ├── whisper.py       shells out to whisper-cli, one clip at a time
+│   ├── piper.py         owns the voice worker: starts late, stops when idle
+│   └── voice_worker.py  the Piper voice, in its own process
 │
 ├── rag/                 document search (disabled by default)
 │   ├── __main__.py      `python -m rag` - index without a model server
@@ -815,7 +818,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               1094 tests, no server required
+└── tests/               1121 tests, no server required
 ```
 
 ---
@@ -1731,6 +1734,64 @@ microphone is not drawn at all, rather than drawn and broken.
 ```
 GET  /api/speech             whether it can run, and on what model
 POST /api/speech/transcribe  one clip in, text out
+```
+
+### Reading a reply aloud
+
+A speaker beside the copy button on any answer. Press it to hear that one.
+
+Opt-in per message rather than automatic, because a long answer full of tool
+output reading itself at you is worse than silence — and pressing a button is
+a cheaper way to say "this one" than a setting is.
+
+**The voice is kept warm, which is the opposite of what dictation does.**
+Measured with `en_US-lessac-medium`:
+
+```
+              cold      warm
+21 words      8.8 s     1.37 s
+42 words     10.2 s     2.52 s
+84 words     15.5 s     5.21 s
+```
+
+About **7.3 s fixed plus 0.07 s a word**, and six of those seconds are loading
+the voice. Warm it runs at **0.22× realtime** — it produces speech four and a
+half times faster than anybody can listen to it, so the wait is the load and
+nothing else. Paying that before every spoken reply would be seven seconds of
+silence for a one-line answer; paying it once a session costs **175 MB**,
+measured, and the same sweeper that unloads idle llama-servers and the
+embedding worker gives it back after `PIPER_IDLE_SECONDS`.
+
+That is the whole reason this is a resident worker and whisper, twenty lines
+away, is a subprocess per clip. Whisper's cost is *all* load and clips are
+occasional; Piper's load is paid before every sentence you want to hear.
+
+It runs in its own process for the reason `rag/worker.py` records: freeing the
+weights does not free the onnxruntime allocations behind them, and a child
+process gives every byte back when it exits.
+
+**Markdown is stripped before it is spoken.** A fenced code block read aloud is
+thirty seconds of punctuation, so it becomes the word "code"; links read as
+their text, and headings, emphasis and table pipes go entirely.
+
+**Setting it up.** `piper-tts` is in `requirements.txt`, so all you need is a
+voice — an `.onnx` with its `.onnx.json` beside it — in `tts/`:
+
+```
+tts/en_US-lessac-medium.onnx        63 MB
+tts/en_US-lessac-medium.onnx.json
+```
+
+Voices are at [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices).
+Without one the speaker is not drawn at all, rather than drawn and broken.
+
+> The standalone `piper` binaries from the old `rhasspy/piper` releases are a
+> separate, archived line, and the Linux tarball will not run on Windows. The
+> pip package is the maintained one and is cross-platform, which is why it is
+> a requirement rather than something `get_llama.py` fetches per platform.
+
+```
+POST /api/speech/speak       text in, a WAV out — never written to disk
 ```
 
 ### memory — what the agent remembers about you
@@ -2661,7 +2722,7 @@ router's fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**1094 tests, no model server needed, and none of them touch the network.**
+**1121 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2812,7 +2873,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 1094 tests
+- 1121 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

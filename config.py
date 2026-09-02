@@ -141,6 +141,15 @@ class Config:
     # them.
     whisper_threads: int = 4
 
+    # Reading a reply aloud. Empty means "find one": tts/, then TTS/, then
+    # voices/, taking the first .onnx with its .json beside it.
+    piper_voice: str = ""
+    # Unlike whisper, the voice is kept loaded between utterances - 7 s of it
+    # is loading, and paying that before every spoken reply is 7 s of silence
+    # for a one-line answer. 300 s matches the model manager's own idle
+    # timeout, and the same sweeper gives the 175 MB back.
+    piper_idle_seconds: float = 300.0
+
     ocr_allowed_extensions: tuple[str, ...] = (
         ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
     )
@@ -393,6 +402,10 @@ class Config:
             whisper_cmd=_env_str("WHISPER_CMD", defaults.whisper_cmd),
             whisper_model=_env_str("WHISPER_MODEL", defaults.whisper_model),
             whisper_threads=_env_int("WHISPER_THREADS", defaults.whisper_threads),
+            piper_voice=_env_str("PIPER_VOICE", defaults.piper_voice),
+            piper_idle_seconds=_env_float(
+                "PIPER_IDLE_SECONDS", defaults.piper_idle_seconds
+            ),
             tesseract_lang=_env_str("TESSERACT_LANG", defaults.tesseract_lang),
             tesseract_psm=_env_int("TESSERACT_PSM", defaults.tesseract_psm),
             ocr_timeout=_env_float("OCR_TIMEOUT", defaults.ocr_timeout),

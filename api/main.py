@@ -95,6 +95,10 @@ def _sweeper(runtime: Runtime, stop: threading.Event) -> None:
             embeddings = _embeddings()
             if embeddings is not None:
                 embeddings.sweep_shared()
+            # The voice is resident between utterances, unlike whisper,
+            # so it needs the same sweep. It is only ever there because
+            # somebody pressed the speaker button.
+            runtime.sweep_voice()
             # Memory processing is the one thing here that may START a model.
             # It is last, it is skipped whenever a turn is running, and it is
             # off unless AGENT_ENABLE_MEMORY_PROCESSING says otherwise.

@@ -16,6 +16,7 @@ import {
   ToolIcon,
 } from './Icons'
 import { CopyButton } from './CopyButton'
+import { SpeakButton, speakable } from './SpeakButton'
 
 /**
  * The tool calls a turn made, each expandable to what was sent and what came
@@ -148,6 +149,7 @@ export function MessageView({
   onRetry,
   onEdit,
   editingBlocked,
+  canSpeak,
 }: {
   message: Message
   /** Only on the last assistant message: re-ask the preceding question. */
@@ -156,6 +158,8 @@ export function MessageView({
   onEdit?: (text: string) => void
   /** Why editing is unavailable right now, if it is. */
   editingBlocked?: string
+  /** True when a Piper voice is installed. False draws no speaker at all. */
+  canSpeak?: boolean
 }) {
   if (message.role === 'user') {
     return (
@@ -179,7 +183,10 @@ export function MessageView({
           <span className="font-mono">{message.model_key}</span>
         )}
         {message.elapsed != null && <span>{formatDuration(message.elapsed)}</span>}
-        <div className="ml-auto flex gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+        <div className="ml-auto flex items-center gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+          {canSpeak && message.content.trim() && (
+            <SpeakButton text={speakable(message.content)} />
+          )}
           <CopyButton text={message.content} label="" />
           {onRetry && (
             <button

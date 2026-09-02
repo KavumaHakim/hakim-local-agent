@@ -14,6 +14,11 @@ uvicorn[standard]>=0.34
 # startup rather than when someone first attaches an image.
 python-multipart>=0.0.9
 
+# Reading a reply aloud. Optional in practice - without a voice file the
+# speaker button is not drawn - but it is a wheel on every platform and
+# onnxruntime is already here for the embeddings, so it costs 34 MB.
+piper-tts>=1.7
+
 # The front end is not a Python dependency: it lives in web/ and is built with
 # npm. See the README for the two commands that run it.
 

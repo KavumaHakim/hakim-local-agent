@@ -116,15 +116,19 @@ export default function App() {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
-  // Asked once. Whether whisper.cpp is installed does not change while the
-  // page is open, and the answer only decides whether a button is drawn.
+  // Asked once. Neither whisper nor a Piper voice appears or disappears while
+  // the page is open, and the answer only decides whether a button is drawn.
+  // They are independent installs, so they are two booleans and not one.
   const [dictation, setDictation] = useState(false)
+  const [canSpeak, setCanSpeak] = useState(false)
   useEffect(() => {
     let cancelled = false
     void api
       .speechStatus()
       .then((status) => {
-        if (!cancelled) setDictation(status.available)
+        if (cancelled) return
+        setDictation(status.available)
+        setCanSpeak(status.voice_available)
       })
       .catch(() => {
         // An older backend has no /api/speech at all, and that is a fine
@@ -408,6 +412,7 @@ export default function App() {
                         ? 'Still being sent.'
                         : undefined
                   }
+                  canSpeak={canSpeak}
                 />
               ))}
               {/* One per turn in flight, in the order they were asked. At

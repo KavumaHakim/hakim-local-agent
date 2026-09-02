@@ -41,12 +41,29 @@ class ChatRequest(BaseModel):
 
 
 class SpeechStatusOut(BaseModel):
-    """Whether dictation can run, and on what."""
+    """Whether dictation and reading aloud can run, and on what."""
 
     available: bool
     # The model's short name ("base.en"), for the microphone's tooltip.
     model: str = ""
     detail: str = ""
+    # Reading aloud is a separate install - a whisper build and a Piper voice
+    # have nothing to do with each other - so it is reported separately and
+    # the UI shows whichever half is there.
+    voice_available: bool = False
+    voice: str = ""
+    voice_detail: str = ""
+
+
+class SpeakRequest(BaseModel):
+    """Text to read aloud.
+
+    The cap matches the worker's own: past this, the text is almost certainly
+    something pasted by mistake rather than a reply, and synthesising it would
+    take minutes.
+    """
+
+    text: str = Field(min_length=1, max_length=8000)
 
 
 class SpeechOut(BaseModel):

@@ -597,6 +597,80 @@ class SpeechRouteTests(ApiTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertFalse(seen["path"].exists())
 
+    def test_the_status_reports_the_two_halves_separately(self):
+        """A whisper build and a Piper voice are unrelated installs. Reporting
+        one boolean would hide whichever half somebody actually has."""
+        with mock.patch("api.routes.speech.probe", return_value=None):
+            with mock.patch(
+                "api.routes.speech.voice_available", return_value=False
+            ):
+                body = self.client.get("/api/speech").json()
+        self.assertFalse(body["available"])
+        self.assertFalse(body["voice_available"])
+        self.assertIn("piper", body["voice_detail"].lower())
+
+    def test_a_voice_with_no_whisper_still_reports_the_voice(self):
+        with mock.patch("api.routes.speech.probe", return_value=None):
+            with mock.patch("api.routes.speech.voice_available", return_value=True):
+                with mock.patch(
+                    "api.routes.speech.find_voice", return_value="/x/en_GB-alba.onnx"
+                ):
+                    body = self.client.get("/api/speech").json()
+        self.assertFalse(body["available"])
+        self.assertTrue(body["voice_available"])
+        self.assertEqual(body["voice"], "en_GB-alba")
+
+    def test_a_reply_comes_back_as_playable_audio(self):
+        """The WAV is the response body, not a path: nothing is written to
+        disk, and the browser hands it straight to an audio element."""
+        import io
+        import wave
+
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(22050)
+            handle.writeframes(b"\0\0" * 2205)
+        audio = buffer.getvalue()
+
+        with mock.patch.object(
+            type(self.runtime), "voice", new_callable=mock.PropertyMock
+        ) as voice:
+            voice.return_value.speak.return_value = audio
+            response = self.client.post(
+                "/api/speech/speak", json={"text": "Read this aloud."}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "audio/wav")
+        self.assertEqual(response.content[:4], b"RIFF")
+
+    def test_a_voice_that_cannot_load_is_a_503_not_a_crash(self):
+        from speech.piper import VoiceError
+
+        with mock.patch.object(
+            type(self.runtime), "voice", new_callable=mock.PropertyMock
+        ) as voice:
+            voice.return_value.speak.side_effect = VoiceError("no voice installed")
+            response = self.client.post(
+                "/api/speech/speak", json={"text": "Read this aloud."}
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("no voice", response.json()["detail"])
+
+    def test_nothing_to_say_is_refused_at_the_edge(self):
+        self.assertEqual(
+            self.client.post("/api/speech/speak", json={"text": ""}).status_code, 422
+        )
+
+    def test_a_whole_document_pasted_in_is_refused(self):
+        """Past the cap the text is almost certainly a mistake, and
+        synthesising it would take minutes."""
+        response = self.client.post(
+            "/api/speech/speak", json={"text": "word " * 4000}
+        )
+        self.assertEqual(response.status_code, 422)
+
     def test_something_that_is_not_audio_is_refused(self):
         response = self.client.post(
             "/api/speech/transcribe",
