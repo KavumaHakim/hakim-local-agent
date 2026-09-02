@@ -502,6 +502,7 @@ class ReportTests(unittest.TestCase):
         defaults = {
             "llama": True,
             "weights": True,
+            "speech": {"whisper": True, "model": True, "voice": True},
             "choices": {"rag": False, "tests": True, "llama": True, "web_build": False},
         }
         defaults.update(kwargs)
@@ -515,6 +516,22 @@ class ReportTests(unittest.TestCase):
         for label in ("project", "python", "llama.cpp", "models", "settings",
                       "your data", "workspace"):
             self.assertIn(label, text)
+
+    def test_it_reports_the_two_voice_features_separately(self):
+        """A whisper build and a Piper voice are unrelated installs, and
+        somebody who ends up with one of them needs to be told which."""
+        text = self.render(speech={"whisper": True, "model": True, "voice": False})
+        self.assertIn("Dictation", text)
+        self.assertIn("Reading aloud", text)
+        self.assertIn("get_speech.py", text)
+
+    def test_a_voice_that_landed_is_named(self):
+        text = self.render(speech={"whisper": False, "model": False, "voice": True})
+        self.assertIn("voice", text)
+
+    def test_nothing_about_voices_is_invented_when_none_were_set_up(self):
+        text = self.render(speech={})
+        self.assertIn("skipped", text)
 
     def test_it_says_how_to_start_it(self):
         text = self.render()

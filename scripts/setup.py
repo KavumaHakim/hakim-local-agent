@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ui  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+SCRIPTS = ROOT / "scripts"
 VENV = ROOT / ".venv"
 WEIGHTS = ROOT / "weights"
 
@@ -350,6 +351,98 @@ def check_weights() -> bool:
     return False
 
 
+def check_speech(*, download: bool) -> dict:
+    """Set up dictation and reading aloud, or say what is missing.
+
+    Three pieces that fail independently, so they are reported independently:
+    a whisper.cpp build and a speech model for listening, and a Piper voice
+    for talking. Having one says nothing about having the others, and a person
+    who ends up with two of the three should be told which one to go and get.
+
+    Neither feature is required, and neither is switched on anywhere - the
+    microphone and the speaker are simply not drawn when what they need is
+    absent. So a failure here is a note, never a stopped install.
+    """
+    # The project root, because this runs from scripts/ and under whichever
+    # Python launched it - not necessarily the venv, and possibly before the
+    # venv exists at all. Both modules are stdlib-only for exactly this
+    # reason: asking them where things are must not require the install to
+    # have finished.
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    try:
+        from speech.piper import find_voice
+        from speech.whisper import find_model, find_whisper
+    except ImportError as exc:
+        # Never fatal. Neither feature is required, and a setup that died here
+        # would have died on the optional part after doing all the real work.
+        ui.warn(f"could not check the voice features: {exc}")
+        return {}
+
+    found = {
+        "whisper": bool(find_whisper()),
+        "model": bool(find_model()),
+        "voice": bool(find_voice()),
+    }
+    if all(found.values()):
+        ui.ok("dictation and reading aloud are both ready")
+        return found
+
+    if not download:
+        _speech_notes(found)
+        return found
+
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
+    try:
+        import get_speech
+    except ImportError as exc:
+        ui.warn(f"could not load the fetcher: {exc}")
+        _speech_notes(found)
+        return found
+
+    # 220 MB between them, so it is worth saying before it starts rather than
+    # after somebody has watched a bar for four minutes.
+    ui.note("About 220 MB: an 8 MB build, a 148 MB model, a 63 MB voice.")
+
+    for key, label, fetch in (
+        ("whisper", "whisper.cpp", get_speech.install_whisper),
+        ("model", "the speech model", get_speech.install_model),
+        ("voice", "the voice", get_speech.install_voice),
+    ):
+        if found[key]:
+            continue
+        try:
+            fetch()
+            found[key] = True
+            ui.ok(label)
+        except Exception as exc:  # noqa: BLE001 - never fatal, always reported
+            # One failing piece must not take the other two with it: a machine
+            # with no whisper build can still read replies aloud.
+            ui.warn(f"{label}: {exc}")
+
+    _speech_notes(found)
+    return found
+
+
+def _speech_notes(found: dict) -> None:
+    """Say which half works and what the other one needs."""
+    listening = found["whisper"] and found["model"]
+    if listening:
+        ui.ok("dictation is ready")
+    else:
+        missing = "a whisper.cpp build" if not found["whisper"] else "a speech model"
+        ui.note(f"Dictation needs {missing}: python scripts/get_speech.py")
+
+    if found["voice"]:
+        ui.ok("reading aloud is ready")
+    else:
+        ui.note(
+            "Reading aloud needs a Piper voice: "
+            "python scripts/get_speech.py --what voice"
+        )
+
+
 def make_env_file() -> None:
     """Put a .env in place, from the committed example.
 
@@ -491,6 +584,7 @@ def plan(arguments) -> dict:
         "rag": arguments.with_rag,
         "web_build": arguments.build_web,
         "llama": not arguments.no_llama,
+        "speech": arguments.with_speech,
         "tests": not arguments.skip_tests,
     }
 
@@ -509,6 +603,12 @@ def plan(arguments) -> dict:
             "note": "18 MB. It is the engine that actually runs your models.",
             "on": choices["llama"],
             "key": "llama",
+        },
+        {
+            "label": "Let me talk to it, and hear it back",
+            "note": "220 MB. Dictate a message, and read any answer aloud.",
+            "on": choices["speech"],
+            "key": "speech",
         },
         {
             "label": "Let it search my documents",
@@ -541,7 +641,7 @@ def _size(path: Path) -> str:
         return "?"
 
 
-def report(*, llama: bool, weights: bool, choices: dict) -> None:
+def report(*, llama: bool, weights: bool, speech: dict, choices: dict) -> None:
     """Say where everything went, what was done, and how to start it.
 
     Printed in full every time rather than only when something is missing. A
@@ -570,6 +670,17 @@ def report(*, llama: bool, weights: bool, choices: dict) -> None:
             ui.say(f"   {' ' * 16} {ui.DIM}- {path.name} ({_size(path)}){ui.RESET}")
     else:
         ui.field("models", f"{WEIGHTS} {ui.DIM}(empty){ui.RESET}")
+
+    if speech.get("whisper") or speech.get("model"):
+        ui.field("dictation", str(ROOT / "whisper"))
+        ui.say(
+            f"   {' ' * 16} {ui.DIM}the build is in vendor/whisper{ui.RESET}"
+        )
+    if speech.get("voice"):
+        voices = sorted((ROOT / "tts").glob("*.onnx"))
+        ui.field("voice", str(ROOT / "tts"))
+        for path in voices:
+            ui.say(f"   {' ' * 16} {ui.DIM}- {path.stem}{ui.RESET}")
 
     ui.field("settings", str(ROOT / ".env"))
     ui.field("your data", str(ROOT / "data"))
@@ -613,6 +724,18 @@ def report(*, llama: bool, weights: bool, choices: dict) -> None:
         (
             "A model",
             f"{len(models)} found" if models else "still needed - your choice to make",
+        ),
+        (
+            "Dictation",
+            "ready - press the microphone"
+            if speech.get("whisper") and speech.get("model")
+            else "skipped - add it with scripts/get_speech.py",
+        ),
+        (
+            "Reading aloud",
+            "ready - press the speaker on any answer"
+            if speech.get("voice")
+            else "skipped - add a voice with scripts/get_speech.py --what voice",
         ),
         (
             "Hosted models",
@@ -701,6 +824,7 @@ def step_names(choices: dict) -> list[str]:
         "Installing the web interface",
         "Fetching llama.cpp" if choices["llama"] else "Looking for llama.cpp",
         "Looking for a model",
+        "Setting up the voice" if choices["speech"] else "Checking the voice",
         "Writing your configuration",
     ]
     if choices["tests"]:
@@ -727,6 +851,11 @@ def main() -> int:
         "--build-web",
         action="store_true",
         help="build the front end so the API serves it, instead of running Vite",
+    )
+    parser.add_argument(
+        "--with-speech",
+        action="store_true",
+        help="also fetch dictation and a voice (about 220 MB)",
     )
     parser.add_argument(
         "--skip-tests", action="store_true", help="do not run the verification tests"
@@ -759,6 +888,7 @@ def main() -> int:
 
     llama = False
     weights = False
+    speech: dict = {}
 
     try:
         advance()
@@ -784,6 +914,9 @@ def main() -> int:
         weights = check_weights()
 
         advance()
+        speech = check_speech(download=choices["speech"])
+
+        advance()
         make_env_file()
         ask_for_keys(ask=not arguments.yes)
 
@@ -795,7 +928,7 @@ def main() -> int:
         ui.say("\n  Stopped part-way. Run this again to carry on where it left off.")
         return 1
 
-    report(llama=llama, weights=weights, choices=choices)
+    report(llama=llama, weights=weights, speech=speech, choices=choices)
     # --yes means unattended, so it must not hold at the end either: someone
     # scripting this in a terminal would otherwise wait forever on a keypress
     # they never asked to be prompted for.

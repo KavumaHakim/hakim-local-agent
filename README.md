@@ -49,6 +49,8 @@ manager — the API adds transport, not a second implementation.
 - Streams tokens, and the model's reasoning, as they generate
 - Shows what every tool call sent and received, so you can check its work
 - Reads images you drop in, via OCR
+- Takes a message by voice, and reads any answer back aloud — both on this
+  machine, and both optional
 - Searches your own notes and PDFs by meaning, and answers from them
 - Remembers your preferences and decisions across conversations, and
   retrieves only the ones relevant to what you just asked
@@ -344,11 +346,13 @@ what you want, and shows progress while it works.
 
    [+] 1  Get llama.cpp for me
           18 MB. It is the engine that actually runs your models.
-   [ ] 2  Let it search my documents
+   [ ] 2  Let me talk to it, and hear it back
+          220 MB. Dictate a message, and read any answer aloud.
+   [ ] 3  Let it search my documents
           2 GB and slow to install. You can add this later.
-   [ ] 3  Build the web interface for production
+   [ ] 4  Build the web interface for production
           Most people want the development mode instead. Leave this off.
-   [+] 4  Check it works when you are done
+   [+] 5  Check it works when you are done
           Runs the tests. About a minute, and worth it.
 
   number to change one, Enter when it looks right  >
@@ -359,15 +363,16 @@ printing it again underneath — and it clears itself once accepted. Then:
 
 ```
 Here is the plan
-   1. Checking your Python        5. Fetching llama.cpp
-   2. Making a private environment 6. Looking for a model
-   3. Installing the Python side  7. Writing your configuration
-   4. Installing the web interface 8. Making sure it all works
+   1. Checking your Python        6. Looking for a model
+   2. Making a private environment 7. Setting up the voice
+   3. Installing the Python side  8. Writing your configuration
+   4. Installing the web interface 9. Making sure it all works
+   5. Fetching llama.cpp
 
-===-----  3/8 Installing the Python side
+===------  3/9 Installing the Python side
   / requirements.txt (14s)
 
-=====---  5/8 Fetching llama.cpp
+====-----  5/9 Fetching llama.cpp
   downloading [██████████████..........]  58% 10.8/18.4 MB  2.1 MB/s
 ```
 
@@ -503,6 +508,28 @@ without fetching it. It resumes a dropped connection the same way the model
 browser does, over both transports — `requests` when it is installed, urllib
 when nothing is yet, which is exactly the machine running this script.
 
+**4b. Optional: dictation and a voice.** Neither is needed to chat, and
+neither is switched on anywhere — the microphone and the speaker are simply
+not drawn until what they need is present.
+
+```bash
+python scripts/get_speech.py
+```
+
+About 220 MB: an 8 MB whisper.cpp build into `vendor/whisper/`, a 148 MB
+speech model into `whisper/`, and a 63 MB Piper voice into `tts/`. `--what
+whisper|model|voice` fetches one part, `--model tiny.en` takes the 78 MB model
+instead, and `--voice` picks a different voice.
+
+Text-to-speech needs no binary — `piper-tts` is a wheel in `requirements.txt`,
+already installed by step 2 — so a voice file is the whole of it. Speech-to-text
+needs a platform build, which is why this script exists at all.
+
+> **macOS has no whisper.cpp binary release** — the project ships an
+> xcframework for Xcode and expects everyone else to build it. `brew install
+> whisper-cpp` and everything here works unchanged; the script says so rather
+> than reporting a confusing "not found". Reading aloud is unaffected.
+
 `--backend vulkan` fetches the Vulkan build instead, into `vendor/llama-vulkan/`
 **beside** the CPU one rather than replacing it — because the only way to know
 whether an integrated GPU helps is to measure both on the same machine. Only
@@ -616,7 +643,7 @@ By hand it is `cp .env.example .env` and fill in what you need.
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-1121 tests, no model server needed, and none of them touch the network.
+1140 tests, no model server needed, and none of them touch the network.
 
 ### What the setup script deliberately does not do
 
@@ -630,6 +657,13 @@ It does fetch `llama.cpp`, because that choice is not personal: there is
 exactly one right build for a given machine, it is 18 MB, and getting it by
 hand means picking correctly out of 27 similarly-named archives.
 
+The speech model and the voice sit between those two cases, which is why they
+are **off by default and offered rather than assumed**. They are a choice —
+`tiny.en` against `base.en`, one voice against another — but a small one with
+an obvious default, and getting them by hand means the same 9-archive problem
+whisper.cpp has. So the menu asks, the answer is remembered in what it fetched,
+and nothing is downloaded for somebody who only wanted to type.
+
 ### If something goes wrong
 
 | Symptom | Cause |
@@ -639,6 +673,8 @@ hand means picking correctly out of 27 similarly-named archives.
 | `ensurepip is not available` | Debian/Ubuntu split it out: `sudo apt install python3-venv` |
 | `llama-server not found` | Not on `PATH` and not at the `server_exe` path. See step 4 |
 | No models listed | No `.gguf` in `weights/`. See step 5 |
+| No microphone in the composer | No whisper.cpp build or no speech model: `python scripts/get_speech.py` |
+| No speaker on an answer | No Piper voice: `python scripts/get_speech.py --what voice` |
 | Port 8000 or 5173 in use | An earlier run is still going. Both launchers name the process holding it |
 | `GitHub is rate-limiting this connection` | Unauthenticated API calls are capped per IP. Wait, or fetch a build by hand and put it on `PATH` |
 
@@ -741,6 +777,7 @@ Hakim Local Agent/
 ├── scripts/setup.py     what both setup wrappers actually run
 ├── scripts/ui.py        menus, spinners and progress bars, stdlib only
 ├── scripts/get_llama.py fetches the right llama.cpp build for this machine
+├── scripts/get_speech.py fetches whisper.cpp, a speech model and a voice
 ├── vendor/llama/        that build, once fetched (git-ignored)
 ├── vendor/whisper/      a whisper.cpp build, if you want dictation (git-ignored)
 ├── whisper/             ggml-*.bin speech models (git-ignored)
@@ -818,7 +855,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               1121 tests, no server required
+└── tests/               1140 tests, no server required
 ```
 
 ---
@@ -2722,7 +2759,7 @@ router's fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**1121 tests, no model server needed, and none of them touch the network.**
+**1140 tests, no model server needed, and none of them touch the network.**
 They run in about 35 seconds.
 
 | File | Covers |
@@ -2873,7 +2910,7 @@ Being straight about this, because the difference matters.
 
 ### Verified without the model
 
-- 1121 tests
+- 1140 tests
 - The React app against the real API: conversation list, tool roster with its
   real disabled reasons, model list, theme in both schemes, no sideways scroll
 - **Tool switches, in the browser.** Turning Python on took the roster from 3

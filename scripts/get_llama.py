@@ -298,7 +298,9 @@ def download(
     """
     bar = on_progress("downloading", size) if on_progress else None
     if bar is None:
-        say(f"  downloading {size / 1e6:.1f} MB ...")
+        # 0 means the caller does not know and is letting the server say. It
+        # is not a zero-byte file, and printing it as one reads like a bug.
+        say("  downloading ..." if not size else f"  downloading {size / 1e6:.1f} MB ...")
 
     session = _requests()
     done = 0
