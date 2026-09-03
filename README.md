@@ -2995,9 +2995,35 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 
 **Next, in order of value:**
 
-1. Load a model through the manager for real — the largest untested gap
-2. Confirm the filesystem tool with a live turn
-3. Watch auto-routing perform a real switch
+1. **Context controls.** Show what a turn's context is made of — conversation
+   against tool schemas, against the model's window — and what had to be
+   dropped to fit. The numbers exist on every turn now; the interface is the
+   remaining half.
+2. **Regenerate an answer.** Reuses the rewind mechanism and the pickers that
+   already ride on `ChatRequest`. Replaces the previous answer rather than
+   keeping alternatives, which needs no schema change.
+3. **Attachment previews** in the composer, so an image is visible before it
+   is sent rather than only as a path.
+4. Watch auto-routing perform a real switch — the last of the three original
+   untested gaps.
+
+**Interface:**
+
+- **Settings deserves better than an icon.** It is a single button now; the
+  things behind it have outgrown that.
+- **Appearance controls**: font and font size at least. Reading long replies
+  on a small screen is the case that motivates it, and the theme tokens in
+  `web/src/index.css` are already the right shape to extend.
+
+**Giving the model more room:**
+
+- **Widen the terminal allowlist**, and more generally revisit how much
+  freedom each tool grants. The allowlist was drawn tight on purpose and has
+  not been revisited since; specific needs have now appeared. The question to
+  answer per tool is which refusals are protecting anything and which are just
+  friction — `tools/shell_tool.py` and `tools/http_tool.py` first.
+- Real sandboxing for the Python tool (container or VM). This is what would
+  make widening it safe rather than merely permitted.
 
 **Later:**
 
@@ -3006,11 +3032,18 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 - Deciding whether memories should be injected into the prompt automatically,
   which costs tokens on every turn
 - Web search tool (`tools/web.py` is a placeholder)
-- Widening the terminal allowlist as specific needs appear
-- Real sandboxing for the Python tool (container or VM)
 - Conversation search and export
 - The custom C99 inference engine at `C:\path\to\mmengine` — parked until
   it is further along
+
+**Done, with the measurement that closed it:**
+
+- **Loading a model through the manager** — was the largest untested gap.
+  Gemma now loads through `POST /api/models/{key}/load` in **18.1 s**, and a
+  turn through `/api/chat` completes in **34.1 s**.
+- **The filesystem tool on a live turn** — Gemma called `list_directory` and
+  read the workspace root back correctly, with the tool arriving through the
+  lens rather than being sent up front.
 
 **Measured and decided against:**
 
