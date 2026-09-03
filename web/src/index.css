@@ -263,3 +263,27 @@
     display: none;
   }
 }
+
+/**
+ * The conversation text, which is the only text these settings move.
+ *
+ * The chrome — rail, composer, panels — is dense on purpose and stays at the
+ * sizes the design system chose. What someone reading a two-thousand word
+ * answer on a laptop needs is bigger *prose*, not a bigger interface, so the
+ * control is deliberately narrow. Both properties inherit, so everything the
+ * markdown renderer produces follows without each element opting in.
+ *
+ * Set on :root by lib/appearance.ts, with these as the fallback for a first
+ * load before any choice has been stored.
+ */
+.reading {
+  font-size: var(--reading-size, 15px);
+  font-family: var(--reading-family, var(--font-sans));
+}
+
+/* Code keeps its own face at every reading size: a monospace stack is what
+   makes indentation and alignment legible, and inheriting a serif here would
+   undo that. It still scales, because the size is relative. */
+.reading :is(code, pre, kbd, samp) {
+  font-family: var(--font-mono);
+}

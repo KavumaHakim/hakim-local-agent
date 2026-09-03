@@ -298,7 +298,7 @@ export function MessageView({
     <div className="group animate-rise">
       {message.reasoning && <ReasoningPanel text={message.reasoning} />}
       <ToolPills tools={message.tools} />
-      <div className="text-[15px] text-fg">
+      <div className="reading text-fg">
         <Markdown text={message.content} />
       </div>
       <div className="mt-2 flex items-center gap-3 text-[11.5px] text-faint">
@@ -437,7 +437,9 @@ function UserMessage({
           as a line and a glow; a solid violet bubble was the one large
           saturated fill in the old build. */}
       <div className="max-w-[82%] rounded-[14px_14px_4px_14px] bg-raised px-3.5 py-2.5 shadow-[var(--shadow-sm)]">
-        <p className="text-[14.5px] leading-relaxed break-words whitespace-pre-wrap">
+        {/* The question follows the answer's size: reading a conversation at
+            two different sizes is worse than reading it at either. */}
+        <p className="reading leading-relaxed break-words whitespace-pre-wrap">
           {message.content}
         </p>
       </div>

@@ -19,6 +19,13 @@ import type {
 } from '../lib/types'
 import type { PaneId } from './Rail'
 import {
+  READING_FONTS,
+  READING_SIZES,
+  type Appearance,
+  type ReadingFont,
+  type Theme,
+} from '../lib/appearance'
+import {
   AlertIcon,
   ChatIcon,
   CollapseIcon,
@@ -68,6 +75,9 @@ interface Props {
   onAutoRoute: (value: boolean) => void
   thinking: boolean
   onThinking: (value: boolean) => void
+
+  appearance: Appearance
+  onAppearance: (next: Partial<Appearance>) => void
 }
 
 export function Pane(props: Props) {
@@ -474,9 +484,15 @@ function SettingsPane({
   onAutoRoute,
   thinking,
   onThinking,
+  appearance,
+  onAppearance,
 }: Props) {
   return (
     <div className="space-y-4">
+      <AppearanceSettings appearance={appearance} onChange={onAppearance} />
+
+      <hr className="border-line" />
+
       <Setting
         label="Auto-route by task"
         hint="Simple prompts to the fast model, involved ones to the strong one. Never routes back down, and asks before sending a turn off this machine."
@@ -1032,6 +1048,113 @@ function Field({
       <span className="mb-0.5 block text-[10px] text-faint">{label}</span>
       {children}
     </label>
+  )
+}
+
+/**
+ * Theme, and the size and face of the conversation text.
+ *
+ * Only the conversation: the rail, composer and panels stay at the density
+ * the design system chose. Someone reading a two-thousand word answer needs
+ * bigger prose, not a bigger interface.
+ *
+ * The sample under the controls is the point of the section — it is set in
+ * `.reading`, the same class the transcript uses, so it is not a mock-up of
+ * the result but the result itself, updating as the buttons are pressed.
+ */
+function AppearanceSettings({
+  appearance,
+  onChange,
+}: {
+  appearance: Appearance
+  onChange: (next: Partial<Appearance>) => void
+}) {
+  return (
+    <section className="space-y-2.5">
+      <h3 className="text-[12.5px]">Appearance</h3>
+
+      <Choice
+        label="Theme"
+        options={[
+          { value: 'dark', label: 'Dark' },
+          { value: 'light', label: 'Light' },
+        ]}
+        value={appearance.theme}
+        onSelect={(theme) => onChange({ theme: theme as Theme })}
+      />
+
+      <Choice
+        label="Text size"
+        options={READING_SIZES.map((size) => ({
+          value: String(size.value),
+          label: size.label,
+        }))}
+        value={String(appearance.readingSize)}
+        onSelect={(size) => onChange({ readingSize: Number(size) })}
+      />
+
+      <Choice
+        label="Text face"
+        options={(
+          Object.keys(READING_FONTS) as (keyof typeof READING_FONTS)[]
+        ).map((key) => ({ value: key, label: READING_FONTS[key].label }))}
+        value={appearance.readingFont}
+        onSelect={(font) => onChange({ readingFont: font as ReadingFont })}
+      />
+
+      <div className="rounded-md border border-line bg-sunken px-2.5 py-2">
+        <p className="reading leading-relaxed text-fg">
+          Magnesium reacts with steam to form MgO and hydrogen.
+        </p>
+        <p className="mt-1.5 text-[10.5px] text-faint">
+          Remembered in this browser, not on the server — the same agent opened
+          elsewhere keeps its own settings.
+        </p>
+      </div>
+    </section>
+  )
+}
+
+/** A row of mutually exclusive options, the segmented-control shape. */
+function Choice({
+  label,
+  options,
+  value,
+  onSelect,
+}: {
+  label: string
+  options: { value: string; label: string }[]
+  value: string
+  onSelect: (value: string) => void
+}) {
+  return (
+    <div>
+      <p className="mb-1 text-[11px] text-faint">{label}</p>
+      <div
+        role="group"
+        aria-label={label}
+        className="flex gap-1 rounded-md border border-line p-0.5"
+      >
+        {options.map((option) => {
+          const selected = option.value === value
+          return (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={selected}
+              onClick={() => onSelect(option.value)}
+              className={`flex-1 rounded-[5px] px-1.5 py-1 text-[11px] transition ${
+                selected
+                  ? 'bg-accent-tint text-accent-soft'
+                  : 'text-muted hover:bg-tint hover:text-fg'
+              }`}
+            >
+              {option.label}
+            </button>
+          )
+        })}
+      </div>
+    </div>
   )
 }
 

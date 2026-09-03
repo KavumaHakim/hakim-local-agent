@@ -31,8 +31,12 @@ import {
 import { COMMANDS, parseCommand, type CommandId } from './lib/commands'
 import { api } from './lib/api'
 import type { Attachment } from './lib/types'
-
-type Theme = 'dark' | 'light'
+import {
+  apply as applyAppearance,
+  load as loadAppearance,
+  save as saveAppearance,
+  type Appearance,
+} from './lib/appearance'
 
 export default function App() {
   const [draft, setDraft] = useState('')
@@ -49,10 +53,10 @@ export default function App() {
   const [paneOpen, setPaneOpen] = useState(true)
   const [pickingWorkspace, setPickingWorkspace] = useState(false)
   const [browsingModels, setBrowsingModels] = useState(false)
-  const [theme, setTheme] = useState<Theme>(
-    () =>
-      (document.documentElement.dataset.theme as Theme | undefined) ?? 'dark',
-  )
+  // Seeded from storage, which main.tsx has already applied to the document -
+  // so the first render agrees with what is on screen rather than correcting
+  // it.
+  const [appearance, setAppearance] = useState<Appearance>(loadAppearance)
 
   const models = useModels()
   const tools = useTools()
@@ -114,8 +118,13 @@ export default function App() {
   }, [models.models, modelKey])
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme
-  }, [theme])
+    applyAppearance(appearance)
+    saveAppearance(appearance)
+  }, [appearance])
+
+  const changeAppearance = useCallback((next: Partial<Appearance>) => {
+    setAppearance((current) => ({ ...current, ...next }))
+  }, [])
 
   // Asked once. Neither whisper nor a Piper voice appears or disappears while
   // the page is open, and the answer only decides whether a button is drawn.
@@ -368,9 +377,11 @@ export default function App() {
         open={paneOpen}
         onSelect={selectPane}
         onNewConversation={newConversation}
-        theme={theme}
+        theme={appearance.theme}
         onToggleTheme={() =>
-          setTheme((current) => (current === 'dark' ? 'light' : 'dark'))
+          changeAppearance({
+            theme: appearance.theme === 'dark' ? 'light' : 'dark',
+          })
         }
         toolsWarning={Boolean(
           tools.data?.switches.some((entry) => entry.enabled && entry.risk),
@@ -410,6 +421,8 @@ export default function App() {
           onAutoRoute={setAutoRoute}
           thinking={thinking}
           onThinking={setThinking}
+          appearance={appearance}
+          onAppearance={changeAppearance}
         />
       )}
 

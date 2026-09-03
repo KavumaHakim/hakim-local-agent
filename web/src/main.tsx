@@ -6,14 +6,13 @@ import { createRoot } from 'react-dom/client'
 import '@fontsource-variable/inter'
 import './index.css'
 import App from './App.tsx'
+import { apply, load } from './lib/appearance.ts'
 
-// The system's starting value. After this the rail's toggle owns it, so the
-// attribute is set once here and never read from the media query again.
-document.documentElement.dataset.theme = window.matchMedia(
-  '(prefers-color-scheme: light)',
-).matches
-  ? 'light'
-  : 'dark'
+// Before the first render, not inside a component: applying it in an effect
+// would paint the default and then correct itself, which is a flash of the
+// wrong theme on every load. `load` falls back to the system preference when
+// nothing has been chosen yet.
+apply(load())
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
