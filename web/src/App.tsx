@@ -279,12 +279,30 @@ export default function App() {
     [chat],
   )
 
-  /** Re-ask the last question, which is the one before the last answer. */
-  const retryLast = useCallback(() => {
+  /**
+   * Ask the last question again, replacing the answer it got.
+   *
+   * The question and everything that answered it are deleted first, and the
+   * same text is then asked afresh. This used to append instead, which left
+   * the model reading a transcript where the same thing was asked twice -
+   * and a question asked twice is a different question.
+   *
+   * Nothing else is held fixed on purpose: the answer is regenerated with
+   * whatever model and settings are selected *now*, so switching model and
+   * pressing this is the obvious way to compare two answers to one question.
+   */
+  const regenerateLast = useCallback(async () => {
     const lastUser = [...chat.messages]
       .reverse()
       .find((message) => message.role === 'user')
-    if (lastUser) void chat.send(lastUser.content)
+    if (!lastUser) return
+    try {
+      await chat.editAndResend(lastUser.id, lastUser.content)
+      setNote(null)
+    } catch (failure) {
+      // The useful refusal is the server's "a turn is still running".
+      setNote(failure instanceof Error ? failure.message : String(failure))
+    }
   }, [chat])
 
   const selectedModel =
@@ -404,8 +422,14 @@ export default function App() {
                   key={message.id}
                   message={message}
                   onRetry={
-                    index === lastIndex && message.role === 'assistant'
-                      ? retryLast
+                    // Not offered mid-turn: regenerating rewinds, and the
+                    // server refuses that while anything is in flight. A
+                    // button whose only outcome is an error is worse than
+                    // no button.
+                    index === lastIndex &&
+                    message.role === 'assistant' &&
+                    !chat.busy
+                      ? () => void regenerateLast()
                       : undefined
                   }
                   onEdit={(text) => void editQuestion(message.id, text)}

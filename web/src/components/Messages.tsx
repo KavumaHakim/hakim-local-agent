@@ -261,7 +261,11 @@ export function MessageView({
   canSpeak,
 }: {
   message: Message
-  /** Only on the last assistant message: re-ask the preceding question. */
+  /**
+   * Only on the last assistant message, and only when nothing is running:
+   * ask the preceding question again, replacing this answer rather than
+   * appending a second copy of the question.
+   */
   onRetry?: () => void
   /** Rewind to this question, replace it, and ask again. */
   onEdit?: (text: string) => void
@@ -301,7 +305,7 @@ export function MessageView({
             <button
               type="button"
               onClick={onRetry}
-              title="Ask again"
+              title="Answer again — replaces this answer"
               className="grid size-[22px] place-items-center rounded-sm text-faint transition hover:bg-tint hover:text-fg"
             >
               <RetryIcon className="size-3.5" />
