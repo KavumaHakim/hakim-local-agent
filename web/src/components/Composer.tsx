@@ -12,7 +12,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { matchCommands, type CommandSpec } from '../lib/commands'
-import type { Model, UploadResult, WorkspaceInfo } from '../lib/types'
+import type { Attachment, Model, WorkspaceInfo } from '../lib/types'
 import { basename } from '../lib/paths'
 import { MAX_SECONDS, Recorder, recordingSupported, toWav } from '../lib/dictation'
 import { api, ApiError } from '../lib/api'
@@ -36,7 +36,7 @@ interface Props {
   disabled: boolean
   placeholder: string
 
-  attachments: UploadResult[]
+  attachments: Attachment[]
   onAttach: (files: FileList | File[]) => void
   onRemoveAttachment: (path: string) => void
   uploading: boolean
@@ -287,7 +287,18 @@ export function Composer({
             key={file.path}
             className="mx-2 mt-2 flex items-center gap-2 rounded-md bg-tint px-[9px] py-[5px] text-xs"
           >
-            <ImageIcon className="size-[13px] shrink-0 text-accent" />
+            {file.preview ? (
+              // The point of the preview: dropping the wrong screenshot is
+              // easy, and a filename is not enough to notice it. Decorative,
+              // so the alt text is empty - the name is right beside it.
+              <img
+                src={file.preview}
+                alt=""
+                className="size-9 shrink-0 rounded border border-line object-cover"
+              />
+            ) : (
+              <ImageIcon className="size-[13px] shrink-0 text-accent" />
+            )}
             <span className="min-w-0 flex-1 truncate">{file.name}</span>
             <span className="shrink-0 text-faint">
               {Math.max(1, Math.round(file.size / 1024)).toLocaleString()} KB

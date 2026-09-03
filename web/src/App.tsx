@@ -30,7 +30,7 @@ import {
 } from './hooks/useResources'
 import { COMMANDS, parseCommand, type CommandId } from './lib/commands'
 import { api } from './lib/api'
-import type { UploadResult } from './lib/types'
+import type { Attachment } from './lib/types'
 
 type Theme = 'dark' | 'light'
 
@@ -41,7 +41,7 @@ export default function App() {
   const [thinking, setThinking] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [note, setNote] = useState<string | null>(null)
-  const [attachments, setAttachments] = useState<UploadResult[]>([])
+  const [attachments, setAttachments] = useState<Attachment[]>([])
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
 
@@ -228,6 +228,31 @@ export default function App() {
     [models, modelKey, newConversation, chooseWorkspace],
   )
 
+  /**
+   * Drop one attachment, releasing its preview.
+   *
+   * An object URL keeps the whole file alive until it is revoked, so every
+   * path that removes an attachment has to come through here or through
+   * `clearAttachments`. On an 8 GB machine a leaked image is not a rounding
+   * error.
+   */
+  const forget = useCallback((path: string) => {
+    setAttachments((current) => {
+      const going = current.find((file) => file.path === path)
+      if (going?.preview) URL.revokeObjectURL(going.preview)
+      return current.filter((file) => file.path !== path)
+    })
+  }, [])
+
+  const clearAttachments = useCallback(() => {
+    setAttachments((current) => {
+      for (const file of current) {
+        if (file.preview) URL.revokeObjectURL(file.preview)
+      }
+      return []
+    })
+  }, [])
+
   const submit = useCallback(
     (text: string) => {
       const command = parseCommand(text)
@@ -239,10 +264,10 @@ export default function App() {
       setNote(null)
       setDraft('')
       const paths = attachments.map((file) => file.path)
-      setAttachments([])
+      clearAttachments()
       void chat.send(text, undefined, false, paths)
     },
-    [chat, runCommand, attachments],
+    [chat, runCommand, attachments, clearAttachments],
   )
 
   const attach = useCallback(async (files: FileList | File[]) => {
@@ -251,7 +276,18 @@ export default function App() {
     try {
       for (const file of Array.from(files)) {
         const stored = await api.upload(file)
-        setAttachments((current) => [...current, stored])
+        setAttachments((current) => [
+          ...current,
+          {
+            ...stored,
+            // Over the File the browser already holds, so the preview costs
+            // no round trip and no route that serves workspace files back
+            // out. Revoked in `forget` and `clearAttachments`.
+            preview: file.type.startsWith('image/')
+              ? URL.createObjectURL(file)
+              : undefined,
+          },
+        ])
       }
     } catch (failure) {
       setUploadError(failure instanceof Error ? failure.message : String(failure))
@@ -498,11 +534,7 @@ export default function App() {
               atCapacity={chat.atCapacity}
               attachments={attachments}
               onAttach={attach}
-              onRemoveAttachment={(path) =>
-                setAttachments((current) =>
-                  current.filter((file) => file.path !== path),
-                )
-              }
+              onRemoveAttachment={forget}
               uploading={uploading}
               uploadError={uploadError}
               model={selectedModel}

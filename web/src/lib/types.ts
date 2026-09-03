@@ -268,6 +268,20 @@ export interface UploadResult {
   hint: string
 }
 
+/**
+ * An upload, plus a preview of it.
+ *
+ * The preview is an object URL over the `File` the browser already had, so
+ * showing it costs no round trip and needs no route that serves workspace
+ * files back out. It also means the preview must be revoked by hand when the
+ * attachment goes: an object URL pins the whole file in memory until it is,
+ * and this machine cannot spare that.
+ */
+export interface Attachment extends UploadResult {
+  /** Absent when the file is not something the browser can display. */
+  preview?: string
+}
+
 export interface Health {
   ok: boolean
   busy: boolean
