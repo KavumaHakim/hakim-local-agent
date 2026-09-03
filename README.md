@@ -3011,9 +3011,6 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 
 - **Settings deserves better than an icon.** It is a single button now; the
   things behind it have outgrown that.
-- **Appearance controls**: font and font size at least. Reading long replies
-  on a small screen is the case that motivates it, and the theme tokens in
-  `web/src/index.css` are already the right shape to extend.
 
 **Giving the model more room:**
 
@@ -3027,6 +3024,16 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 
 **Later:**
 
+- **KaTeX, if the maths gets harder than this.** `web/src/lib/math.tsx`
+  renders the LaTeX subset the models here actually write — twelve commands
+  appear across the stored replies, and six carry almost all of it. It handles
+  chemistry properly (`2 Ca + H₂O + Heat → 2 Ca(OH)₂`, real subscripts, a
+  stacked ½) and makes calculus readable. What it does not do is the long
+  tail: matrices, aligned environments, big operators with limits above and
+  below, anything genuinely typeset. KaTeX does all of that and costs roughly
+  as much as the entire current bundle (~293 KB), which is why it was not the
+  first answer. That file is the thing it would replace — the delimiter
+  detection in `markdown.tsx` would stay as it is.
 - Web search and `fetch_url`, once you decide the network boundary is worth
     crossing
 - Deciding whether memories should be injected into the prompt automatically,
@@ -3044,6 +3051,12 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 - **The filesystem tool on a live turn** — Gemma called `list_directory` and
   read the workspace root back correctly, with the tool arriving through the
   lens rather than being sent up front.
+- **Appearance controls** — theme, text size and text face for the
+  conversation, remembered in the browser. Deliberately narrow: the rail,
+  composer and panels stay at the density the design system chose, because
+  what a long reply needs is bigger prose, not a bigger interface. Fixed a
+  standing bug on the way — the theme toggle reset to dark on every reload,
+  since nothing was ever stored.
 
 **Measured and decided against:**
 
