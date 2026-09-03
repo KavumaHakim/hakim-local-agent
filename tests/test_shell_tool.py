@@ -67,7 +67,12 @@ class TokenizeTests(unittest.TestCase):
 
 class AllowlistTests(unittest.TestCase):
     def check(self, command):
-        return validate(command, COMMANDS)
+        """The argv, for tests about what a command parses into."""
+        return validate(command, COMMANDS).argv
+
+    def gate(self, command):
+        """'free' or 'approve' - for tests about whether it asks first."""
+        return "approve" if validate(command, COMMANDS).needs_approval else "free"
 
     def test_allowed_git_verbs(self):
         for command in (
@@ -81,10 +86,12 @@ class AllowlistTests(unittest.TestCase):
 
     def test_unknown_program_refused(self):
         with self.assertRaises(ShellToolError) as ctx:
-            self.check("curl https://example.com")
+            self.check("nmap 127.0.0.1")
         self.assertIn("not an allowed command", str(ctx.exception))
 
-    def test_writing_git_verbs_refused(self):
+    def test_writing_git_verbs_need_approval(self):
+        """They used to be refused outright. Now a person is asked first -
+        which is a different thing from running unprompted."""
         for command in (
             "git commit -m x",
             "git push",
@@ -96,13 +103,17 @@ class AllowlistTests(unittest.TestCase):
             "git pull",
             "git fetch",
         ):
-            with self.assertRaises(ShellToolError, msg=command):
-                self.check(command)
+            self.assertEqual(self.gate(command), "approve", msg=command)
 
-    def test_git_config_is_refused(self):
-        # It writes as readily as it reads.
-        with self.assertRaises(ShellToolError):
-            self.check("git config user.email attacker@example.com")
+    def test_git_config_needs_approval(self):
+        # It writes as readily as it reads, so it is shown to someone first.
+        self.assertEqual(
+            self.gate("git config user.email attacker@example.com"), "approve"
+        )
+
+    def test_reading_git_verbs_still_do_not_ask(self):
+        for command in ("git status", "git log --oneline", "git diff"):
+            self.assertEqual(self.gate(command), "free", msg=command)
 
     def test_path_to_binary_refused(self):
         for command in (
@@ -119,7 +130,7 @@ class ShellEscapeTests(unittest.TestCase):
     """Chaining is not filtered - it is simply never interpreted."""
 
     def check(self, command):
-        return validate(command, COMMANDS)
+        return validate(command, COMMANDS).argv
 
     def test_chaining_does_not_produce_two_commands(self):
         # The tokens after ';' stay literal arguments to git, and git rejects
@@ -150,7 +161,7 @@ class ShellEscapeTests(unittest.TestCase):
 
 class DangerousOptionTests(unittest.TestCase):
     def check(self, command):
-        return validate(command, COMMANDS)
+        return validate(command, COMMANDS).argv
 
     def test_git_dash_c_refused(self):
         # `git -c core.pager='sh -c ...' log` would execute arbitrary code.
@@ -173,7 +184,7 @@ class DangerousOptionTests(unittest.TestCase):
 
 class PathConfinementTests(unittest.TestCase):
     def check(self, command):
-        return validate(command, COMMANDS)
+        return validate(command, COMMANDS).argv
 
     def test_absolute_windows_path_refused(self):
         with self.assertRaises(ShellToolError) as ctx:
@@ -203,7 +214,7 @@ class PathConfinementTests(unittest.TestCase):
 
 class InterpreterTests(unittest.TestCase):
     def check(self, command):
-        return validate(command, COMMANDS)
+        return validate(command, COMMANDS).argv
 
     def test_python_version_allowed(self):
         self.assertEqual(self.check("python --version")[0], "python")
@@ -222,9 +233,10 @@ class InterpreterTests(unittest.TestCase):
         with self.assertRaises(ShellToolError):
             self.check("python -m http.server")
 
-    def test_pip_install_refused(self):
-        with self.assertRaises(ShellToolError):
-            self.check("pip install requests")
+    def test_pip_install_needs_approval(self):
+        verdict = validate("pip install requests", COMMANDS)
+        self.assertTrue(verdict.needs_approval)
+        self.assertIn("installs", verdict.reason)
 
     def test_pip_list_allowed(self):
         self.assertEqual(self.check("pip list")[0], "pip")
@@ -243,9 +255,9 @@ class ExtraCommandTests(unittest.TestCase):
         self.assertIn("node", run.allowed_commands)
 
     def test_extra_command_does_not_weaken_others(self):
-        run = runner(self.tmp, extra_commands=("node",))
-        with self.assertRaises(ShellToolError):
-            validate("git commit -m x", run._allowed)
+        """An opted-in extra must not turn git's gated verbs into free ones."""
+        run = runner(self.tmp, extra_commands=("ncdu",))
+        self.assertTrue(validate("git commit -m x", run._allowed).needs_approval)
 
     def test_empty_extras_ignored(self):
         run = runner(self.tmp, extra_commands=("", "  "))
@@ -291,9 +303,17 @@ class ExecutionTests(unittest.TestCase):
             self.tmp, timeout=10, max_output_chars=1000
         )
         registry = ToolRegistry([tool])
+        result = registry.execute("run_command", {"command": "nmap localhost"})
+        self.assertFalse(result.ok)
+        self.assertIn("not an allowed command", result.payload["error"])
+
+    def test_a_gated_command_with_nobody_to_ask_is_refused(self):
+        """No approver wired in means the gate must fail closed, not open."""
+        tool = build_shell_tool(self.tmp, timeout=10, max_output_chars=1000)
+        registry = ToolRegistry([tool])
         result = registry.execute("run_command", {"command": "git push"})
         self.assertFalse(result.ok)
-        self.assertIn("not allowed", result.payload["error"])
+        self.assertIn("nobody to ask", result.payload["error"])
 
 
 class EnvironmentTests(unittest.TestCase):

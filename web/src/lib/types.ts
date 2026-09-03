@@ -327,6 +327,14 @@ export interface ContextMemory {
 export type TurnEvent =
   | { type: 'accepted'; turn_id: string; conversation_id: number; user_message_id: number; position: number }
   | { type: 'queued'; position: number }
+  | {
+      type: 'approval'
+      request_id: string
+      command: string
+      reason: string
+      timeout: number
+    }
+  | { type: 'approval_closed'; request_id: string; granted: boolean }
   | { type: 'route'; key: string; label: string; reason: string; remote: boolean }
   | { type: 'fallback'; from: string; to: string; reason: string }
   | {
@@ -431,6 +439,23 @@ export interface RewindResult {
   removed: number
   /** True when nothing is left, so the next question is the first again. */
   emptied: boolean
+}
+
+/** What answering an approval prompt did. */
+export interface ApprovalResult {
+  /** 'answered' | 'stale' | 'unknown' */
+  state: string
+  message: string
+}
+
+/** A command the agent is waiting for permission to run. */
+export interface PendingApproval {
+  requestId: string
+  command: string
+  /** What it will do, in plain words. Not a warning - a description. */
+  reason: string
+  /** Seconds before it is declined on its own. */
+  timeout: number
 }
 
 /** What asking a turn to stop actually did. */

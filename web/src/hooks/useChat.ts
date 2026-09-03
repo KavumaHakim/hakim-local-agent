@@ -18,7 +18,13 @@
 import { useCallback, useRef, useState } from 'react'
 import { ApiError, api, type RemoteConfirmation } from '../lib/api'
 import { streamChat } from '../lib/stream'
-import type { ChatRequest, Message, ToolCall, TurnEvent } from '../lib/types'
+import type {
+  ChatRequest,
+  Message,
+  PendingApproval,
+  ToolCall,
+  TurnEvent,
+} from '../lib/types'
 
 export type TurnPhase =
   | 'idle'
@@ -53,6 +59,14 @@ export interface TurnState {
   provider: string | null
   startedAt: number | null
   error: { kind: string; message: string; canEscalate: boolean } | null
+  /**
+   * A command the agent is waiting for permission to run.
+   *
+   * The turn is genuinely blocked while this is set - the worker thread is
+   * sitting on an Event - so this is not a notification to glance at. It
+   * clears when the decision is sent, or when the server gives up waiting.
+   */
+  approval: PendingApproval | null
 }
 
 /**
@@ -86,6 +100,7 @@ const IDLE: TurnState = {
   provider: null,
   startedAt: null,
   error: null,
+  approval: null,
 }
 
 export interface ChatOptions {
@@ -297,6 +312,24 @@ export function useChat(options: ChatOptions) {
             patch(key, { id: event.turn_id, position: event.position })
             break
 
+          case 'approval':
+            patch(key, {
+              approval: {
+                requestId: event.request_id,
+                command: event.command,
+                reason: event.reason,
+                timeout: event.timeout,
+              },
+            })
+            break
+
+          case 'approval_closed':
+            // Sent when the decision lands and also when the server stops
+            // waiting, so a prompt nobody answered clears itself rather than
+            // sitting there over a turn that has moved on.
+            patch(key, { approval: null })
+            break
+
           case 'queued':
             patch(key, { phase: 'queued', position: event.position })
             break
@@ -499,6 +532,30 @@ export function useChat(options: ChatOptions) {
     [turns, patch, drop],
   )
 
+  /**
+   * Answer a command the agent asked permission for.
+   *
+   * The prompt is cleared here rather than waiting for the server's
+   * `approval_closed`: the turn is blocked on this answer, and leaving the
+   * buttons live while the request is in flight invites a second click on a
+   * question that has already been settled.
+   */
+  const answerApproval = useCallback(
+    async (key: string, granted: boolean) => {
+      const turn = turns.find((entry) => entry.key === key)
+      if (!turn?.id || !turn.approval) return
+      const { requestId } = turn.approval
+      patch(key, { approval: null })
+      try {
+        await api.answerApproval(turn.id, requestId, granted)
+      } catch {
+        // The turn will time out and decline on its own, which is the same
+        // outcome as a failed "no" and the safe one after a failed "yes".
+      }
+    },
+    [turns, patch],
+  )
+
   return {
     conversationId,
     messages,
@@ -519,5 +576,6 @@ export function useChat(options: ChatOptions) {
     dismissError,
     editAndResend,
     stop,
+    answerApproval,
   }
 }

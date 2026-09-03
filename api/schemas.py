@@ -578,6 +578,21 @@ class StopTurnOut(BaseModel):
     message: str
 
 
+class ApprovalRequest(BaseModel):
+    """A decision on one command the agent asked about."""
+
+    request_id: str
+    granted: bool
+
+
+class ApprovalOut(BaseModel):
+    # "answered" - the waiting command was told
+    # "stale"    - answered twice, or after it had already timed out
+    # "unknown"  - that turn is not running, so nothing is waiting
+    state: str
+    message: str
+
+
 class TruncateOut(BaseModel):
     """What rewinding a conversation removed."""
 

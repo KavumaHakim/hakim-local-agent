@@ -12,7 +12,7 @@ from tools.ocr_tool import OcrClient
 from tools.python_tool import build_python_file_tool, build_python_tool
 from tools.git_tool import build_git_tools
 from tools.http_tool import build_http_tool
-from tools.shell_tool import build_shell_tool
+from tools.shell_tool import ApprovalCheck, build_shell_tool
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,9 @@ def _installed(category: str) -> bool:
     return True
 
 
-def build_default_registry(config: Config) -> tuple[ToolRegistry, list[DisabledTool]]:
+def build_default_registry(
+    config: Config, *, approve: ApprovalCheck | None = None
+) -> tuple[ToolRegistry, list[DisabledTool]]:
     """Build the registry, plus the list of tools deliberately left out.
 
     Disabled tools are not registered at all: sending the model a definition it
@@ -123,6 +125,10 @@ def build_default_registry(config: Config) -> tuple[ToolRegistry, list[DisabledT
                 timeout=config.shell_timeout,
                 max_output_chars=config.shell_max_output_chars,
                 extra_commands=config.shell_extra_commands,
+                # None wherever there is no one to ask - the CLI, a test.
+                # Commands needing approval are refused there rather than
+                # run, so the gate cannot be bypassed by the caller.
+                approve=approve,
             )
         )
     else:

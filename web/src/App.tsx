@@ -510,6 +510,9 @@ export default function App() {
                   }}
                   onDismiss={() => chat.dismissError(turn.key)}
                   onStop={() => void chat.stop(turn.key)}
+                  onApprove={(granted) =>
+                    void chat.answerApproval(turn.key, granted)
+                  }
                 />
               ))}
               <div ref={bottom} />

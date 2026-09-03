@@ -234,6 +234,13 @@ class Config:
     # shell, not a sandbox.
     shell_tool_enabled: bool = False
     shell_timeout: float = 30.0
+    # How long a command that needs approval waits for an answer before it is
+    # declined. Generous, because the person may be reading the command and a
+    # turn on this hardware is slow anyway - but finite, because a turn that
+    # waits forever on someone who walked away holds the queue and the model.
+    # Timing out denies rather than allows: nobody watching means nobody
+    # agreed.
+    approval_timeout: float = 300.0
     shell_max_output_chars: int = 4000
     # Extra executables to allow, comma-separated in AGENT_SHELL_EXTRA.
     # Anything added here runs with no sub-command restrictions.
@@ -457,6 +464,9 @@ class Config:
                 "AGENT_ENABLE_SHELL_TOOL", defaults.shell_tool_enabled
             ),
             shell_timeout=_env_float("AGENT_SHELL_TIMEOUT", defaults.shell_timeout),
+            approval_timeout=_env_float(
+                "AGENT_APPROVAL_TIMEOUT", defaults.approval_timeout
+            ),
             shell_max_output_chars=_env_int(
                 "AGENT_SHELL_MAX_OUTPUT", defaults.shell_max_output_chars
             ),

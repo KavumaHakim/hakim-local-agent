@@ -461,14 +461,21 @@ class Runtime:
 
     # --- introspection used by several routes ---
 
-    def registry_for(self, config: Config) -> tuple[Any, list[Any]]:
+    def registry_for(
+        self, config: Config, *, approve: Any = None
+    ) -> tuple[Any, list[Any]]:
         """Build the tool registry for a config.
 
         Rebuilt rather than cached because the registry is derived entirely
         from the config, and a settings change must not leave a stale one
         behind offering tools that are no longer enabled.
+
+        `approve` is how a tool asks a person before doing something that
+        changes state. It is per-turn, because the question has to reach
+        whoever is watching *that* turn's stream - which is the other reason
+        the registry cannot be cached.
         """
-        return build_default_registry(config)
+        return build_default_registry(config, approve=approve)
 
     def turn_config(
         self, *, qwen_url: str, enable_thinking: bool, context: int = 4096
@@ -635,7 +642,12 @@ class Runtime:
                 # not against a guess.
                 context=spec.context,
             )
-            registry, _ = self.registry_for(config)
+            registry, _ = self.registry_for(
+                config,
+                approve=lambda command, reason: turn.ask(
+                    command, reason, timeout=self.config.approval_timeout
+                ),
+            )
             # Memory is attached only when its tools are on. The context
             # builder is what injects retrieved memories, so switching memory
             # off has to switch the injection off too - otherwise the roster

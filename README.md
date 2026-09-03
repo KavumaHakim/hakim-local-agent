@@ -1516,15 +1516,39 @@ never a second command to run.
 
 **The rest of the boundary, in order of how much it protects you:**
 
+**Three tiers.** Reading runs; changing asks; interpreters never run at all.
+
+| Tier | Commands | Behaviour |
+|---|---|---|
+| Free | `git log/status/diff/show/blame/…`, `ls`, `tree`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, `stat`, `du`, `whoami`, `node --version`, `npm list`, `pip list`, `docker ps` | Runs when the model asks |
+| Approved | `git commit/push/pull/checkout/config/…`, `pip install`, `npm install`, `npm run`, `mkdir`, `cp`, `mv`, `touch`, `curl`, `wget`, `ping`, `make`, `cargo build`, `go build`, `dotnet build`, `docker run` | Turn blocks; the exact command line is shown; runs only on a yes |
+| Never | `bash`, `sh`, `cmd`, `powershell`, `perl`, `ruby`, `xargs`, `sudo`, `su`, `python -c` | Refused with or without approval |
+
+Approval **times out into a refusal** after 5 minutes (`AGENT_APPROVAL_TIMEOUT`),
+and stopping the turn refuses too — nobody watching means nobody agreed.
+
+Why interpreters stay refused rather than gated: a prompt is a control only if
+a person can read the command and judge it, and nobody can meaningfully audit
+an arbitrary program pasted into `-c` on every call. Gating them would turn
+the prompt into a rubber stamp. The Python tool is behind its own switch for
+running Python deliberately.
+
+**The rest of the boundary, in order of how much it protects you:**
+
 | Layer | What it stops |
 |---|---|
-| Executable allowlist | Only `git`, `pip`, `python`, `where`. A path separator in the command name is refused, so `./evil.exe` and `C:/Windows/System32/cmd.exe` never resolve |
-| Sub-command allowlist | git is limited to read-only verbs. No commit, push, pull, fetch, reset, checkout, clean, rebase, merge, stash — and no `config`, which writes as readily as it reads |
-| Dangerous option screening | `git -c core.pager='sh -c …' log` executes anything; `--exec-path` relocates git's own binaries. Both refused, along with `-C`, `--git-dir`, `--work-tree`, `--upload-pack` |
-| Interpreter pinning | `python` accepts only `--version`/`-V`. `python -c …` and `pip install` are refused — an interpreter would undo everything above |
+| Executable allowlist | 46 programs by bare name. A path separator is refused, so `./evil.exe` and `C:/Windows/System32/cmd.exe` never resolve |
+| Sub-command allowlist | Verbs are split into free, approved and refused. A verb in none of them — `git bisect` — is refused, and the message lists both allowed halves |
+| Dangerous option screening | `git -c core.pager='sh -c …' log` executes anything; `--exec-path` relocates git's own binaries. Both refused, along with `-C`, `--git-dir`, `--work-tree`, `--upload-pack`. `find -exec` and `-delete` likewise — and `find`'s options are scanned to the end of the line, because unlike git's they come *after* the path |
+| Interpreter pinning | `python` accepts only `--version`/`-V`; the shells and `xargs` are refused outright |
 | Workspace confinement | cwd is the workspace; absolute paths and `..` segments are refused in arguments |
 | Scrubbed environment | The child gets a minimal PATH-and-essentials env, so API keys in your shell are never handed to a subprocess |
 | Timeout and output cap | 30 s, 4000 characters |
+
+**What approval is not.** It means a person saw the exact command line. It does
+not mean the command is contained: an approved `npm run build` executes
+whatever `package.json` says, and `make` runs whatever the Makefile says. Read
+the command, not the verb.
 
 A non-zero exit is reported to the model rather than raised — `git diff --quiet`
 answers questions through its exit code.
@@ -3014,13 +3038,12 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 
 **Giving the model more room:**
 
-- **Widen the terminal allowlist**, and more generally revisit how much
-  freedom each tool grants. The allowlist was drawn tight on purpose and has
-  not been revisited since; specific needs have now appeared. The question to
-  answer per tool is which refusals are protecting anything and which are just
-  friction — `tools/shell_tool.py` and `tools/http_tool.py` first.
+- **`tools/http_tool.py` next**, the same question asked of the terminal: which
+  of its refusals protect something and which are only friction. It now has a
+  worked example to follow, including the approval gate.
 - Real sandboxing for the Python tool (container or VM). This is what would
-  make widening it safe rather than merely permitted.
+  make `python -c` gateable rather than refused outright — approval alone
+  cannot do it, for the reason given under the terminal tool.
 
 **Later:**
 
@@ -3051,6 +3074,12 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 - **The filesystem tool on a live turn** — Gemma called `list_directory` and
   read the workspace root back correctly, with the tool arriving through the
   lens rather than being sent up front.
+- **The terminal tool, widened with a consent gate** — 4 allowed commands to
+  46. Reading runs; changing asks a person and shows them the exact command
+  line; interpreters stay refused, because a prompt nobody can audit is a
+  rubber stamp rather than a control. Found a real hole while testing it:
+  `find -exec` was being read as safe, because the banned-option scan stopped
+  at the first positional token — right for git, wrong for find.
 - **Appearance controls** — theme, text size and text face for the
   conversation, remembered in the browser. Deliberately narrow: the rail,
   composer and panels stay at the density the design system chose, because

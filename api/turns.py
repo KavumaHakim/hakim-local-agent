@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
@@ -44,6 +45,17 @@ class TurnRequest:
 
 
 @dataclass
+class Approval:
+    """One command waiting on a person to say yes or no."""
+
+    command: str
+    reason: str
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    answered: threading.Event = field(default_factory=threading.Event)
+    granted: bool = False
+
+
+@dataclass
 class Turn:
     """One queued or running turn, plus the events it has produced."""
 
@@ -59,10 +71,71 @@ class Turn:
     # worker, and it is the flag itself - not a lock around it - that has to
     # be safe to share.
     stopped: threading.Event = field(default_factory=threading.Event)
+    # Approval requests this turn is waiting on, by id. Written from the
+    # worker thread and read from the request thread that answers, so the
+    # dict itself needs the lock even though each Event does not.
+    pending: dict[str, "Approval"] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
     def emit(self, type: str, **data: Any) -> None:
         """Publish one event to whoever is streaming this turn."""
         self.events.put({"type": type, **data})
+
+    def ask(self, command: str, reason: str, *, timeout: float) -> bool:
+        """Ask whoever is watching whether `command` may run. Blocks.
+
+        Called from the worker thread, in the middle of a tool call. The
+        answer arrives on a request thread through `answer`, so this is a
+        handshake between two threads with a stream in between.
+
+        Denied by default when the timeout passes. That direction is not
+        arbitrary: nobody watching means nobody agreed, and a command that
+        runs because a person walked away is exactly what this exists to
+        prevent. A stop, likewise, is not a yes.
+        """
+        approval = Approval(command=command, reason=reason)
+        with self.lock:
+            self.pending[approval.id] = approval
+
+        self.emit(
+            "approval",
+            request_id=approval.id,
+            command=command,
+            reason=reason,
+            timeout=timeout,
+        )
+        try:
+            # Waited in slices rather than one long block, so a stop is
+            # noticed while the prompt is still on screen. A turn that ignored
+            # the stop button for the whole approval timeout would look hung.
+            deadline = time.monotonic() + timeout
+            while True:
+                if self.is_stopped():
+                    self.emit(
+                        "approval_closed", request_id=approval.id, granted=False
+                    )
+                    return False
+                if approval.answered.wait(min(0.25, max(0.0, deadline - time.monotonic()))):
+                    return approval.granted and not self.is_stopped()
+                if time.monotonic() >= deadline:
+                    self.emit(
+                        "approval_closed", request_id=approval.id, granted=False
+                    )
+                    return False
+        finally:
+            with self.lock:
+                self.pending.pop(approval.id, None)
+
+    def answer(self, request_id: str, granted: bool) -> bool:
+        """Record a decision. False when there was nothing waiting for it."""
+        with self.lock:
+            approval = self.pending.get(request_id)
+        if approval is None:
+            return False
+        approval.granted = granted
+        approval.answered.set()
+        self.emit("approval_closed", request_id=request_id, granted=granted)
+        return True
 
     def stop(self) -> None:
         """Ask this turn to stop at its next checkpoint."""
@@ -172,6 +245,19 @@ class TurnQueue:
             return len(self._waiting)
 
     # --- stopping ---
+
+    def answer_approval(self, turn_id: str, request_id: str, granted: bool) -> str:
+        """Pass a decision to the turn waiting on it.
+
+        Only the running turn can be waiting: a queued one has not reached a
+        tool call yet. "stale" covers a prompt answered twice, or answered
+        after it timed out - both ordinary, neither worth an error.
+        """
+        with self._condition:
+            current = self._current
+        if current is None or current.id != turn_id:
+            return "unknown"
+        return "answered" if current.answer(request_id, granted) else "stale"
 
     def stop_turn(self, turn_id: str) -> str:
         """Ask one turn to stop, wherever it is. Returns what was found.

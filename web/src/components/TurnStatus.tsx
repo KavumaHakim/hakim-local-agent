@@ -18,9 +18,74 @@ interface Props {
   onEscalate: () => void
   onDismiss: () => void
   onStop: () => void
+  /** Answer a command the agent is waiting on. */
+  onApprove: (granted: boolean) => void
 }
 
-export function TurnStatus({ turn, onEscalate, onDismiss, onStop }: Props) {
+/**
+ * A command the agent wants to run, and the two buttons that settle it.
+ *
+ * The turn is genuinely stopped here - a worker thread is sitting on an event
+ * waiting for this - so it is drawn as the loudest thing on screen rather than
+ * a notice to notice. The command is shown verbatim and in monospace, because
+ * the whole value of the gate is that a person can read exactly what will run;
+ * a summary would be asking someone to approve a description.
+ *
+ * Declining is the wider button and comes first. Nothing is lost by declining
+ * - the model is told and carries on - and the cost of a mistaken yes is the
+ * command actually running.
+ */
+function ApprovalPrompt({
+  approval,
+  onAnswer,
+}: {
+  approval: NonNullable<Turn['approval']>
+  onAnswer: (granted: boolean) => void
+}) {
+  return (
+    <div className="animate-rise rounded-xl border border-warn/50 bg-warn/5 p-3">
+      <div className="flex items-start gap-2.5">
+        <AlertIcon className="mt-px size-4 shrink-0 text-warn" />
+        <div className="min-w-0 flex-1">
+          <p className="text-[12.5px] text-fg">
+            The agent wants to run a command that {approval.reason}.
+          </p>
+          <pre className="mt-2 overflow-x-auto rounded-md border border-line bg-sunken px-2.5 py-1.5 font-mono text-[12px] text-fg">
+            {approval.command}
+          </pre>
+          <div className="mt-2.5 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onAnswer(false)}
+              className="rounded-md border border-line px-3 py-1.5 text-[11.5px] text-fg transition hover:border-accent-line"
+            >
+              Don't run it
+            </button>
+            <button
+              type="button"
+              onClick={() => onAnswer(true)}
+              className="rounded-md border border-warn px-3 py-1.5 text-[11.5px] text-warn transition hover:bg-warn/10"
+            >
+              Run it
+            </button>
+            <span className="text-[10.5px] text-faint">
+              Declined automatically after{' '}
+              {Math.round(approval.timeout / 60)} minutes.
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function TurnStatus({
+  turn,
+  onEscalate,
+  onDismiss,
+  onStop,
+  onApprove,
+}: Props) {
   const generating = useElapsed(turn.startedAt)
   const stopping = turn.stopping
 
@@ -98,6 +163,13 @@ export function TurnStatus({ turn, onEscalate, onDismiss, onStop }: Props) {
           <AlertIcon className="mt-px size-3.5 shrink-0" />
           <span>{turn.ramWarning}</span>
         </div>
+      )}
+
+      {turn.approval && (
+        <ApprovalPrompt
+          approval={turn.approval}
+          onAnswer={(granted) => onApprove(granted)}
+        />
       )}
 
       {turn.phase === 'queued' && (

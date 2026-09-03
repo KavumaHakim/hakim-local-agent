@@ -43,7 +43,7 @@ from fastapi.responses import StreamingResponse
 
 from api.deps import get_runtime
 from api.runtime import ModelChoice, Runtime, open_conversation
-from api.schemas import ChatRequest, StopTurnOut
+from api.schemas import ApprovalOut, ApprovalRequest, ChatRequest, StopTurnOut
 from api.turns import Turn, TurnQueueFull, TurnRequest, drain
 
 router = APIRouter(tags=["chat"])
@@ -189,6 +189,34 @@ def stop_turn(turn_id: str, runtime: Runtime = Depends(get_runtime)):
                 "round - a thread cannot be cut off mid-write."
             ),
             "unknown": "That turn had already finished.",
+        }[state],
+    )
+
+
+@router.post("/chat/{turn_id}/approve", response_model=ApprovalOut)
+def approve_command(
+    turn_id: str,
+    body: ApprovalRequest,
+    runtime: Runtime = Depends(get_runtime),
+):
+    """Answer a command the agent asked permission for.
+
+    Not a 404 for an unknown turn or a stale request, for the same reason
+    stopping is not: by the time someone clicks, the prompt may have timed out
+    or the turn may have ended, and both of those already mean "it did not
+    run". Reporting an error would say their click failed when the outcome is
+    exactly the safe one.
+    """
+    state = runtime.queue.answer_approval(turn_id, body.request_id, body.granted)
+    return ApprovalOut(
+        state=state,
+        message={
+            "answered": "Allowed." if body.granted else "Declined.",
+            "stale": (
+                "That request had already been answered or had timed out, so "
+                "the command did not run."
+            ),
+            "unknown": "That turn is no longer running.",
         }[state],
     )
 

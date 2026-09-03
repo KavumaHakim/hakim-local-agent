@@ -22,6 +22,7 @@ import type {
   OcrBackend,
   ShutdownResponse,
   SpeechStatus,
+  ApprovalResult,
   StopTurnResult,
   Transcript,
   ToolsResponse,
@@ -125,6 +126,13 @@ export const api = {
   stopTurn: (turnId: string) =>
     request<StopTurnResult>(`/chat/${encodeURIComponent(turnId)}/stop`, {
       method: 'POST',
+    }),
+
+  /** Answer a command the agent asked permission for. */
+  answerApproval: (turnId: string, requestId: string, granted: boolean) =>
+    request<ApprovalResult>(`/chat/${encodeURIComponent(turnId)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ request_id: requestId, granted }),
     }),
 
   workspace: () => request<WorkspaceInfo>('/workspace'),
