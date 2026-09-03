@@ -12,6 +12,7 @@
  */
 
 import type { ReactNode } from 'react'
+import { Formula } from './math'
 
 export function Markdown({ text }: { text: string }) {
   return <>{renderBlocks(text)}</>
@@ -81,6 +82,17 @@ function renderBlocks(text: string): ReactNode[] {
       continue
     }
 
+    // Display maths: `$$ … $$` or `\[ … \]`, either on one line or opened
+    // here and closed further down. Checked before everything else, because
+    // a line of LaTeX can otherwise look like a list item or a paragraph.
+    const openedMath = openingMath(line)
+    if (openedMath) {
+      const [math, next] = readMathBlock(lines, index, openedMath)
+      blocks.push(<Formula key={key++} source={math} display />)
+      index = next
+      continue
+    }
+
     // A table: a row of cells, then the separator row that makes it one.
     // Checked before lists and paragraphs because a pipe row is neither.
     if (isTableStart(lines, index)) {
@@ -110,7 +122,8 @@ function renderBlocks(text: string): ReactNode[] {
       !/^(#{1,6})\s+/.test(lines[index]) &&
       !/^\s*>\s?/.test(lines[index]) &&
       !LIST_ITEM.test(lines[index]) &&
-      !isTableStart(lines, index)
+      !isTableStart(lines, index) &&
+      !openingMath(lines[index])
     ) {
       paragraph.push(lines[index])
       index += 1
@@ -123,6 +136,54 @@ function renderBlocks(text: string): ReactNode[] {
   }
 
   return blocks
+}
+
+// --- display maths ----------------------------------------------------------
+
+/**
+ * Whether this line opens a display-maths block, and with what.
+ *
+ * The models here write both `$$` and `\[`, sometimes with the maths on the
+ * same line and sometimes with the delimiters alone on theirs. A lone `$` is
+ * deliberately not a display opener: it is inline maths, or a price.
+ */
+function openingMath(line: string): '$$' | '\\[' | null {
+  const trimmed = line.trim()
+  if (trimmed.startsWith('$$')) return '$$'
+  if (trimmed.startsWith('\\[')) return '\\['
+  return null
+}
+
+/** Read a display block from its opener to its closer. Returns the LaTeX. */
+function readMathBlock(
+  lines: string[],
+  start: number,
+  opener: '$$' | '\\[',
+): [string, number] {
+  const closer = opener === '$$' ? '$$' : '\\]'
+  const first = lines[start].trim().slice(opener.length)
+
+  // Opened and closed on one line.
+  const closesHere = first.trimEnd().endsWith(closer)
+  if (closesHere) {
+    return [first.trimEnd().slice(0, -closer.length).trim(), start + 1]
+  }
+
+  const body = first ? [first] : []
+  let index = start + 1
+  while (index < lines.length) {
+    const line = lines[index]
+    if (line.trim().endsWith(closer)) {
+      const tail = line.trim().slice(0, -closer.length)
+      if (tail.trim()) body.push(tail)
+      return [body.join('\n').trim(), index + 1]
+    }
+    body.push(line)
+    index += 1
+  }
+  // Unclosed - take what there is rather than swallowing the rest of the
+  // reply into a block that never ends.
+  return [body.join('\n').trim(), index]
 }
 
 // --- lists ------------------------------------------------------------------
@@ -309,8 +370,15 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
 /** Inline spans: `code`, **bold**, *italic*, and [links](url). */
 function inline(text: string): ReactNode[] {
   const nodes: ReactNode[] = []
+  // Order matters: inline code wins over everything, so a `$x$` inside
+  // backticks stays literal. Maths comes before emphasis, because `x^2 * y`
+  // inside maths is not italics.
+  //
+  // `$…$` requires a non-space after the opener and no line break, which is
+  // what keeps "it cost $5 to $10" from being read as maths. `\(…\)` has no
+  // such ambiguity and needs no guard.
   const pattern =
-    /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(\[[^\]]+\]\([^)\s]+\))/g
+    /(`[^`]+`)|(\\\([\s\S]+?\\\))|(\$(?!\s)[^$\n]+?\$)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(\[[^\]]+\]\([^)\s]+\))/g
 
   let cursor = 0
   let key = 0
@@ -329,6 +397,10 @@ function inline(text: string): ReactNode[] {
           {token.slice(1, -1)}
         </code>,
       )
+    } else if (token.startsWith('\\(')) {
+      nodes.push(<Formula key={key++} source={token.slice(2, -2)} />)
+    } else if (token.startsWith('$')) {
+      nodes.push(<Formula key={key++} source={token.slice(1, -1)} />)
     } else if (token.startsWith('**')) {
       nodes.push(
         <strong key={key++} className="font-semibold text-fg">
