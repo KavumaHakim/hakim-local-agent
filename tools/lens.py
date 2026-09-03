@@ -76,9 +76,17 @@ CATEGORY_SIGNALS: dict[str, tuple[str, ...]] = {
         "path", "paths", "ls", "dir", "listing", "subdirectory",
     ),
     "python": ("python", "script", "pandas", "numpy", "plot", "snippet"),
+    # The command names themselves, which is how someone asks for a command:
+    # "run mkdir reports", not "use the terminal to create a directory". Only
+    # the ones that are unambiguously programs - `ls`, `find`, `sort`, `make`,
+    # `date` and `file` are all ordinary English too, and a false positive
+    # here is permanent.
     "terminal": (
-        "command", "shell", "terminal", "bash", "powershell", "npm", "pip",
-        "install", "cli",
+        "command", "shell", "terminal", "bash", "powershell", "cmd",
+        "npm", "pip", "install", "cli", "mkdir", "rmdir", "touch",
+        "curl", "wget", "ping", "docker", "cargo", "rustc", "dotnet",
+        "chmod", "whoami", "hostname", "uname",
+        "run this", "in the shell", "command line",
     ),
     "git": (
         "git", "commit", "commits", "branch", "branches", "diff", "repo",
@@ -143,6 +151,15 @@ class ToolLens:
         # category cannot open something that does not exist.
         self._known = {tool.category for tool in registry.list_tools()}
         self._open: set[str] = {c for c in always if c in self._known}
+        # Every tool's own name opens its category. A model that has been told
+        # a tool exists asks for it by name - "use run_command" - and that was
+        # missing a group whose hand-written signals did not happen to include
+        # the word. Derived rather than listed, so a new tool brings its own
+        # signal and cannot be forgotten. Underscores are word characters, so
+        # `run_command` matches as one word and never inside another.
+        self._tool_signals: dict[str, str] = {
+            tool.name.lower(): tool.category for tool in registry.list_tools()
+        }
 
     @property
     def open_categories(self) -> set[str]:
@@ -160,10 +177,16 @@ class ToolLens:
         trip discovering it.
         """
         lowered = (text or "").lower()
+        named = {
+            category
+            for name, category in self._tool_signals.items()
+            if _mentions(lowered, name)
+        }
         opened = {
             category
             for category in self.closed_categories
-            if any(
+            if category in named
+            or any(
                 _mentions(lowered, phrase)
                 for phrase in CATEGORY_SIGNALS.get(category, ())
             )

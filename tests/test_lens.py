@@ -303,3 +303,79 @@ class ThroughTheAgentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolNameSignalTests(unittest.TestCase):
+    """A tool's own name opens its group.
+
+    A model that has been told a tool exists asks for it by name, and the
+    hand-written signals did not always contain that name: a live turn asking
+    for `run_command` left the terminal group closed, and the model answered
+    that it could only evaluate mathematical expressions.
+    """
+
+    def test_naming_a_tool_opens_its_category(self):
+        lens = ToolLens(tiny_registry())
+        self.assertEqual(lens.consider("please use git_status"), {"git"})
+
+    def test_it_is_derived_from_the_registry_not_a_list(self):
+        """A tool added later brings its own signal without anyone listing it."""
+
+        def run(**_):
+            return {"success": True}
+
+        registry = ToolRegistry(
+            [
+                Tool("calculate", "calculator", "adds", {"type": "object"}, run),
+                Tool("brand_new_tool", "invented", "does", {"type": "object"}, run),
+            ]
+        )
+        lens = ToolLens(registry)
+        self.assertEqual(lens.consider("call brand_new_tool for me"), {"invented"})
+
+    def test_a_name_inside_a_longer_word_does_not_count(self):
+        lens = ToolLens(tiny_registry())
+        self.assertEqual(lens.consider("the git_statuses are confusing"), set())
+
+
+class TerminalSignalTests(unittest.TestCase):
+    """Command names are how people ask for commands."""
+
+    def registry(self) -> ToolRegistry:
+        def run(**_):
+            return {"success": True}
+
+        schema = {"type": "object", "properties": {}}
+        return ToolRegistry(
+            [
+                Tool("calculate", "calculator", "adds", schema, run),
+                Tool("run_command", "terminal", "runs", schema, run),
+            ]
+        )
+
+    def opened_by(self, prompt: str) -> set[str]:
+        lens = ToolLens(self.registry())
+        lens.consider(prompt)
+        return lens.open_categories
+
+    def test_a_named_command_opens_the_terminal(self):
+        for prompt in (
+            "run this terminal command: mkdir reports",
+            "npm install left-pad",
+            "curl the api",
+            "what does docker ps say",
+            "check whoami",
+        ):
+            self.assertIn("terminal", self.opened_by(prompt), prompt)
+
+    def test_ordinary_english_does_not(self):
+        """`make`, `find`, `sort`, `date` and `file` are words as well as
+        programs, so they are deliberately not signals."""
+        for prompt in (
+            "make it shorter",
+            "find the error in my reasoning",
+            "sort these ideas by importance",
+            "what is the date of the moon landing?",
+            "write a haiku about rain",
+        ):
+            self.assertNotIn("terminal", self.opened_by(prompt), prompt)
