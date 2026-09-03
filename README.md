@@ -931,16 +931,29 @@ Defined in [`models.json`](models.json):
 
 | Key | Model | File size | Port | Min free RAM |
 |---|---|---|---|---|
+| `gemma` | Gemma 4 E2B Q4_0 | 2709 MB | 8085 | 2627 MB |
 | `mistral` | Ministral 3B Q4_K_M | 2047 MB | 8084 | 1900 MB |
 | `fast` | Qwen3.5 2B (M) Q4_K_M | 1023 MB | 8080 | 1150 MB |
 | `tiny` | Qwen3.5 2B (XS) Q3_K_S | 704 MB | 8083 | 900 MB |
 | `reasoning` | Qwen3 8B Q4_K_M | 4794 MB | 8082 | 6200 MB |
 
-**`mistral` is the default and the router's "fast" model.** Ministral 3B is
-Mistral AI's edge model, not Mistral 7B. Measured: loads in **46 s**, and
-answered a tool-call round in **35 s** against 252 s for the Qwen 8B. Its chat
-template carries Mistral's native function-calling format (`AVAILABLE_TOOLS`,
-`TOOL_CALLS`) and llama.cpp parses it into standard OpenAI `tool_calls`.
+**`gemma` is the default.** Measured on this machine: loads in **18 s** and
+generates at **5.9–6.0 tok/s**, the fastest of the local models here — a
+Ministral turn of the same shape runs slower. Its context is capped at 8192 of
+the model's 131072, which is cheap because Gemma has a single KV head: that
+cache is about 210 MB where Ministral's 4096 costs more. Its chat template
+carries `tool_call` and `tool_response`, so llama.cpp parses tool calls from it.
+
+It is the one model here big enough to be uncomfortable: 2709 MB against a
+2627 MB threshold means the RAM guard warns on a typical desktop, and if
+available RAM is far below that, the weights cannot stay resident and
+generation slows to disk speed. `mistral` is the smaller fallback.
+
+**`mistral` is the router's "fast" model.** Ministral 3B is Mistral AI's edge
+model, not Mistral 7B. Measured: loads in **46 s**, and answered a tool-call
+round in **35 s** against 252 s for the Qwen 8B. Its chat template carries
+Mistral's native function-calling format (`AVAILABLE_TOOLS`, `TOOL_CALLS`) and
+llama.cpp parses it into standard OpenAI `tool_calls`.
 
 Its native context is **262144** with YARN scaling; it is capped at 4096 here
 because the KV cache for anything larger will not fit on this machine.

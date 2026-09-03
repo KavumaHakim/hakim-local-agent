@@ -10,11 +10,12 @@
     "Paths here are RELATIVE TO THIS FILE, not to the working directory, so the project folder can be renamed or moved without editing anything. That is why they are no longer absolute: the folder was renamed once and the hardcoded path was the thing that broke. An absolute path still works if the weights live on another drive. Forward slashes are used deliberately: Windows accepts them and they cannot be mistaken for escape sequences.",
     "OCR context sizing, measured from the GGUF metadata rather than guessed: GLM-OCR is 17 layers x 8 KV heads x 96 head-dim, which is 52224 bytes of KV cache PER TOKEN. So the context is the expensive part, not the weights - 4096 costs 204 MB, 8192 costs 408 MB, 16384 costs 816 MB, against roughly 480 MB of resident weights. 4096 was too tight: an image is worth thousands of tokens before the transcription starts, so a dense page could overflow and come back truncated rather than failing loudly. 8192 is the compromise on an 8 GB machine. If a page still overflows, either raise this to 16384 and accept ~816 MB, or add '--cache-type-k q8_0 --cache-type-v q8_0' to the launch command, which roughly halves the cache at some quality cost. The model itself was trained for 131072, so the ceiling here is RAM, not the model.",
     "idle_timeout_seconds is 1800 - half an hour. It was 300, and 300 was too short in a way that bit: a turn on this machine has been measured at 285.7 s, so a slow answer could cross the timeout and have the sweeper unload the model out from under it. Reloading costs the weights AND the whole prefix again, which is the expensive half, so the timeout wants to be longer than a working pause rather than longer than a turn. It is not 0 (never unload) because a 2.7 GB model resident forever on an 8 GB machine leaves ~300 MB free, measured, and that is where thrashing starts. Note what a longer timeout does NOT do: llama.cpp mmaps the weights, so the OS evicts those pages under memory pressure anyway. Keeping the process alive keeps the slot and the KV cache, not necessarily the weights in RAM.",
+    "Gemma is curated rather than discovered, and that is deliberate: it is the default, and a default should have settings somebody chose rather than settings a formula inferred from a filename. Its port is 8085 - below 8090, where the discovery pool starts, so a newly dropped model can never be handed the same one. Because it is listed here by file, discovery skips it instead of offering the same weights twice under a second key.",
     "Entries with a 'provider' other than 'local' are hosted APIs: no file, no port, no RAM threshold, nothing to load, and they do not join the one-at-a-time rotation because they use no RAM. 'model' is the provider's own id and is the thing most likely to go stale - confirm it against GET /v1/models for the key rather than trusting it. Keys are named here, never stored here: put the values in .env, which is git-ignored."
   ],
   "server_exe": "../LLAMA CP/llama-server.exe",
   "models_dir": "weights",
-  "default": "mistral",
+  "default": "gemma",
   "max_active": 1,
   "idle_timeout_seconds": 1800,
   "router": {
@@ -22,6 +23,16 @@
     "strong": "reasoning"
   },
   "models": [
+    {
+      "key": "gemma",
+      "label": "Gemma 4 E2B",
+      "file": "gemma-4-E2B-it-Q4_0.gguf",
+      "port": 8085,
+      "context": 8192,
+      "threads": 4,
+      "min_free_mb": 2627,
+      "description": "Primary model for everyday work. Measured on this machine: loads in about 18 s and generates at 5.9-6.0 tok/s, which is the fastest of the local models here. Context is capped at 8192 of the model's 131072; Gemma has a single KV head, so that cache is only about 210 MB. Its chat template carries tool_call and tool_response, so it can call tools."
+    },
     {
       "key": "mistral",
       "label": "Ministral 3B",
