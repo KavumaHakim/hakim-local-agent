@@ -81,27 +81,22 @@ function renderBlocks(text: string): ReactNode[] {
       continue
     }
 
-    const bullet = /^\s*[-*+]\s+/
-    const numbered = /^\s*\d+[.)]\s+/
-    if (bullet.test(line) || numbered.test(line)) {
-      const ordered = numbered.test(line)
-      const pattern = ordered ? numbered : bullet
-      const items: string[] = []
-      while (index < lines.length && pattern.test(lines[index])) {
-        items.push(lines[index].replace(pattern, ''))
-        index += 1
-      }
-      const List = ordered ? 'ol' : 'ul'
-      blocks.push(
-        <List
-          key={key++}
-          className={`my-3 space-y-1 pl-5 ${ordered ? 'list-decimal' : 'list-disc'} marker:text-muted`}
-        >
-          {items.map((item, position) => (
-            <li key={position}>{inline(item)}</li>
-          ))}
-        </List>,
-      )
+    // A table: a row of cells, then the separator row that makes it one.
+    // Checked before lists and paragraphs because a pipe row is neither.
+    if (isTableStart(lines, index)) {
+      const [table, next] = parseTable(lines, index)
+      blocks.push(<Table key={key++} {...table} />)
+      index = next
+      continue
+    }
+
+    if (LIST_ITEM.test(line)) {
+      // Nested by indentation. A flat regex used to swallow the indent and
+      // render every level as one list, which is what 13 of 86 stored
+      // replies looked like.
+      const [list, next] = parseList(lines, index)
+      blocks.push(renderList(list, key++))
+      index = next
       continue
     }
 
@@ -114,8 +109,8 @@ function renderBlocks(text: string): ReactNode[] {
       !lines[index].trimStart().startsWith('```') &&
       !/^(#{1,6})\s+/.test(lines[index]) &&
       !/^\s*>\s?/.test(lines[index]) &&
-      !bullet.test(lines[index]) &&
-      !numbered.test(lines[index])
+      !LIST_ITEM.test(lines[index]) &&
+      !isTableStart(lines, index)
     ) {
       paragraph.push(lines[index])
       index += 1
@@ -128,6 +123,171 @@ function renderBlocks(text: string): ReactNode[] {
   }
 
   return blocks
+}
+
+// --- lists ------------------------------------------------------------------
+
+/** Any list item: its indent, its marker, and the text after it. */
+const LIST_ITEM = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/
+
+interface ListNode {
+  ordered: boolean
+  items: { text: string; children: ListNode | null }[]
+}
+
+/**
+ * Parse consecutive list lines from `start` into a tree, nesting by indent.
+ *
+ * A deeper indent than the current item opens a child list under it; a
+ * shallower one closes back out. Two spaces is enough to count as deeper,
+ * which is what models write. Returns the tree and the index after it.
+ */
+function parseList(lines: string[], start: number): [ListNode, number] {
+  let index = start
+
+  function parseLevel(indent: number): ListNode {
+    const first = LIST_ITEM.exec(lines[index])!
+    const node: ListNode = { ordered: /\d/.test(first[2]), items: [] }
+
+    while (index < lines.length) {
+      const match = LIST_ITEM.exec(lines[index])
+      if (!match) break
+      const depth = match[1].length
+      if (depth < indent) break // belongs to an outer list
+      if (depth > indent) {
+        // Deeper than this level: it is a child of the item just added. A
+        // deeper first line with nothing above it is treated as this level.
+        const last = node.items[node.items.length - 1]
+        if (!last) {
+          node.items.push({ text: match[3], children: null })
+          index += 1
+          continue
+        }
+        last.children = parseLevel(depth)
+        continue
+      }
+      node.items.push({ text: match[3], children: null })
+      index += 1
+    }
+    return node
+  }
+
+  const indent = LIST_ITEM.exec(lines[start])![1].length
+  return [parseLevel(indent), index]
+}
+
+function renderList(node: ListNode, key: number, nested = false): ReactNode {
+  const List = node.ordered ? 'ol' : 'ul'
+  return (
+    <List
+      key={key}
+      className={`${nested ? 'mt-1' : 'my-3'} space-y-1 pl-5 ${
+        node.ordered ? 'list-decimal' : 'list-disc'
+      } marker:text-muted`}
+    >
+      {node.items.map((item, position) => (
+        <li key={position}>
+          {inline(item.text)}
+          {item.children && renderList(item.children, position, true)}
+        </li>
+      ))}
+    </List>
+  )
+}
+
+// --- tables -----------------------------------------------------------------
+
+const TABLE_ROW = /^\s*\|.*\|\s*$/
+// The row under the header: cells of dashes, with optional colons that set
+// the alignment. This row is what makes a run of pipe lines a table.
+const TABLE_SEPARATOR = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/
+
+type Align = 'left' | 'center' | 'right'
+
+interface TableData {
+  header: string[]
+  align: Align[]
+  rows: string[][]
+}
+
+function isTableStart(lines: string[], index: number): boolean {
+  return (
+    index + 1 < lines.length &&
+    TABLE_ROW.test(lines[index]) &&
+    TABLE_SEPARATOR.test(lines[index + 1])
+  )
+}
+
+/** Split a pipe row into cells. `\|` inside a cell is a literal pipe. */
+function splitRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+  return trimmed
+    .split(/(?<!\\)\|/)
+    .map((cell) => cell.replace(/\\\|/g, '|').trim())
+}
+
+function parseTable(lines: string[], start: number): [TableData, number] {
+  const header = splitRow(lines[start])
+  const align = splitRow(lines[start + 1]).map((cell): Align => {
+    const left = cell.startsWith(':')
+    const right = cell.endsWith(':')
+    if (left && right) return 'center'
+    if (right) return 'right'
+    return 'left'
+  })
+
+  const rows: string[][] = []
+  let index = start + 2
+  while (index < lines.length && TABLE_ROW.test(lines[index])) {
+    // Ragged rows are padded or cut to the header, so a model that miscounts
+    // pipes on one line does not shift every cell after it.
+    const cells = splitRow(lines[index])
+    rows.push(header.map((_, column) => cells[column] ?? ''))
+    index += 1
+  }
+  return [{ header, align, rows }, index]
+}
+
+const ALIGN_CLASS: Record<Align, string> = {
+  left: 'text-left',
+  center: 'text-center',
+  right: 'text-right',
+}
+
+function Table({ header, align, rows }: TableData) {
+  return (
+    // Wide tables scroll inside their own box; the page never does.
+    <div className="my-3 overflow-x-auto rounded-lg border border-line">
+      <table className="w-full border-collapse text-[13px]">
+        <thead className="bg-sunken">
+          <tr>
+            {header.map((cell, column) => (
+              <th
+                key={column}
+                className={`border-b border-line px-3 py-1.5 font-semibold text-fg ${ALIGN_CLASS[align[column] ?? 'left']}`}
+              >
+                {inline(cell)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, position) => (
+            <tr key={position} className="border-b border-line last:border-b-0">
+              {row.map((cell, column) => (
+                <td
+                  key={column}
+                  className={`px-3 py-1.5 align-top ${ALIGN_CLASS[align[column] ?? 'left']}`}
+                >
+                  {inline(cell)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
 }
 
 function CodeBlock({ language, code }: { language: string; code: string }) {
