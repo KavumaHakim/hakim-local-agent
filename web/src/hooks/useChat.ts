@@ -361,6 +361,7 @@ export function useChat(options: ChatOptions) {
               created_at: '',
               // Not persisted server-side, so it lasts until a reload.
               reasoning: thinking || undefined,
+              context: event.context,
             }
             setMessages((current) => [...current, answer])
             settled = true

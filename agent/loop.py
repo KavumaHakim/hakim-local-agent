@@ -18,6 +18,17 @@ from typing import Any, Callable
 from agent.parser import AssistantTurn, ParseError, ToolCall, parse_assistant_message
 from agent.prompts import SYSTEM_PROMPT
 from config import Config
+
+# Deliberately duplicated from memory/context.py rather than imported. That
+# module is stdlib-only itself, but reaching it runs `memory/__init__.py`,
+# which imports the manager, which imports numpy - and numpy lives in
+# requirements-rag.txt, not requirements.txt. Importing it here would make a
+# base install fail at `import agent.loop`, which is to say everywhere,
+# including the CLI. One float is a smaller price than that.
+#
+# Conservative on purpose, and the same figure the chunker uses, so the
+# estimate runs high and a context sized against it comes out under budget.
+CHARS_PER_TOKEN = 3.5
 from models.qwen import ChatClient, TokenCallback
 from tools.base import ToolRegistry, ToolResult
 from tools.lens import LOAD_TOOLS, ToolLens
@@ -87,6 +98,11 @@ class Agent:
         # What the last context build put in front of the model. Reported to
         # the UI so retrieved memories are visible rather than mysterious.
         self.context_report: dict[str, Any] = {}
+        # How much this turn had to leave out. Kept on the agent rather than
+        # returned from the trimmer, because trimming happens several times
+        # in a turn and the total is what anyone wants to know.
+        self._dropped = 0
+        self._truncated_results = 0
         # Off by default. When on, the roster reaches the model as a short
         # index and opens a group at a time - see tools/lens.py. It lives on
         # the Agent rather than the registry because what has been opened is a
@@ -142,6 +158,12 @@ class Agent:
         """
         self._history.append({"role": "user", "content": user_input})
 
+        # Counted per turn, not per round: what the interface reports is what
+        # this turn cost, and a round is an implementation detail nobody
+        # asked about.
+        self._dropped = 0
+        self._truncated_results = 0
+
         if self._lens is not None:
             self._lens.consider(user_input)
 
@@ -176,6 +198,13 @@ class Agent:
 
             for call in turn.tool_calls:
                 result = self._execute(call)
+                content = result.content_within(self._result_budget())
+                # Counted here rather than inferred later: once the result is
+                # a JSON string in the history, the only way to tell a cut one
+                # from a tool that happens to return a "truncated" field is to
+                # compare against the uncut text, which is what this does.
+                if len(content) < len(result.content):
+                    self._truncated_results += 1
                 self._history.append(
                     {
                         "role": "tool",
@@ -186,9 +215,7 @@ class Agent:
                         # page of OCR or a large file read overflows the
                         # window and loses the whole turn rather than part of
                         # one result.
-                        "content": result.content_within(
-                            self._result_budget()
-                        ),
+                        "content": content,
                     }
                 )
                 if observer is not None:
@@ -293,7 +320,24 @@ class Agent:
         whatever was talked about most, not what is being asked now.
         """
         if self._memory is None:
-            return [{"role": "system", "content": SYSTEM_PROMPT}, *self._history]
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}, *self._history]
+            # Reported on this path too. Memory is off by default, so leaving
+            # the report empty here would mean the interface had nothing to
+            # say about the context for most turns anybody actually runs.
+            characters = sum(
+                len(str(message.get("content") or "")) for message in messages
+            )
+            self.context_report = self._with_turn_costs(
+                {
+                    "memories": [],
+                    "summary_used": False,
+                    "messages_kept": len(self._history),
+                    "messages_dropped": self._dropped,
+                    "characters": characters,
+                    "estimated_tokens": int(characters / CHARS_PER_TOKEN),
+                }
+            )
+            return messages
 
         built = self._memory.build_context(
             system_prompt=SYSTEM_PROMPT,
@@ -301,8 +345,42 @@ class Agent:
             query=self._latest_user_message(),
             conversation_id=self._conversation_id,
         )
-        self.context_report = built.report()
+        report = built.report()
+        # The builder counts its own messages and knows nothing about the
+        # trimmer that ran before it, so the two dropped counts are added
+        # rather than one overwriting the other.
+        report["messages_dropped"] = report.get("messages_dropped", 0) + self._dropped
+        self.context_report = self._with_turn_costs(report)
         return built.messages
+
+    def _with_turn_costs(self, report: dict[str, Any]) -> dict[str, Any]:
+        """Add what the report cannot know from the messages alone.
+
+        The window it has to fit in, what the tool schemas cost on top of the
+        conversation, and whether any tool result had to be cut. Without the
+        limit the token figure is a number with nothing to compare it to,
+        which is the state the interface was in before.
+        """
+        report["context_limit"] = self._config.model_context
+        report["tool_tokens"] = self._definition_tokens()
+        report["truncated_results"] = self._truncated_results
+        report["total_estimated_tokens"] = (
+            report.get("estimated_tokens", 0) + report["tool_tokens"]
+        )
+        return report
+
+    def _definition_tokens(self) -> int:
+        """Roughly what this round's tool schemas cost.
+
+        The same character-based estimate the context builder uses, for the
+        same reason: it runs before the model is involved, so there is no
+        tokeniser to ask.
+        """
+        try:
+            blob = json.dumps(self._definitions())
+        except (TypeError, ValueError):
+            return 0
+        return int(len(blob) / CHARS_PER_TOKEN)
 
     def _latest_user_message(self) -> str:
         for message in reversed(self._history):
@@ -356,6 +434,7 @@ class Agent:
                 # the chat template rejects that outright.
                 return
             del self._history[:cut]
+            self._dropped += cut
 
     def _history_chars(self) -> int:
         """Roughly what the conversation costs, for the size limit.

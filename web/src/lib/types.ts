@@ -39,6 +39,15 @@ export interface Message {
    * next round. So it survives until the page reloads and no longer.
    */
   reasoning?: string
+  /**
+   * What this turn's context was made of.
+   *
+   * Client-side only, like `reasoning`: the server reports it on `done` but
+   * does not store it, so a reloaded conversation has none. Absent rather
+   * than zeroed in that case, so the panel can say "not recorded" instead of
+   * claiming a turn cost nothing.
+   */
+  context?: ContextReport
 }
 
 export interface Conversation {
@@ -269,6 +278,38 @@ export interface Health {
 
 /* --- streaming events, in the order a healthy turn produces them --- */
 
+/**
+ * What one turn's context was made of.
+ *
+ * Every figure is an estimate from character counts, not a real tokenisation:
+ * the context is assembled before the model is involved, so there is no
+ * tokeniser to ask. The ratio is conservative, so these run high.
+ */
+export interface ContextReport {
+  /** The conversation itself. */
+  estimated_tokens: number
+  /** The tool schemas, which ride in front of it. */
+  tool_tokens: number
+  /** The two together - what the request actually costs. */
+  total_estimated_tokens: number
+  /** The model's window, so the total means something. */
+  context_limit: number
+  characters: number
+  messages_kept: number
+  messages_dropped: number
+  /** How many tool results had to be cut to fit. */
+  truncated_results: number
+  summary_used: boolean
+  memories: ContextMemory[]
+}
+
+export interface ContextMemory {
+  id?: number
+  content: string
+  score?: number
+  type?: string
+}
+
 export type TurnEvent =
   | { type: 'accepted'; turn_id: string; conversation_id: number; user_message_id: number; position: number }
   | { type: 'queued'; position: number }
@@ -287,7 +328,16 @@ export type TurnEvent =
   | { type: 'token'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'tool'; name: string; ok: boolean; summary: string }
-  | { type: 'done'; message_id: number; content: string; tools: ToolCall[]; elapsed: number; model_key: string }
+  | {
+      type: 'done'
+      message_id: number
+      content: string
+      tools: ToolCall[]
+      elapsed: number
+      model_key: string
+      /** Absent from older stored turns, so every reader must tolerate it. */
+      context?: ContextReport
+    }
   | {
       type: 'stopped'
       /** Where it was when it was ended: 'queued' or 'running'. */

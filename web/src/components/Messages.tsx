@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Markdown } from '../lib/markdown'
-import type { Message, ToolCall } from '../lib/types'
+import type { ContextReport, Message, ToolCall } from '../lib/types'
 import {
   AlertIcon,
   BrainIcon,
@@ -144,6 +144,115 @@ export function ReasoningPanel({
   )
 }
 
+/** Compact token counts: 940, 1.2k, 12k. */
+function short(tokens: number): string {
+  if (tokens < 1000) return String(tokens)
+  const thousands = tokens / 1000
+  return `${thousands < 10 ? thousands.toFixed(1) : Math.round(thousands)}k`
+}
+
+/**
+ * What this turn's context was made of.
+ *
+ * The one number worth seeing without opening anything is how close the turn
+ * came to the model's window, because on this hardware that is what decides
+ * whether the next one is slow, truncated, or fine. Everything else is behind
+ * the disclosure.
+ *
+ * Every figure is an estimate from character counts - the context is built
+ * before the model is involved, so there is no tokeniser to ask - and the
+ * ratio is conservative, so these run high rather than low.
+ */
+function ContextPanel({ context }: { context: ContextReport }) {
+  const { total_estimated_tokens: used, context_limit: limit } = context
+  const share = limit > 0 ? used / limit : 0
+  const tight = share >= 0.8
+  const lost = context.messages_dropped > 0 || context.truncated_results > 0
+
+  return (
+    <details className="group mt-2 rounded-xl border border-line bg-sunken/60">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-[11.5px] text-muted transition hover:text-fg">
+        <span className={tight ? 'font-semibold text-fg' : ''}>
+          {short(used)} / {short(limit)} tokens
+        </span>
+        {/* A bar because a ratio is easier to feel than to read. */}
+        <span className="h-1 w-16 shrink-0 overflow-hidden rounded-full bg-tint-2">
+          <span
+            className={`block h-full rounded-full ${tight ? 'bg-fg' : 'bg-accent'}`}
+            style={{ width: `${Math.min(100, Math.round(share * 100))}%` }}
+          />
+        </span>
+        {lost && <span className="text-faint">· some was left out</span>}
+        <span className="ml-auto text-faint transition group-open:rotate-90">›</span>
+      </summary>
+
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-line px-3 py-2 text-[11.5px]">
+        <dt className="text-faint">Conversation</dt>
+        <dd className="tabular-nums text-muted">
+          {context.estimated_tokens.toLocaleString()} tokens ·{' '}
+          {context.messages_kept} message
+          {context.messages_kept === 1 ? '' : 's'}
+        </dd>
+
+        <dt className="text-faint">Tool schemas</dt>
+        <dd className="tabular-nums text-muted">
+          {context.tool_tokens.toLocaleString()} tokens
+        </dd>
+
+        {context.messages_dropped > 0 && (
+          <>
+            <dt className="text-faint">Dropped</dt>
+            <dd className="text-muted">
+              {context.messages_dropped} older message
+              {context.messages_dropped === 1 ? '' : 's'} did not fit
+            </dd>
+          </>
+        )}
+
+        {context.truncated_results > 0 && (
+          <>
+            <dt className="text-faint">Cut short</dt>
+            <dd className="text-muted">
+              {context.truncated_results} tool result
+              {context.truncated_results === 1 ? ' was' : 's were'} too large
+              and {context.truncated_results === 1 ? 'was' : 'were'} trimmed
+            </dd>
+          </>
+        )}
+
+        {context.summary_used && (
+          <>
+            <dt className="text-faint">Summary</dt>
+            <dd className="text-muted">
+              an earlier part of this conversation was replaced by a summary
+            </dd>
+          </>
+        )}
+
+        {context.memories.length > 0 && (
+          <>
+            <dt className="text-faint">Memories</dt>
+            <dd className="text-muted">
+              <ul className="space-y-0.5">
+                {context.memories.map((memory, position) => (
+                  <li key={memory.id ?? position} className="truncate">
+                    {memory.content}
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </>
+        )}
+      </dl>
+
+      <p className="border-t border-line px-3 py-1.5 text-[11px] text-faint">
+        Estimated from character counts, not a real tokenisation, and rounded
+        up rather than down. Not saved — this goes when the page reloads.
+      </p>
+    </details>
+  )
+}
+
 export function MessageView({
   message,
   onRetry,
@@ -200,6 +309,7 @@ export function MessageView({
           )}
         </div>
       </div>
+      {message.context && <ContextPanel context={message.context} />}
     </div>
   )
 }
