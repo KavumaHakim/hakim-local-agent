@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, Callable, Iterable, Protocol
+from urllib.parse import urlsplit
 
 import requests
 
@@ -80,12 +81,25 @@ class ChatClient(Protocol):
     # on a model round once it has started.
 
 
+def _is_loopback(url: str) -> bool:
+    """Whether `url` names this machine, where a proxy can only get in the way."""
+    host = (urlsplit(url).hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
 class QwenClient:
     """Chat client for a llama.cpp server running Qwen3."""
 
     def __init__(self, config: Config) -> None:
         self._config = config
         self._session = requests.Session()
+        # A local llama-server must be reached directly, never through the
+        # proxy environment: with HTTP_PROXY set and no NO_PROXY, every
+        # request to 127.0.0.1 became a ProxyError. The manager's session
+        # note in models/manager.py has the full story. Conditional rather
+        # than unconditional because qwen_url may name another machine, and
+        # a proxy could be exactly what reaching it needs.
+        self._session.trust_env = not _is_loopback(self._config.qwen_url)
 
     @property
     def base_url(self) -> str:

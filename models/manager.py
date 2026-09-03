@@ -558,6 +558,15 @@ class ModelManager:
         # a second model while one is coming up.
         self._lock = threading.RLock()
         self._session = requests.Session()
+        # This session only ever talks to 127.0.0.1, so it must not consult
+        # the proxy environment. It did, and the failure was invisible: with
+        # HTTP_PROXY set system-wide and no NO_PROXY - the state this machine
+        # was found in - every /health probe went to the proxy, came back as a
+        # ProxyError in 70 ms, and read as "not healthy". A fully loaded,
+        # perfectly fine llama-server then sat unrecognised until the 600 s
+        # start timeout gave up on it. From a shell with NO_PROXY the same
+        # probe succeeded in 10 ms, which is why this took a day to find.
+        self._session.trust_env = False
 
     def _apply(self, registry: dict[str, Any]) -> None:
         """Adopt a freshly loaded registry.

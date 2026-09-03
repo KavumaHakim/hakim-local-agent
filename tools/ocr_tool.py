@@ -46,6 +46,7 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -78,6 +79,12 @@ class OcrError(ToolError):
     """An OCR request was rejected or failed."""
 
 
+def _is_loopback(url: str) -> bool:
+    """Whether `url` names this machine, where a proxy can only get in the way."""
+    host = (urlsplit(url).hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
 class OcrClient:
     """Validates image paths and sends them to the GLM-OCR server."""
 
@@ -98,6 +105,10 @@ class OcrClient:
         )
         self._workspace = workspace
         self._session = requests.Session()
+        # Loopback bypasses the proxy environment, for the reason recorded on
+        # the manager's session in models/manager.py: with a system proxy set
+        # and no NO_PROXY, a request to 127.0.0.1 never reaches it.
+        self._session.trust_env = not _is_loopback(self._config.ocr_url)
 
     @property
     def base_url(self) -> str:
