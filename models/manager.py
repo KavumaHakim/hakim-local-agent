@@ -999,10 +999,28 @@ class ModelManager:
             return True
 
     def stop_all(self) -> list[str]:
-        """Stop every model this manager started. Returns their keys."""
+        """Stop every local model that is up, ours or adopted. Returns keys.
+
+        Not just `self._processes`, and the difference is the whole point. A
+        server this manager did not start - one left behind by a previous run,
+        or started by hand on a port the registry claims - has no process
+        handle, so iterating the handles skipped exactly the strays that make
+        a machine run out of RAM. `stop()` already knows how to reclaim an
+        adopted server, and refuses anything on the port that is not a
+        llama-server; this just has to ask it about every model rather than
+        only the ones it launched itself.
+
+        A refusal is not an error here: it means the port belongs to something
+        else, which is left alone and simply not reported as stopped.
+        """
         with self._lock:
+            self.refresh()
             stopped = []
-            for key in list(self._processes):
+            for key, status in self._statuses.items():
+                if status.spec.remote:
+                    continue  # no process, no RAM, nothing to stop
+                if key not in self._processes and status.state is not ModelState.READY:
+                    continue
                 if self.stop(key):
                     stopped.append(key)
             return stopped

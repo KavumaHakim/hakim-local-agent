@@ -634,3 +634,68 @@ class MeminfoStatusTests(unittest.TestCase):
         self.assertIsNone(parse_meminfo_status("MemTotal: 8000000 kB\n"))
         self.assertIsNone(parse_meminfo_status("MemTotal: lots\nMemAvailable: 1 kB\n"))
         self.assertIsNone(parse_meminfo_status(""))
+
+
+class StopAllTests(unittest.TestCase):
+    """The shutdown path, including servers this manager did not start.
+
+    An adopted server - one left behind by an earlier run, or started by hand
+    on a registry port - has no process handle. Iterating the handles skipped
+    precisely those, which are the strays that make an 8 GB machine run out
+    of RAM, so the button that promised to unload everything left them up.
+
+    `listener_pid` and `process_name` are stubbed rather than left real: they
+    shell out to netstat and tasklist, and a test whose result depended on
+    what this machine happens to be running would be worthless.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name).resolve()
+        self.addCleanup(self._tmp.cleanup)
+        self.manager = ManagerHarness(write_registry(self.tmp))
+        self.killed: list[int] = []
+        self.manager._kill = self.killed.append
+
+    def pretend_port_is_held(self, port: int, pid: int, name: str) -> None:
+        """A process on `port`, with `name` deciding whether it is reclaimable."""
+        self.manager.listener_pid = lambda asked: pid if asked == port else None
+        self.manager.process_name = lambda asked: name if asked == pid else ""
+
+    def adopt(self, port: int) -> None:
+        """Make the manager believe a server it never started is up on `port`."""
+        self.manager.healthy_ports.add(port)
+        self.manager.refresh()
+
+    def test_stops_models_it_started(self):
+        self.manager.ensure("fast")
+
+        self.assertEqual(self.manager.stop_all(), ["fast"])
+        self.assertIsNone(self.manager.active_key())
+
+    def test_stops_an_adopted_server_it_never_started(self):
+        self.pretend_port_is_held(8080, 4242, "llama-server.exe")
+        self.adopt(8080)
+        self.assertTrue(self.manager.status("fast").adopted)
+        self.assertNotIn("fast", self.manager._processes)
+
+        # Killing it is what makes the port stop answering.
+        def kill(pid):
+            self.killed.append(pid)
+            self.manager.healthy_ports.discard(8080)
+
+        self.manager._kill = kill
+
+        self.assertEqual(self.manager.stop_all(), ["fast"])
+        self.assertEqual(self.killed, [4242])
+
+    def test_leaves_a_port_held_by_something_else_alone(self):
+        """The identity check is what stops this killing a stray editor."""
+        self.pretend_port_is_held(8080, 4242, "code.exe")
+        self.adopt(8080)
+
+        self.assertEqual(self.manager.stop_all(), [])
+        self.assertEqual(self.killed, [])
+
+    def test_reports_nothing_when_nothing_is_up(self):
+        self.assertEqual(self.manager.stop_all(), [])
