@@ -186,6 +186,20 @@ class Config:
 
     # --- Agent loop ---
     max_iterations: int = 8
+    # Send a short index of the tool roster instead of every schema, and
+    # expand a group only once the conversation looks like it needs it.
+    #
+    # On by default, and that is measured rather than assumed. Same model,
+    # same llama-server, one turn each: a bare message came back in 13s,
+    # while the identical turn carrying the whole roster - about 3,060
+    # tokens of tool JSON - had still not returned after 900s. At that size
+    # the schemas do not make a turn slow, they stop it finishing, and the
+    # symptom reads as a model that never loaded.
+    #
+    # The index costs about 410 tokens instead, plus one round trip on the
+    # turns where the heuristic in tools/lens.py guesses wrong. Set
+    # AGENT_LAZY_TOOLS=0 to send everything the old way.
+    lazy_tools: bool = True
 
     # --- Chat history and memory ---
     # SQLite file holding past conversations and stored facts. Kept under
@@ -413,6 +427,7 @@ class Config:
             connect_timeout=_env_float("AGENT_CONNECT_TIMEOUT", defaults.connect_timeout),
             max_history_messages=_env_int("AGENT_MAX_HISTORY", defaults.max_history_messages),
             max_iterations=_env_int("AGENT_MAX_ITERATIONS", defaults.max_iterations),
+            lazy_tools=_env_bool("AGENT_LAZY_TOOLS", defaults.lazy_tools),
             tool_result_share=_env_float(
                 "AGENT_TOOL_RESULT_SHARE", defaults.tool_result_share
             ),

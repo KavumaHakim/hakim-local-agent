@@ -759,9 +759,32 @@ class ToolSwitchTests(ApiTestCase):
         names = {tool["name"] for tool in body["tools"]}
         self.assertIn("run_python", names)
 
-        # And the next turn actually sees it.
+        # And the next turn can reach it. Lazy tool loading is on by default,
+        # so a schema arrives once the turn looks like it needs one and a
+        # neutral "hello" gets the index instead. Reachable is the property
+        # that matters here; which of the two routes it took is the lens's
+        # business, and asserting the schema directly would only be testing
+        # the wordlist in tools/lens.py.
         self.runtime.responses = [{"role": "assistant", "content": "ok"}]
         self.say("hello")
+        sent = self.runtime.clients[-1].tools_seen[0] or []
+        offered = {definition["function"]["name"] for definition in sent}
+        index = next(
+            (d for d in sent if d["function"]["name"] == "load_tools"), None
+        )
+        self.assertTrue(
+            "run_python" in offered
+            or (index is not None and "python" in index["function"]["description"]),
+            f"run_python is not reachable at all: {offered}",
+        )
+
+    def test_a_turn_that_needs_python_is_sent_the_schema(self):
+        """The other half: reachable is not much use if it never arrives."""
+        self.client.post("/api/tools/python", json={"enabled": True})
+
+        self.runtime.responses = [{"role": "assistant", "content": "ok"}]
+        self.say("run a python script for me")
+
         offered = {
             definition["function"]["name"]
             for definition in (self.runtime.clients[-1].tools_seen[0] or [])

@@ -20,6 +20,7 @@ from agent.prompts import SYSTEM_PROMPT
 from config import Config
 from models.qwen import ChatClient, TokenCallback
 from tools.base import ToolRegistry, ToolResult
+from tools.lens import LOAD_TOOLS, ToolLens
 
 
 class AgentError(Exception):
@@ -86,6 +87,11 @@ class Agent:
         # What the last context build put in front of the model. Reported to
         # the UI so retrieved memories are visible rather than mysterious.
         self.context_report: dict[str, Any] = {}
+        # Off by default. When on, the roster reaches the model as a short
+        # index and opens a group at a time - see tools/lens.py. It lives on
+        # the Agent rather than the registry because what has been opened is a
+        # property of *this conversation*, and the registry is shared.
+        self._lens = ToolLens(tools) if config.lazy_tools else None
 
     @property
     def tools(self) -> ToolRegistry:
@@ -136,10 +142,15 @@ class Agent:
         """
         self._history.append({"role": "user", "content": user_input})
 
-        definitions = self._tools.get_tool_definitions()
+        if self._lens is not None:
+            self._lens.consider(user_input)
 
         for _ in range(max(1, self._config.max_iterations)):
             self._check_stop(should_stop)
+            # Rebuilt every round rather than once per turn: `load_tools`
+            # changes what the next request may see, and a set computed before
+            # the loop would not include what the model just asked for.
+            definitions = self._definitions()
             # Trim before sending, not after. Trimming afterwards leaves the
             # history within budget but says nothing about the request just
             # made - the newly appended message is exactly what pushes it over,
@@ -164,7 +175,7 @@ class Agent:
                 return turn
 
             for call in turn.tool_calls:
-                result = self._tools.execute(call.name, call.arguments)
+                result = self._execute(call)
                 self._history.append(
                     {
                         "role": "tool",
@@ -196,6 +207,23 @@ class Agent:
         )
 
     # --- internals ---
+
+    def _definitions(self) -> list[dict[str, Any]]:
+        """The tool schemas this round sends."""
+        if self._lens is None:
+            return self._tools.get_tool_definitions()
+        return self._lens.definitions()
+
+    def _execute(self, call: Any) -> ToolResult:
+        """Run one tool call.
+
+        `load_tools` is the lens's own, and is answered here rather than from
+        the registry: the registry is shared between conversations and what a
+        lens has opened is not.
+        """
+        if self._lens is not None and call.name == LOAD_TOOLS:
+            return ToolResult(name=call.name, payload=self._lens.load(call.arguments))
+        return self._tools.execute(call.name, call.arguments)
 
     def _result_budget(self) -> int:
         """How much of the context this tool result may take, right now.

@@ -1570,12 +1570,32 @@ class AgentLoopTests(TempCase):
         config = Config(workspace=self.tmp, rag_store=self.tmp / "store")
         return Agent(client, config, registry), client
 
-    def test_the_search_tool_is_offered_to_the_model(self):
+    def test_the_search_tool_is_reachable_by_the_model(self):
+        """Lazy tool loading is on, so "hello" gets the index, not the schema."""
         from tests.fake_client import text_message
 
         self.write("notes.txt", "Alpha text.")
         agent, client = self.agent(responses=[text_message("done")])
         agent.send("hello")
+
+        sent = client.tools_seen[-1] or []
+        offered = {definition["function"]["name"] for definition in sent}
+        index = next(
+            (d for d in sent if d["function"]["name"] == "load_tools"), None
+        )
+        self.assertTrue(
+            "search_documents" in offered
+            or (index is not None and "documents" in index["function"]["description"]),
+            f"search_documents is not reachable at all: {offered}",
+        )
+
+    def test_a_turn_that_asks_about_documents_is_sent_the_schema(self):
+        from tests.fake_client import text_message
+
+        self.write("notes.txt", "Alpha text.")
+        agent, client = self.agent(responses=[text_message("done")])
+        agent.send("search my documents for alpha")
+
         offered = {
             definition["function"]["name"] for definition in client.tools_seen[-1]
         }
