@@ -607,3 +607,30 @@ class PlatformTests(unittest.TestCase):
             'LISTEN 0 4096 [::1]:8080 [::]:* users:(("second",pid=22,fd=8))\n'
         )
         self.assertEqual(parse_ss_pid(output), 11)
+
+
+class MeminfoStatusTests(unittest.TestCase):
+    """The Linux memory probe, parsed without a Linux machine."""
+
+    TEXT = "MemTotal:        8000000 kB\nMemFree:         100000 kB\nMemAvailable:    2000000 kB\n"
+
+    def test_total_available_and_a_derived_load(self):
+        from models.manager import parse_meminfo_status
+
+        status = parse_meminfo_status(self.TEXT)
+        self.assertEqual(status.total_mb, 7812)
+        self.assertEqual(status.available_mb, 1953)
+        # Used over total, the way Windows reports dwMemoryLoad.
+        self.assertEqual(status.load_percent, 75)
+
+    def test_the_old_parser_still_answers_available_only(self):
+        from models.manager import parse_meminfo
+
+        self.assertEqual(parse_meminfo(self.TEXT), 1953)
+
+    def test_missing_or_malformed_lines_give_none(self):
+        from models.manager import parse_meminfo_status
+
+        self.assertIsNone(parse_meminfo_status("MemTotal: 8000000 kB\n"))
+        self.assertIsNone(parse_meminfo_status("MemTotal: lots\nMemAvailable: 1 kB\n"))
+        self.assertIsNone(parse_meminfo_status(""))

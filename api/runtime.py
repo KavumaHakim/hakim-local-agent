@@ -18,10 +18,11 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import signal
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agent.loop import Agent, AgentError, IterationLimitError, ToolEvent, TurnStopped
 from agent.router import TaskRouter
@@ -260,6 +261,16 @@ class Runtime:
         # switches are: nothing here should outlive the process quietly.
         self._recent_workspaces: list[Path] = [self.config.workspace]
         self._voice = None
+        # How the shutdown route ends the process, once it has answered.
+        # SIGINT rather than anything harder, so uvicorn runs the same
+        # lifespan shutdown Ctrl+C does - the one that unloads models and
+        # the embedding worker. Python delivers the handler to the main
+        # thread whichever thread raises it, which is what lets a request
+        # thread do this. Injectable so a test can watch it without killing
+        # the test runner.
+        self.exit_process: Callable[[], None] = lambda: signal.raise_signal(
+            signal.SIGINT
+        )
 
     @property
     def voice(self):

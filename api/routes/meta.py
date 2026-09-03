@@ -19,17 +19,20 @@ so a switch cannot quietly become the permanent state of the system.
 from __future__ import annotations
 
 import dataclasses
+import threading
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.deps import get_runtime
 from api.runtime import FLAGS_BY_ID, TOOL_FLAGS, Runtime
-from models.manager import ModelManagerError, ModelState
+from models.manager import ModelManagerError, ModelState, memory_status
 
 from api.schemas import (
     DisabledToolOut,
     OcrBackendRequest,
     HealthOut,
+    ResourcesOut,
+    ShutdownOut,
     SwitchOut,
     ToggleRequest,
     ToolOut,
@@ -273,3 +276,78 @@ def health(runtime: Runtime = Depends(get_runtime)):
         workspace=str(runtime.workspace),
         db_path=str(runtime.config.db_path),
     )
+
+
+# --- resources and shutdown -------------------------------------------------
+
+# Where Vite serves the UI in development, as start.bat launches it. In a
+# --build-web install the API serves the UI itself and nothing is on this
+# port, which is fine: the check finds nothing and the response says so.
+UI_DEV_PORT = 5173
+
+# Long enough for the response to leave before the process it came from
+# goes; short enough that the person who pressed the button sees it happen.
+EXIT_DELAY_SECONDS = 0.5
+
+
+@router.get("/resources", response_model=ResourcesOut)
+def resources(runtime: Runtime = Depends(get_runtime)):
+    """RAM and the resident model, for the header.
+
+    Takes no lock and reconciles nothing, on purpose: this is polled, and it
+    has to keep answering during a model load - the one time everything
+    behind the manager's lock is waiting.
+    """
+    memory = memory_status()
+    resident = runtime.manager.resident()
+    return ResourcesOut(
+        total_mb=memory.total_mb if memory else None,
+        available_mb=memory.available_mb if memory else None,
+        load_percent=memory.load_percent if memory else None,
+        resident_key=resident.spec.key if resident else None,
+        resident_label=resident.spec.label if resident else None,
+        resident_state=resident.state.value if resident else None,
+    )
+
+
+@router.post("/shutdown", response_model=ShutdownOut)
+def shutdown(runtime: Runtime = Depends(get_runtime)):
+    """Unload every model, stop the UI dev server, and exit.
+
+    Refused while a turn is running, like load and unload are: the person
+    can stop the turn first, and a shutdown that discarded two minutes of
+    generation because a button was under the cursor would be the wrong
+    kind of safe.
+
+    The order matters. Models are unloaded here, synchronously, so the
+    response can name them. The UI server and this process go on a short
+    timer: in development the browser reaches this API *through* Vite, so
+    stopping Vite before answering would mean never answering. The exit is
+    a SIGINT to ourselves, so uvicorn runs the same lifespan shutdown that
+    Ctrl+C does - which unloads the embedding worker and anything else that
+    was started along the way.
+    """
+    if runtime.queue.busy():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "A turn is running. Stop it first, then shut down.",
+        )
+
+    stopped = runtime.manager.stop_all()
+    ui_pid = runtime.manager.port_holder(UI_DEV_PORT, "node")
+
+    def finish() -> None:
+        if ui_pid is not None:
+            runtime.manager.kill_pid(ui_pid)
+        runtime.exit_process()
+
+    threading.Timer(EXIT_DELAY_SECONDS, finish).start()
+
+    if ui_pid is not None:
+        note = "Models unloaded. The API and the web server are stopping."
+    else:
+        note = (
+            "Models unloaded. The API is stopping. No dev server was found on "
+            f"port {UI_DEV_PORT}, so nothing else needed stopping."
+        )
+    return ShutdownOut(stopped_models=stopped, stopped_ui=ui_pid is not None, note=note)

@@ -13,6 +13,7 @@ import { Composer } from './components/Composer'
 import { EmptyState, MessageView } from './components/Messages'
 import { Pane } from './components/Pane'
 import { Rail, type PaneId } from './components/Rail'
+import { Resources } from './components/Resources'
 import { RemoteConsent } from './components/RemoteConsent'
 import { TurnStatus } from './components/TurnStatus'
 import { ModelBrowser } from './components/ModelBrowser'
@@ -381,13 +382,16 @@ export default function App() {
             </span>
           )}
 
-          <button
-            type="button"
-            onClick={() => setPaletteOpen(true)}
-            className="ml-auto flex h-[26px] shrink-0 items-center gap-1 rounded-md border border-line px-2 text-[11px] text-fg opacity-60 transition hover:border-accent-line hover:opacity-100"
-          >
-            <CommandIcon className="size-3" />K
-          </button>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <Resources />
+            <button
+              type="button"
+              onClick={() => setPaletteOpen(true)}
+              className="flex h-[26px] shrink-0 items-center gap-1 rounded-md border border-line px-2 text-[11px] text-fg opacity-60 transition hover:border-accent-line hover:opacity-100"
+            >
+              <CommandIcon className="size-3" />K
+            </button>
+          </div>
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto">

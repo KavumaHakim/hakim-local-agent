@@ -68,6 +68,13 @@ export const SidebarIcon = svg(
 
 export const CheckIcon = svg(<path d="m5 13 4 4L19 7" />)
 
+export const PowerIcon = svg(
+  <>
+    <path d="M12 3v9" />
+    <path d="M6.3 6.3a8 8 0 1 0 11.4 0" />
+  </>,
+)
+
 export const AlertIcon = svg(
   <>
     <path d="M12 9v4M12 17h.01" />

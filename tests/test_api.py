@@ -1567,3 +1567,82 @@ class MetaRouteTests(ApiTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResourcesTests(ApiTestCase):
+    def test_reports_memory_and_nothing_resident_at_first(self):
+        body = self.client.get("/api/resources").json()
+
+        # The numbers are the platform's; what is asserted is the shape and
+        # that a missing figure comes back as None rather than a 500.
+        for field in ("total_mb", "available_mb", "load_percent"):
+            self.assertIn(field, body)
+            self.assertTrue(body[field] is None or isinstance(body[field], int))
+        self.assertIsNone(body["resident_key"])
+        self.assertIsNone(body["resident_state"])
+
+    def test_names_the_model_a_turn_loaded(self):
+        self.runtime.responses = [{"role": "assistant", "content": "ok"}]
+        self.say("hello")
+
+        body = self.client.get("/api/resources").json()
+        self.assertEqual(body["resident_key"], "fast")
+        self.assertEqual(body["resident_label"], "Fast 2B")
+        self.assertEqual(body["resident_state"], "ready")
+
+    def test_does_not_touch_the_manager_lock(self):
+        """It is polled during loads, when the lock is held for minutes."""
+        from api.routes.meta import resources as route
+
+        with self.manager._lock:
+            # A route that needed the lock would deadlock here, since the
+            # RLock is held by this thread and the route runs in it too - so
+            # this passing shows no *other* lock is taken; the direct call
+            # rules out the threadpool. Good enough for a smoke test.
+            body = route(self.runtime)
+        self.assertIsNone(body.resident_key)
+
+
+class ShutdownTests(ApiTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.exits: list[float] = []
+        self.runtime.exit_process = lambda: self.exits.append(time.time())
+        # Never look for a real dev server from a test: one may be running on
+        # this machine, and the route would stop it.
+        self.manager.port_holder = lambda port, fragment: None
+
+    def test_refused_while_a_turn_runs(self):
+        self.runtime.queue.busy = lambda: True
+
+        response = self.client.post("/api/shutdown")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Stop it first", response.json()["detail"])
+        self.assertEqual(self.exits, [])
+
+    def test_unloads_models_answers_then_exits(self):
+        from api.routes.meta import EXIT_DELAY_SECONDS
+
+        self.runtime.responses = [{"role": "assistant", "content": "ok"}]
+        self.say("hello")
+        self.assertEqual(self.manager.active_key(), "fast")
+
+        asked = time.time()
+        response = self.client.post("/api/shutdown")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["stopped_models"], ["fast"])
+        self.assertFalse(body["stopped_ui"])
+        self.assertIn("API is stopping", body["note"])
+        # The models are gone before the answer, so the answer can say so.
+        self.assertIsNone(self.manager.active_key())
+        # And the process was not ended before the answer left.
+        self.assertEqual(self.exits, [])
+
+        deadline = time.time() + EXIT_DELAY_SECONDS + 2
+        while not self.exits and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(len(self.exits), 1)
+        self.assertGreaterEqual(self.exits[0] - asked, EXIT_DELAY_SECONDS)

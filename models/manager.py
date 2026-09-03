@@ -179,12 +179,32 @@ def available_ram_mb() -> int | None:
     room can report almost none - and this number decides whether a model is
     allowed to start.
     """
+    status = memory_status()
+    return status.available_mb if status is not None else None
+
+
+@dataclass(frozen=True)
+class MemoryStatus:
+    """Physical RAM: how much there is, how much is left, how full that is."""
+
+    total_mb: int
+    available_mb: int
+    load_percent: int
+
+
+def memory_status() -> MemoryStatus | None:
+    """Total and available RAM, or None if the platform will not say.
+
+    One syscall and no lock, which is what makes it safe to poll from the
+    header every few seconds - including in the middle of a model load,
+    when everything that goes through the manager's lock is waiting.
+    """
     if os.name == "nt":
-        return _windows_ram_mb()
-    return _proc_meminfo_ram_mb()
+        return _windows_memory()
+    return _proc_meminfo_memory()
 
 
-def _windows_ram_mb() -> int | None:
+def _windows_memory() -> MemoryStatus | None:
     class MemoryStatusEx(ctypes.Structure):
         _fields_ = [
             ("dwLength", ctypes.c_ulong),
@@ -203,16 +223,20 @@ def _windows_ram_mb() -> int | None:
         status.dwLength = ctypes.sizeof(MemoryStatusEx)
         if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
             return None
-        return int(status.ullAvailPhys // (1024 * 1024))
+        return MemoryStatus(
+            total_mb=int(status.ullTotalPhys // (1024 * 1024)),
+            available_mb=int(status.ullAvailPhys // (1024 * 1024)),
+            load_percent=int(status.dwMemoryLoad),
+        )
     except (AttributeError, OSError):
         return None
 
 
-def _proc_meminfo_ram_mb() -> int | None:
-    """MemAvailable from /proc/meminfo, in MB. None where there is no procfs."""
+def _proc_meminfo_memory() -> MemoryStatus | None:
+    """MemTotal and MemAvailable from /proc/meminfo. None without procfs."""
     try:
         with open("/proc/meminfo", "r", encoding="ascii") as handle:
-            return parse_meminfo(handle.read())
+            return parse_meminfo_status(handle.read())
     except OSError:
         return None
 
@@ -223,14 +247,35 @@ def parse_meminfo(text: str) -> int | None:
     Split from the file read so the Linux path can be tested from any machine.
     Untested platform code is a promise rather than a feature.
     """
+    status = parse_meminfo_status(text)
+    return status.available_mb if status is not None else None
+
+
+def parse_meminfo_status(text: str) -> MemoryStatus | None:
+    """MemTotal and MemAvailable out of /proc/meminfo text, as a status.
+
+    The load percentage is derived, since procfs does not report one: what
+    Windows calls dwMemoryLoad is just used-over-total, rounded.
+    """
+    values: dict[str, int] = {}
     for line in text.splitlines():
-        if line.startswith("MemAvailable:"):
-            try:
-                # "MemAvailable:    1908736 kB"
-                return int(line.split()[1]) // 1024
-            except (ValueError, IndexError):
-                return None
-    return None
+        for name in ("MemTotal:", "MemAvailable:"):
+            if line.startswith(name):
+                try:
+                    # "MemAvailable:    1908736 kB"
+                    values[name] = int(line.split()[1]) // 1024
+                except (ValueError, IndexError):
+                    return None
+    if "MemTotal:" not in values or "MemAvailable:" not in values:
+        return None
+    total, available = values["MemTotal:"], values["MemAvailable:"]
+    if total <= 0:
+        return None
+    return MemoryStatus(
+        total_mb=total,
+        available_mb=available,
+        load_percent=round(100 * (total - available) / total),
+    )
 
 
 def parse_ss_pid(output: str) -> int | None:
@@ -796,6 +841,24 @@ class ModelManager:
                 return key
         return None
 
+    def resident(self) -> ModelStatus | None:
+        """The local chat model holding RAM, without reconciling or locking.
+
+        `active_key` refreshes first, which probes every port and waits on
+        the lock - and the lock is held for the whole of a load. This is for
+        the header indicator, which has to keep answering *during* a load,
+        so it reads the recorded state as it stands. That state can be a
+        moment stale, which is the right trade for something polled every
+        few seconds; a STARTING model shows as starting, which is what the
+        person watching the header wants to know.
+        """
+        for status in self._statuses.values():
+            if status.spec.remote or status.spec.role != "chat":
+                continue
+            if status.state in (ModelState.READY, ModelState.STARTING):
+                return status
+        return None
+
     def refresh(self) -> None:
         """Reconcile recorded state with reality.
 
@@ -935,10 +998,14 @@ class ModelManager:
             status.adopted = False
             return True
 
-    def stop_all(self) -> None:
+    def stop_all(self) -> list[str]:
+        """Stop every model this manager started. Returns their keys."""
         with self._lock:
+            stopped = []
             for key in list(self._processes):
-                self.stop(key)
+                if self.stop(key):
+                    stopped.append(key)
+            return stopped
 
     def unload_idle(self) -> list[str]:
         """Stop models untouched for longer than the idle timeout.
@@ -1235,6 +1302,22 @@ class ModelManager:
         except OSError:
             pass
         return self._run_quiet(["ps", "-p", str(pid), "-o", "comm="]).strip().lower()
+
+    def port_holder(self, port: int, name_fragment: str) -> int | None:
+        """The pid on `port`, if its image name contains `name_fragment`.
+
+        The identity check is the whole point: a port declared ours can be
+        held by anything, and the answer to "is that the dev server" must
+        never be "probably". Nothing is killed here; see `kill_pid`.
+        """
+        pid = self.listener_pid(port)
+        if pid is None:
+            return None
+        return pid if name_fragment.lower() in self.process_name(pid) else None
+
+    def kill_pid(self, pid: int) -> None:
+        """Stop a process by pid. Only ever handed a pid `port_holder` vetted."""
+        self._kill(pid)
 
     def _stop_foreign(self, spec: ModelSpec) -> bool:
         """Stop a llama-server on one of our ports that we did not start.

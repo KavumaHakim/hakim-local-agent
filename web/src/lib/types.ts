@@ -102,6 +102,22 @@ export interface Model {
   notes: string[]
 }
 
+/** The header's resources indicator. Cheap on the server; polled. */
+export interface ResourcesResponse {
+  total_mb: number | null
+  available_mb: number | null
+  load_percent: number | null
+  resident_key: string | null
+  resident_label: string | null
+  resident_state: string | null
+}
+
+export interface ShutdownResponse {
+  stopped_models: string[]
+  stopped_ui: boolean
+  note: string
+}
+
 export interface ModelsResponse {
   models: Model[]
   default_key: string

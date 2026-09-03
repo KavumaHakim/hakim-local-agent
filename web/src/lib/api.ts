@@ -17,8 +17,10 @@ import type {
   ModelOverride,
   ModelsResponse,
   RescanResponse,
+  ResourcesResponse,
   RewindResult,
   OcrBackend,
+  ShutdownResponse,
   SpeechStatus,
   StopTurnResult,
   Transcript,
@@ -223,6 +225,15 @@ export const api = {
     request<ModelsResponse>(`/models/${encodeURIComponent(key)}/unload`, {
       method: 'POST',
     }),
+
+  /** RAM and the resident model. Lock-free on the server, so safe to poll. */
+  resources: () => request<ResourcesResponse>('/resources'),
+
+  /**
+   * Unload every model and stop both servers. The API answers, then exits,
+   * so anything after this fails - which is the point.
+   */
+  shutdown: () => request<ShutdownResponse>('/shutdown', { method: 'POST' }),
 
   /**
    * Upload an image for OCR.

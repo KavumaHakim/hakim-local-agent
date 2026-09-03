@@ -716,6 +716,30 @@ class DirectoryOut(BaseModel):
 # --- health ---
 
 
+class ResourcesOut(BaseModel):
+    """What the machine has left, for the indicator in the header.
+
+    Deliberately not a view of /models: that route reconciles every port and
+    waits on the manager lock, so polling it during a load would freeze for
+    exactly as long as the load takes. This costs one syscall and no lock.
+    """
+
+    total_mb: int | None
+    available_mb: int | None
+    load_percent: int | None
+    # The local chat model holding RAM right now, and what it is doing -
+    # "ready", or "starting" while it loads. None when nothing is resident.
+    resident_key: str | None
+    resident_label: str | None
+    resident_state: str | None
+
+
+class ShutdownOut(BaseModel):
+    stopped_models: list[str]
+    stopped_ui: bool
+    note: str
+
+
 class HealthOut(BaseModel):
     ok: bool
     busy: bool
