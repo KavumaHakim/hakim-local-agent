@@ -525,8 +525,16 @@ function SettingsPane({
             <span className="font-mono">{models.router_strong}</span>
           </p>
           <p className="mb-1">
-            One model resident at a time; unloads after{' '}
-            {models.idle_timeout_seconds}s idle.
+            {/* 0 disables the idle sweep, and "unloads after 0s idle" would
+                say the exact opposite of what happens. */}
+            {models.idle_timeout_seconds > 0 ? (
+              <>
+                One model resident at a time; unloads after{' '}
+                {models.idle_timeout_seconds}s idle.
+              </>
+            ) : (
+              <>One model resident at a time; stays loaded until unloaded.</>
+            )}
           </p>
           <p className="flex items-center gap-1.5">
             {models.online ? (

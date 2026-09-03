@@ -294,10 +294,12 @@ with a larger window for that work.
 3. **Turn off Thinking** unless the question needs it. It does not change
    tok/s, it changes how many tokens are generated — hundreds of them, at
    2 tok/s.
-4. **Mind the idle timeout.** `idle_timeout_seconds` in `models.json` is 300.
+4. **Mind the idle timeout.** `idle_timeout_seconds` in `models.json` is 1800.
    When the model unloads, its KV cache goes with it, so the next message pays
-   both the reload and the full prefix again. Raise it if you have RAM to
-   spare and think in long pauses.
+   both the reload and the full prefix again. Half an hour is long enough to
+   sit through a working pause and short enough that a model you have finished
+   with gives its RAM back. Set it to 0 to disable unloading entirely, but on
+   8 GB that leaves a large model resident forever.
 5. **Use a smaller model.** At 2 tok/s the model is the ceiling, and the 8B is
    far slower still.
 6. **Offload to an integrated GPU, if you have one and a build that can reach
@@ -965,7 +967,9 @@ Port 8081 is deliberately skipped — it is reserved for GLM-OCR.
 - **Waits for `/health`** before reporting ready. Process started ≠ model loaded.
 - **Detects crashes** — a server that dies on its own shows as `FAILED` with its
   exit code, and can be restarted.
-- **Unloads after idle** (`idle_timeout_seconds`, default 300) to give RAM back.
+- **Unloads after idle** (`idle_timeout_seconds`, default 1800) to give RAM
+  back. 0 disables it, and the model then stays loaded until it is unloaded or
+  displaced.
 
 States: `stopped → starting → ready → stopping → stopped`, plus `failed`.
 
