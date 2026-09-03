@@ -130,9 +130,19 @@ export function ReasoningPanel({
         <div className="mb-1 flex">
           <CopyButton text={text} className="ml-auto" />
         </div>
-        <p className="font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-muted">
-          {text}
-        </p>
+        {/*
+          Rendered, not shown as source. A model reasoning about chemistry
+          writes the same tables and equations in its thinking as in its
+          answer, and a trace full of raw pipes and backslashes is the
+          hardest part of the reply to read, not the easiest.
+
+          A partial trace is fine: the block readers all terminate on the end
+          of the text rather than requiring a closing delimiter, so a half
+          written table or equation renders as far as it has arrived.
+        */}
+        <div className="text-[12.5px] text-muted">
+          <Markdown text={text} />
+        </div>
         {!live && (
           <p className="mt-2 border-t border-line pt-2 text-[11px] text-faint">
             Not saved — the model is never shown its own thinking again, and
