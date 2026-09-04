@@ -120,6 +120,9 @@ class ConversationOut(BaseModel):
     created_at: str
     updated_at: str
     message_count: int = 0
+    # False while the name is still the first line of the first question, so
+    # the sidebar can show a placeholder as provisional rather than final.
+    titled: bool = False
 
 
 class ConversationDetail(ConversationOut):

@@ -13,6 +13,7 @@ this size.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -26,7 +27,11 @@ CREATE TABLE IF NOT EXISTS conversations (
     title       TEXT    NOT NULL,
     model_key   TEXT,
     created_at  TEXT    NOT NULL,
-    updated_at  TEXT    NOT NULL
+    updated_at  TEXT    NOT NULL,
+    -- Whether the name is a real one - written by the model or by a person -
+    -- rather than the first line of the question. What stops the namer from
+    -- overwriting a title somebody chose.
+    titled      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -57,6 +62,8 @@ class Conversation:
     model_key: str | None
     created_at: str
     updated_at: str
+    # False while the name is still the first line of the first question.
+    titled: bool = False
     message_count: int = 0
 
 
@@ -100,6 +107,55 @@ def make_title(text: str) -> str:
     return cleaned[: TITLE_LENGTH - 1].rstrip() + "…"
 
 
+# What a model wraps a title in when it does not simply answer with one.
+_TITLE_PREFIXES = (
+    "title:", "here is a title:", "here's a title:", "sure:", "sure,",
+    "conversation title:", "suggested title:", "the title is:",
+)
+
+
+def clean_title(raw: str) -> str:
+    """Turn what a model said into something that fits a sidebar row.
+
+    Small models do not answer "give me a title" with a title. They answer
+    with `**Title:** "Potassium Chromate Solubility"`, or with three
+    candidates on separate lines, or with a sentence explaining the choice.
+    All of that has to come off, and the result has to be recognisably a name
+    - so an empty result here means the caller keeps the one it had rather
+    than showing something worse than the question it replaced.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+
+    # Only ever the first line: several candidates come back as a list.
+    text = text.splitlines()[0].strip()
+    # Emphasis first, and the order matters: stripping bullets before this
+    # takes one asterisk off `**Title:**` and leaves `*Title:` behind.
+    text = text.replace("**", "").replace("__", "").strip()
+    # Numbered or bulleted, if it was the first of several candidates.
+    text = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", text)
+
+    lowered = text.lower()
+    for prefix in _TITLE_PREFIXES:
+        if lowered.startswith(prefix):
+            text = text[len(prefix):].strip()
+            break
+
+    # Surrounding quotes, which most models add and none of them mean.
+    if len(text) >= 2 and text[0] in "\"'“‘" and text[-1] in "\"'”’":
+        text = text[1:-1].strip()
+
+    text = " ".join(text.split()).rstrip(".")
+    if not text:
+        return ""
+    # A model that ignored the instruction and wrote a paragraph has not
+    # given us a title, and half a paragraph is not one either.
+    if len(text) > TITLE_LENGTH:
+        return ""
+    return text
+
+
 class ChatStore:
     """Conversation history for the agent."""
 
@@ -108,6 +164,26 @@ class ChatStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            self._add_missing_columns(connection)
+
+    @staticmethod
+    def _add_missing_columns(connection: sqlite3.Connection) -> None:
+        """Bring an older database up to the current schema.
+
+        `CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+        exists, so a column added later has to be added here too - and this
+        database has real conversations in it, so recreating the table is not
+        an option.
+        """
+        existing = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(conversations)")
+        }
+        if "titled" not in existing:
+            connection.execute(
+                "ALTER TABLE conversations "
+                "ADD COLUMN titled INTEGER NOT NULL DEFAULT 0"
+            )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -135,11 +211,21 @@ class ChatStore:
             )
             return int(cursor.lastrowid)
 
-    def rename_conversation(self, conversation_id: int, title: str) -> None:
+    def rename_conversation(
+        self, conversation_id: int, title: str, *, titled: bool = True
+    ) -> None:
+        """Rename a conversation.
+
+        `titled` defaults to True because the ordinary caller is a person
+        renaming it by hand, and that must never be overwritten afterwards.
+        The one caller that passes False is the placeholder name derived from
+        the question, which the namer is meant to replace.
+        """
         with self._connect() as connection:
             connection.execute(
-                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-                (title, _now(), conversation_id),
+                "UPDATE conversations SET title = ?, titled = ?, updated_at = ? "
+                "WHERE id = ?",
+                (title, 1 if titled else 0, _now(), conversation_id),
             )
 
     def delete_conversation(self, conversation_id: int) -> None:
@@ -177,6 +263,7 @@ class ChatStore:
                 model_key=row["model_key"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
+                titled=bool(row["titled"]),
                 message_count=row["message_count"],
             )
             for row in rows
@@ -199,6 +286,7 @@ class ChatStore:
             model_key=row["model_key"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            titled=bool(row["titled"]),
             message_count=row["message_count"],
         )
 
@@ -255,6 +343,95 @@ class ChatStore:
                 )
             )
         return messages
+
+    def delete_message(self, conversation_id: int, message_id: int) -> bool:
+        """Delete one message, leaving everything around it.
+
+        Different from `truncate_from`, and both are wanted: rewinding is for
+        changing what was asked, where everything downstream was a reply to
+        the old question. This is for removing one thing - a wrong answer, a
+        question typed twice - and keeping the rest of the conversation.
+
+        Structurally safe because tool calls live as JSON on the assistant
+        message rather than as rows of their own, so there is no result left
+        pointing at a call that no longer exists. What it can leave is a gap
+        in the back-and-forth - two questions in a row - which the model reads
+        as exactly what the transcript now shows, and which is the point.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM messages WHERE id = ? AND conversation_id = ?",
+                (message_id, conversation_id),
+            )
+            if not cursor.rowcount:
+                return False
+            connection.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (_now(), conversation_id),
+            )
+            return True
+
+    def fork_conversation(self, conversation_id: int, message_id: int) -> int | None:
+        """Copy a conversation up to and including `message_id` into a new one.
+
+        For trying a second direction without losing the first. The copy is a
+        real conversation from the moment it exists - its own rows, its own
+        id - so the two cannot drift into sharing anything.
+
+        The name is carried over rather than re-derived, with `titled` reset:
+        the fork is about to diverge, and whatever it becomes deserves its own
+        name from the namer rather than inheriting one about the other branch.
+        """
+        with self._connect() as connection:
+            original = connection.execute(
+                "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if original is None:
+                return None
+
+            # Checked for existence first, and not merely relied on by the
+            # `id <=` below: an id that is not in this conversation still
+            # satisfies "less than or equal", so a wrong one would silently
+            # copy the whole conversation instead of failing.
+            marker = connection.execute(
+                "SELECT 1 FROM messages WHERE id = ? AND conversation_id = ?",
+                (message_id, conversation_id),
+            ).fetchone()
+            if marker is None:
+                return None
+
+            rows = connection.execute(
+                "SELECT role, content, tools, elapsed, model_key, created_at "
+                "FROM messages WHERE conversation_id = ? AND id <= ? ORDER BY id",
+                (conversation_id, message_id),
+            ).fetchall()
+            if not rows:
+                return None
+
+            stamp = _now()
+            cursor = connection.execute(
+                "INSERT INTO conversations (title, model_key, created_at, "
+                "updated_at, titled) VALUES (?, ?, ?, ?, 0)",
+                (original["title"], original["model_key"], stamp, stamp),
+            )
+            new_id = int(cursor.lastrowid)
+            connection.executemany(
+                "INSERT INTO messages (conversation_id, role, content, tools, "
+                "elapsed, model_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        new_id,
+                        row["role"],
+                        row["content"],
+                        row["tools"],
+                        row["elapsed"],
+                        row["model_key"],
+                        row["created_at"],
+                    )
+                    for row in rows
+                ],
+            )
+            return new_id
 
     def truncate_from(self, conversation_id: int, message_id: int) -> int:
         """Delete a message and everything after it. Returns how many went.

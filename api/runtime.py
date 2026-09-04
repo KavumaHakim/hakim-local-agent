@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 from agent.loop import Agent, AgentError, IterationLimitError, ToolEvent, TurnStopped
 from agent.router import TaskRouter
-from chat_store import ChatStore
+from chat_store import ChatStore, clean_title
 from config import Config, load_config
 from models.connectivity import Connectivity
 from models.manager import ModelManager, ModelManagerError, ModelSpec
@@ -570,6 +570,61 @@ class Runtime:
         """Make `key` resident, returning its base URL."""
         return self.manager.ensure(key)
 
+    def name_conversation(self, turn: Turn, conversation_id: int, client: Any) -> None:
+        """Ask the model for a name, once, after a conversation's first answer.
+
+        The alternative was the first sixty characters of the question, which
+        is not a name - it is the question with its end cut off.
+
+        Only on the first exchange. A conversation that has been going for an
+        hour has a name someone has read, and renaming it under them would be
+        worse than a plain one. Anything the user has renamed by hand is
+        equally left alone, since `titled` is only set by this.
+
+        The prompt is bare on purpose: no system prompt, no tool schemas, no
+        history beyond the exchange itself. The roster alone is hundreds of
+        tokens the model does not need in order to write four words, and on
+        this hardware those tokens are seconds.
+
+        Never raises. A conversation keeping its plain name is not a failed
+        turn, and by this point the answer has already been delivered.
+        """
+        try:
+            if self.store.message_count(conversation_id) > 2:
+                return
+            conversation = self.store.get_conversation(conversation_id)
+            if conversation is None or conversation.titled:
+                return
+
+            messages = self.store.get_messages(conversation_id)
+            question = next((m.content for m in messages if m.role == "user"), "")
+            answer = next((m.content for m in messages if m.role == "assistant"), "")
+            if not question.strip():
+                return
+
+            if not hasattr(client, "short_answer"):
+                return  # a hosted client, or a fake in a test
+
+            turn.emit("title", conversation_id=conversation_id, title=None)
+            raw = client.short_answer(
+                "Give this conversation a short title: four or five words, no "
+                "quotes, no punctuation at the end, nothing else in your "
+                "reply.\n\n"
+                f"Question: {question[:400]}\n"
+                f"Answer: {answer[:400]}"
+            )
+            title = clean_title(raw)
+            if not title:
+                # The model rambled or said nothing useful. The heuristic name
+                # is already there and is better than a bad one.
+                turn.emit("title", conversation_id=conversation_id, title=None)
+                return
+
+            self.store.rename_conversation(conversation_id, title, titled=True)
+            turn.emit("title", conversation_id=conversation_id, title=title)
+        except Exception:  # noqa: BLE001 - a name is never worth a failed turn
+            turn.emit("title", conversation_id=conversation_id, title=None)
+
     # --- the turn itself ---
 
     def run_turn(self, turn: Turn) -> None:
@@ -653,8 +708,11 @@ class Runtime:
             # off has to switch the injection off too - otherwise the roster
             # would say "no memory" while the prompt was full of it.
             memory = self.memory() if config.memory_tool_enabled else None
+            # Held rather than built inline: the namer reuses it, so a turn
+            # opens one client and not two.
+            client = self.make_client(config, spec)
             agent = Agent(
-                self.make_client(config, spec),
+                client,
                 config,
                 registry,
                 memory=memory,
@@ -739,7 +797,15 @@ class Runtime:
                 model_key=target,
                 memory=memory_note,
                 context=agent.context_report,
+                # `_seconds` is working state for deriving the rate, not
+                # something anyone wants to read.
+                stats={k: v for k, v in agent.stats.items() if not k.startswith("_")},
             )
+
+            # After the answer is on screen, never before it. Naming the
+            # conversation is worth a few seconds of a model that is already
+            # loaded, but not worth delaying the thing that was asked for.
+            self.name_conversation(turn, request.conversation_id, client)
 
         except TurnStopped:
             # Asked for, not a failure - so it is reported as its own thing
@@ -811,7 +877,10 @@ def open_conversation(
 
     if conversation_id is not None:
         if runtime.store.message_count(conversation_id) == 0:
-            runtime.store.rename_conversation(conversation_id, make_title(prompt))
+            # titled=False: this is the placeholder the namer replaces.
+            runtime.store.rename_conversation(
+                conversation_id, make_title(prompt), titled=False
+            )
         return conversation_id
     return runtime.store.create_conversation(
         title=make_title(prompt), model_key=model_key

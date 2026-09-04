@@ -81,6 +81,38 @@ class ChatClient(Protocol):
     # on a model round once it has started.
 
 
+def _absorb_stats(stats: dict[str, Any], chunk: dict[str, Any]) -> None:
+    """Pull whatever throughput numbers a chunk carries into `stats`.
+
+    Merged rather than replaced, because the two sources arrive separately and
+    neither is guaranteed: `timings` rides on every chunk when
+    timings_per_token is honoured, `usage` comes once at the end, and a build
+    that supports neither simply leaves this empty. Later values win, so the
+    final chunk's totals replace the running ones.
+    """
+    timings = chunk.get("timings")
+    if isinstance(timings, dict):
+        for source, target in (
+            ("predicted_per_second", "tokens_per_second"),
+            ("predicted_n", "output_tokens"),
+            ("prompt_per_second", "prompt_tokens_per_second"),
+            ("prompt_n", "prompt_tokens"),
+        ):
+            value = timings.get(source)
+            if isinstance(value, (int, float)):
+                stats[target] = value
+
+    usage = chunk.get("usage")
+    if isinstance(usage, dict):
+        for source, target in (
+            ("completion_tokens", "output_tokens"),
+            ("prompt_tokens", "prompt_tokens"),
+        ):
+            value = usage.get(source)
+            if isinstance(value, int):
+                stats[target] = value
+
+
 def _is_loopback(url: str) -> bool:
     """Whether `url` names this machine, where a proxy can only get in the way."""
     host = (urlsplit(url).hostname or "").lower()
@@ -136,6 +168,38 @@ class QwenClient:
         data = self._post("/v1/chat/completions", payload)
         return self._extract_message(data)
 
+    def short_answer(self, prompt: str, *, max_tokens: int = 24) -> str:
+        """One small completion, with none of a turn's baggage.
+
+        Deliberately bare: no system prompt, no tools, no history. Used for
+        naming a conversation, where all of that would be paid for and none of
+        it would help - the roster alone is hundreds of tokens the model does
+        not need in order to write four words.
+
+        Thinking is forced off whatever the config says. A reasoning model
+        asked for a title will happily deliberate for minutes over one, which
+        is the whole cost this method exists to avoid.
+
+        Returns "" rather than raising: a conversation with a plainer name is
+        not a failed turn, and the caller is usually past the point where an
+        error could be reported.
+        """
+        payload = {
+            "model": self._config.qwen_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.2,
+            "max_tokens": max_tokens,
+            "stream": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        try:
+            data = self._post("/v1/chat/completions", payload)
+            choices = data.get("choices") or []
+            content = (choices[0].get("message") or {}).get("content") if choices else ""
+            return (content or "").strip()
+        except (QwenError, KeyError, IndexError, TypeError, AttributeError):
+            return ""
+
     def chat_stream(
         self,
         messages: Iterable[Message],
@@ -160,13 +224,25 @@ class QwenClient:
         """
         payload = self._build_payload(messages, tools)
         payload["stream"] = True
+        # llama-server measures its own throughput far better than we could
+        # from this side: it knows when the first token was actually produced,
+        # where we only know when it reached us through the SSE stream. Both
+        # are asked for because they come from different builds - `timings` is
+        # llama.cpp's own, `usage` is the OpenAI-compatible one - and whichever
+        # arrives is used.
+        payload["timings_per_token"] = True
+        payload["stream_options"] = {"include_usage": True}
 
         content: list[str] = []
         # Tool call fragments arrive spread over chunks, keyed by index.
         partial_calls: dict[int, dict[str, Any]] = {}
         reasoning_chars = 0
+        stats: dict[str, Any] = {}
 
         for chunk in self._stream("/v1/chat/completions", payload):
+            # Carried on chunks of their own, usually the last one - which has
+            # an empty `choices`, so this has to come before the guard below.
+            _absorb_stats(stats, chunk)
             if should_stop is not None and should_stop():
                 # Leaving the loop closes the generator, which closes the
                 # response, which drops the connection - and llama-server
@@ -208,6 +284,8 @@ class QwenClient:
         if reasoning_chars:
             # Length only - the text itself is deliberately dropped.
             message["reasoning_chars"] = reasoning_chars
+        if stats:
+            message["stats"] = stats
         return message
 
     # --- internals ---

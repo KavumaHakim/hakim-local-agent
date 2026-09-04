@@ -53,6 +53,67 @@ def rename_conversation(
 
 
 @router.delete(
+    "/{conversation_id}/messages/{message_id}/only", response_model=TruncateOut
+)
+def delete_one_message(
+    conversation_id: int,
+    message_id: int,
+    runtime: Runtime = Depends(get_runtime),
+):
+    """Delete a single message, leaving the rest of the conversation.
+
+    The other half of rewinding, and a different intent: rewinding changes
+    what was asked and everything downstream was a reply to the old question,
+    where this removes one thing and keeps the rest. Both are wanted.
+
+    Refused mid-turn for the same reason rewinding is: a queued turn's
+    history is read when it runs, so removing rows underneath it changes what
+    it is answering.
+    """
+    if runtime.store.get_conversation(conversation_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such conversation.")
+    if runtime.queue.busy() or runtime.queue.depth():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "A turn is still running or waiting. Deleting a message would "
+            "change what it is answering - stop it first.",
+        )
+    if not runtime.store.delete_message(conversation_id, message_id):
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "No such message in this conversation."
+        )
+    return TruncateOut(
+        removed=1,
+        emptied=runtime.store.message_count(conversation_id) == 0,
+    )
+
+
+@router.post(
+    "/{conversation_id}/messages/{message_id}/fork", response_model=ConversationOut
+)
+def fork(
+    conversation_id: int,
+    message_id: int,
+    runtime: Runtime = Depends(get_runtime),
+):
+    """Copy this conversation up to here into a new one, and return it.
+
+    For trying a second direction without losing the first. Not refused
+    mid-turn: nothing existing is touched, so a running turn is unaffected -
+    the copy stops at a message that was already stored.
+    """
+    if runtime.store.get_conversation(conversation_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such conversation.")
+
+    new_id = runtime.store.fork_conversation(conversation_id, message_id)
+    if new_id is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "No such message in this conversation."
+        )
+    return ConversationOut(**vars(runtime.store.get_conversation(new_id)))
+
+
+@router.delete(
     "/{conversation_id}/messages/{message_id}", response_model=TruncateOut
 )
 def rewind(

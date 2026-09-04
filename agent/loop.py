@@ -103,6 +103,9 @@ class Agent:
         # in a turn and the total is what anyone wants to know.
         self._dropped = 0
         self._truncated_results = 0
+        # What the server said about its own throughput this turn. Reported to
+        # the UI; never sent to the model.
+        self.stats: dict[str, Any] = {}
         # Off by default. When on, the roster reaches the model as a short
         # index and opens a group at a time - see tools/lens.py. It lives on
         # the Agent rather than the registry because what has been opened is a
@@ -163,6 +166,7 @@ class Agent:
         # asked about.
         self._dropped = 0
         self._truncated_results = 0
+        self.stats = {}
 
         if self._lens is not None:
             self._lens.consider(user_input)
@@ -179,6 +183,7 @@ class Agent:
             # and that request is the one that fails.
             self._trim_history()
             message = self._chat(definitions, on_token, on_reasoning, should_stop)
+            self._absorb_stats(message)
             # The client returns what it had when it stopped, so the check has
             # to be here rather than inside it: a partial message is not an
             # answer, and parsing it as one would put a truncated tool call
@@ -368,6 +373,34 @@ class Agent:
             report.get("estimated_tokens", 0) + report["tool_tokens"]
         )
         return report
+
+    def _absorb_stats(self, message: dict[str, Any]) -> None:
+        """Fold one round's throughput numbers into the turn's.
+
+        A turn with tool calls is several generations, and what someone wants
+        to know is what the turn cost. Token counts add up; the rate does not,
+        so it is re-derived from the totals at the end - a mean weighted by
+        how much each round actually produced, rather than the mean of the
+        rates, which would let a two-token round count as much as a long one.
+        """
+        stats = message.pop("stats", None)
+        if not isinstance(stats, dict) or not stats:
+            return
+
+        for key in ("output_tokens", "prompt_tokens"):
+            value = stats.get(key)
+            if isinstance(value, (int, float)):
+                self.stats[key] = self.stats.get(key, 0) + value
+
+        # Seconds, accumulated, so the rate can be rebuilt across rounds.
+        rate = stats.get("tokens_per_second")
+        produced = stats.get("output_tokens")
+        if isinstance(rate, (int, float)) and rate > 0 and produced:
+            self.stats["_seconds"] = self.stats.get("_seconds", 0.0) + produced / rate
+
+        total, seconds = self.stats.get("output_tokens"), self.stats.get("_seconds")
+        if total and seconds:
+            self.stats["tokens_per_second"] = round(total / seconds, 2)
 
     def _definition_tokens(self) -> int:
         """Roughly what this round's tool schemas cost.
