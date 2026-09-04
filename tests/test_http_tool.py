@@ -39,6 +39,10 @@ class FakeResponse:
     def __exit__(self, *exc):
         return False
 
+    def close(self):
+        # The real one is released before the next hop is requested.
+        pass
+
 
 class FakeSession:
     def __init__(self):
@@ -74,11 +78,14 @@ class HostAllowlistTests(unittest.TestCase):
         self.assertEqual(c.check_url("http://127.0.0.1:8080/health"), "127.0.0.1")
         self.assertEqual(c.check_url("http://localhost:8080/x"), "localhost")
 
-    def test_external_host_refused(self):
+    def test_external_host_is_not_free(self):
+        """It is reachable now, but only after someone agrees to it."""
         c = client()
-        with self.assertRaises(HttpToolError) as ctx:
-            c.check_url("https://example.com/data")
-        self.assertIn("not an allowed host", str(ctx.exception))
+        self.assertEqual(c.check_url("https://example.com/data"), "example.com")
+        self.assertFalse(c.is_free_host("example.com"))
+        verdict = c.plan("https://example.com/data", "GET")
+        self.assertTrue(verdict.needs_approval)
+        self.assertIn("not on the allowed list", verdict.reason)
 
     def test_host_match_is_case_insensitive(self):
         self.assertEqual(client().check_url("http://LOCALHOST:80/"), "localhost")
@@ -87,11 +94,15 @@ class HostAllowlistTests(unittest.TestCase):
         c = client(allowed_hosts=("127.0.0.1", "example.com"))
         self.assertEqual(c.check_url("https://example.com/x"), "example.com")
 
-    def test_lookalike_host_refused(self):
-        # localhost.evil.com must not pass because it starts with localhost.
+    def test_lookalike_host_is_not_free(self):
+        """localhost.evil.com must not be treated as localhost by prefix.
+
+        It is no longer refused outright - nothing off the list is - but it
+        must land in the tier that asks, not the one that goes straight out.
+        """
         c = client()
-        with self.assertRaises(HttpToolError):
-            c.check_url("http://localhost.evil.com/x")
+        self.assertFalse(c.is_free_host("localhost.evil.com"))
+        self.assertTrue(c.plan("http://localhost.evil.com/x", "GET").needs_approval)
 
     def test_no_host_refused(self):
         with self.assertRaises(HttpToolError):
@@ -153,16 +164,19 @@ class MethodTests(unittest.TestCase):
         self.assertEqual(c.check_method("get"), "GET")
         self.assertEqual(c.check_method("HEAD"), "HEAD")
 
-    def test_write_methods_refused_by_default(self):
+    def test_write_methods_ask_by_default(self):
+        """They used to be impossible without the flag. Now they are shown
+        to someone, which is a different thing from happening unprompted."""
         c = client()
         for verb in ("POST", "PUT", "PATCH", "DELETE"):
-            with self.assertRaises(HttpToolError, msg=verb) as ctx:
-                c.check_method(verb)
-            self.assertIn("AGENT_HTTP_ALLOW_WRITES", str(ctx.exception))
+            verdict = c.plan("http://127.0.0.1/x", verb)
+            self.assertTrue(verdict.needs_approval, msg=verb)
+            self.assertIn("changes state", verdict.reason)
 
-    def test_write_methods_allowed_when_enabled(self):
+    def test_allow_writes_means_do_not_ask(self):
         c = client(allow_writes=True)
         self.assertEqual(c.check_method("post"), "POST")
+        self.assertFalse(c.plan("http://127.0.0.1/x", "POST").needs_approval)
 
     def test_unknown_method_refused(self):
         with self.assertRaises(HttpToolError):
@@ -177,7 +191,9 @@ class RedirectTests(unittest.TestCase):
         c.request("http://127.0.0.1:8080/x")
         self.assertFalse(c._session.calls[0]["allow_redirects"])
 
-    def test_redirect_is_reported_not_followed(self):
+    def test_a_redirect_off_the_allowlist_is_reported_not_followed(self):
+        """Within the allowed hosts they are followed now; this one is not,
+        because the next hop would never have passed the check."""
         c = client()
         c._session.response = FakeResponse(
             status=302,
@@ -189,7 +205,7 @@ class RedirectTests(unittest.TestCase):
 
         self.assertEqual(result["status"], 302)
         self.assertEqual(result["redirect_to"], "https://evil.example.com/steal")
-        self.assertIn("not followed", result["body"])
+        self.assertIn("not on the allowed list", result["body"])
         # Only the original request was made.
         self.assertEqual(len(c._session.calls), 1)
 
@@ -310,7 +326,9 @@ class RegistrationTests(unittest.TestCase):
         )
         self.assertIn("127.0.0.1", tool.description)
         self.assertIn("GET", tool.description)
-        self.assertNotIn("DELETE", tool.description)
+        # Every method is offered now; the description says which ones ask.
+        self.assertIn("DELETE", tool.description)
+        self.assertIn("approval", tool.description)
 
     def test_refusal_through_the_registry_is_structured(self):
         tool = build_http_tool(
@@ -318,9 +336,20 @@ class RegistrationTests(unittest.TestCase):
             allow_writes=False,
         )
         registry = ToolRegistry([tool])
+        result = registry.execute("http_request", {"url": "file:///etc/passwd"})
+        self.assertFalse(result.ok)
+        self.assertIn("http and https", result.payload["error"])
+
+    def test_a_gated_request_with_nobody_to_ask_is_refused(self):
+        """No approver wired in means the gate fails closed, not open."""
+        tool = build_http_tool(
+            allowed_hosts=("127.0.0.1",), timeout=5, max_bytes=100,
+            allow_writes=False,
+        )
+        registry = ToolRegistry([tool])
         result = registry.execute("http_request", {"url": "https://example.com"})
         self.assertFalse(result.ok)
-        self.assertIn("not an allowed host", result.payload["error"])
+        self.assertIn("nobody to ask", result.payload["error"])
 
 
 if __name__ == "__main__":

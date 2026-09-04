@@ -151,6 +151,7 @@ def build_default_registry(
                 timeout=config.http_timeout,
                 max_bytes=config.http_max_bytes,
                 allow_writes=config.http_allow_writes,
+                approve=approve,
             )
         )
     else:

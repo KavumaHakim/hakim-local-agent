@@ -1569,30 +1569,45 @@ interpreter (`node`, `powershell`, `bash`) hands over arbitrary execution.
 
 ### http — read this before widening it
 
-Set `AGENT_ENABLE_HTTP_TOOL=1` to enable. It defaults to **loopback only**, so
-the agent can inspect your own services — the llama servers included — without
-being able to reach the internet.
+Set `AGENT_ENABLE_HTTP_TOOL=1` to enable. The host allowlist defaults to
+**loopback only**, and that is now the line between *free* and *asked* rather
+than between *allowed* and *refused*.
 
-Adding a public host to `AGENT_HTTP_HOSTS` is what turns this from a
-local-service inspector into a web client, and it is the point at which the
-project stops being local-only. That is a deliberate decision, not a default.
+| Tier | What | Behaviour |
+|---|---|---|
+| Free | `GET`/`HEAD` to `127.0.0.1`, `localhost`, `::1` | Goes straight out — the case the tool exists for |
+| Approved | Any other host; any `POST`/`PUT`/`PATCH`/`DELETE` | Turn blocks, the method and full url are shown, goes only on a yes |
+| Refused | `file://` and other schemes, `user:pass@host`, urls with whitespace, unknown methods | No prompt could sensibly stand in for these |
 
-**Redirects are refused, not followed.** This is the layer that matters most
-and the one that is easy to get wrong: an allowed host answering `302` with a
-`Location` pointing anywhere would walk straight out of the allowlist, and
-following it would mean validating one URL while fetching another. The redirect
-is reported to the model instead, which can request the new URL and have it
-checked properly.
+Reaching a public host used to require setting `AGENT_HTTP_HOSTS` before the
+process started, and a `POST` to your own local API was impossible without
+`AGENT_HTTP_ALLOW_WRITES=1`. Both were friction rather than protection: the
+env vars are set once and forgotten, where a prompt shows you *this* request.
+`AGENT_HTTP_ALLOW_WRITES=1` now means "don't ask me about writes", for someone
+driving a local API who does not want a prompt every call.
+
+**Redirects are followed only within the free list.** An allowed host answering
+`302` with a `Location` pointing anywhere would walk straight out of the
+allowlist, so every hop is re-parsed and re-checked: one landing on a free host
+is followed (up to 5), one landing anywhere else is reported so the model
+requests it separately and you see *that* host in its own prompt. Refusing
+every redirect was the old behaviour, and it made `http://host/x` →
+`http://host/x/` a dead end — friction protecting nothing, since the second url
+passes exactly the check the first one did.
 
 | Layer | Stops |
 |---|---|
-| Host allowlist | Checked against the parsed hostname, so `localhost.evil.com` does not pass by prefix |
-| Scheme allowlist | `http`/`https` only. Without it, `file://` would be an unrestricted file reader that ignores the workspace jail |
-| No redirect following | A permitted host bouncing the request to an unpermitted one |
-| Read-only by default | `POST`/`PUT`/`PATCH`/`DELETE` need `AGENT_HTTP_ALLOW_WRITES=1` |
+| Host allowlist | Checked against the parsed hostname, so `localhost.evil.com` is not free by prefix — it lands in the tier that asks |
+| Scheme allowlist | `http`/`https` only, and still a hard refusal: `file://` is not a network request, it is an unrestricted file reader that ignores the workspace jail |
+| Per-hop redirect checks | A permitted host bouncing the request to an unpermitted one without anyone seeing it |
+| Writes ask | `POST`/`PUT`/`PATCH`/`DELETE` are shown before they are sent, unless `AGENT_HTTP_ALLOW_WRITES=1` |
 | `trust_env = False` | Proxy settings and `.netrc` credentials riding along on a request the model composed |
-| URL credential check | `user:pass@host` being quietly forwarded |
+| URL credential check | `user:pass@host` being quietly forwarded — a refusal, because nobody should be asked to eyeball a password and judge it |
 | Size cap, timeout | 100 KB, 20 s. Binary bodies are described, not dumped into the conversation |
+
+**What approval is not.** It means a person read the method and the url before
+it went. It does not mean the response is safe to act on — what comes back is
+still text a model will read, from a host you agreed to once.
 
 A non-2xx status is reported rather than raised — `404` is an answer to a
 question, and the model should see it.
@@ -3038,9 +3053,6 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 
 **Giving the model more room:**
 
-- **`tools/http_tool.py` next**, the same question asked of the terminal: which
-  of its refusals protect something and which are only friction. It now has a
-  worked example to follow, including the approval gate.
 - Real sandboxing for the Python tool (container or VM). This is what would
   make `python -c` gateable rather than refused outright — approval alone
   cannot do it, for the reason given under the terminal tool.
@@ -3074,6 +3086,12 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 - **The filesystem tool on a live turn** — Gemma called `list_directory` and
   read the workspace root back correctly, with the tool arriving through the
   lens rather than being sent up front.
+- **The HTTP tool, same treatment.** Any host and any method are now reachable
+  with approval, where a public host needed an env var and a `POST` needed a
+  second one. Redirects are followed within the allowlist instead of always
+  refused — the old rule made `http://host/x` → `http://host/x/` a dead end.
+  `file://` and url credentials stay refused: a prompt cannot stand in for
+  either.
 - **The terminal tool, widened with a consent gate** — 4 allowed commands to
   46. Reading runs; changing asks a person and shows them the exact command
   line; interpreters stay refused, because a prompt nobody can audit is a
