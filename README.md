@@ -240,6 +240,24 @@ writes anything. This is the reason tool descriptions here are terse and the
 reason tools are off by default — it is not caution about capability, it is
 that each one has a measurable price.
 
+**That table is what a turn costs with the lens off.** It is on by default now,
+and it sends a short index instead of the whole roster, expanding a group only
+once the conversation looks like it needs one. The roster has grown to 26 tools
+since those timings were taken; the lens is why that did not make turns slower:
+
+| | tools sent | est. tokens | ≈ at 14.5 tok/s |
+|---|---|---|---|
+| whole roster, lens off | 26 | 3,991 | ~275 s |
+| **lens, first turn** | **3** | **632** | **~44 s** |
+| + filesystem | 5 | 1,107 | ~76 s |
+| + terminal | 6 | 1,373 | ~95 s |
+| + git | 10 | 1,876 | ~129 s |
+
+A conversation that only ever touches files pays for `filesystem`; one that
+wanders into git pays for both. Neither pays for OCR, HTTP, memory and
+documents it never opens. See [the tool lens](#the-tool-lens) for how a group
+opens and why it never closes again.
+
 ### Hitting the context window
 
 A 4,096-token model has less room than it sounds. The system prompt and tool
@@ -287,8 +305,9 @@ with a larger window for that work.
 
 ### So, to make it faster
 
-1. **Turn off tools you are not using.** Biggest single lever, and it is a
-   switch in the sidebar.
+1. **Turn off tools you are not using.** Still worth doing — the lens defers a
+   tool's schema, it cannot defer one the conversation actually opens — but
+   much less of a lever than it was, and it is a switch in the sidebar.
 2. **Keep the conversation going** rather than starting a new one. The prefix
    is cached; a new conversation pays it again.
 3. **Turn off Thinking** unless the question needs it. It does not change
@@ -770,7 +789,10 @@ Hakim Local Agent/
 ├── .gitignore           keeps weights/ and data/ out of any repo
 │
 ├── weights/             the GGUF model files (~9.5 GB, git-ignored)
-├── data/                generated state: the SQLite database, and rag/ index
+├── data/                generated state: the SQLite database, the rag/ index,
+│                        offloaded tool results, the MCP tool cache
+├── skills/              written instructions the model can ask for by name
+├── mcp.example.json     copy to mcp.json to add MCP servers (git-ignored)
 ├── uploads/             images attached in the UI (git-ignored)
 ├── samples/             example images for the OCR tool
 ├── .env                 API keys for hosted models (git-ignored)
@@ -845,6 +867,10 @@ Hakim Local Agent/
 ├── tools/
 │   ├── base.py          Tool, ToolRegistry, argument validation
 │   ├── registry.py      builds the default tool set
+│   ├── lens.py          which schemas a turn actually sends
+│   ├── skills.py        instruction packs, indexed and loaded by name
+│   ├── results.py       results too large for the window, kept on disk
+│   ├── mcp_client.py    MCP servers over stdio, no SDK
 │   ├── calculator.py    safe expression evaluator
 │   ├── filesystem.py    workspace-jailed list + read
 │   ├── python_tool.py   restricted Python (disabled by default)
@@ -857,7 +883,7 @@ Hakim Local Agent/
 │   ├── document_search.py  semantic search over indexed files
 │   └── web.py           placeholder
 │
-└── tests/               1140 tests, no server required
+└── tests/               1343 tests, no server required
 ```
 
 ---
@@ -1425,9 +1451,16 @@ turn; guessing big wastes minutes on every simple question.
 | `http_request` | http | **off by default** |
 | `ocr_image` | ocr | **off by default** — Tesseract or the GLM-OCR model |
 | `search_documents`, `list_documents`, `get_document_outline` | documents | **off by default** |
+| `load_tools` | — | **on** — the lens's own index of what is still closed |
+| `load_skill` | skills | **on** when `skills/` has anything in it |
+| `read_result` | results | **on**, but never offered until a result overflows |
+| `<server>__<tool>` | `mcp:<server>` | one per tool an MCP server offers |
 
 Disabled tools are not registered at all — sending the model a definition it can
 only fail on wastes context and a whole round-trip.
+
+Registered is not the same as *sent*. With the lens on, most of this table
+reaches the model as a one-line summary until the conversation needs it.
 
 **Turning them on.** Each of these has an environment variable, listed in
 [section 13](#13-configuration), and each can also be switched from the
@@ -1439,6 +1472,55 @@ separate switches nested under their tool, and go off with it.
 Read the section for a tool before enabling it. What each one can and cannot
 protect you from is written there, and the same text appears next to its
 switch.
+
+### The tool lens
+
+`AGENT_LAZY_TOOLS=1`, **on by default.** Every registered tool's JSON schema
+otherwise travels with every request — 26 tools, about 3,991 tokens, four
+minutes of prompt processing before the model writes a word. Most of them are
+irrelevant to the question being asked, and a small model choosing between 26
+schemas chooses worse than one choosing between five.
+
+So a turn sends a short index instead, and expands a group's real schemas only
+once the conversation looks like it needs them. Two things open a group:
+
+- **the heuristic**, scored against your message before the first request. Free,
+  and right often enough that the common case never spends a round trip. It is
+  deliberately narrow — a miss costs one round trip, a false positive is
+  permanent (below). Generic verbs like "run", "search" and "show" are left out
+  even though each would catch a real case; nouns, filename shapes like
+  `config.py`, path separators, and **every tool's own name** carry it instead.
+- **the model asking**, through `load_tools`, when the heuristic missed. The
+  index it reads lists each closed group, its tool count and what it is for.
+
+**Opening is monotonic, and that is the whole design.** `tools` is rendered
+into the prompt *prefix* by the chat template, ahead of the messages, so
+changing the set invalidates llama-server's prefix cache and re-reads the
+entire conversation — around 200 s here. Opening a group is therefore paid for
+once. Closing one again would cost a second cache miss to save context that has
+already been read, which is why nothing ever closes. The model router refuses
+to route back down for the same reason.
+
+Two groups are open from the start. `calculator`, because it is three lines and
+arithmetic is never wrong to have. `skills`, because its tool *is* the index —
+a model cannot ask for instructions it was never told exist, so gating that
+behind a keyword would hide the feature rather than defer it.
+
+`results` is deliberately **not**: it is registered on every turn and offered on
+none, until something actually overflows.
+
+The schemas a `load_tools` call unlocks arrive with the **next** request, not
+the one it was called in. The result says so explicitly, because a model told
+only "success" tends to guess at the arguments straight away and get them wrong.
+
+```json
+{"success": true, "loaded": ["git"], "already_loaded": [],
+ "tools": ["git_branches", "git_diff", "git_log", "git_status"],
+ "note": "These tools are available from your next message. Call one of them now."}
+```
+
+Turn it off with `AGENT_LAZY_TOOLS=0` and every registered tool is sent on every
+request, as it was before.
 
 ### calculator
 
@@ -2412,6 +2494,134 @@ default), so follow-up searches are ~0.3 s.
 ~5 GB of Qwen on an 8 GB machine is how you find the swap file. Index first,
 then chat — which is what the separate `python -m rag` entry point is for.
 
+### skills — written instructions, asked for by name
+
+A skill is *how we do this here*, written down once and kept out of the context
+until it is wanted. `search_documents` answers "what does my file say"; a skill
+answers "when you are asked to do X, do it like this", which is not a thing to
+retrieve from a corpus.
+
+Drop a markdown file in `skills/`. Either shape works:
+
+```
+skills/
+  chemistry-notation/
+    SKILL.md
+  quick-note.md
+```
+
+```markdown
+---
+name: plotting
+description: How charts are drawn and where they are saved
+tools: python, filesystem
+---
+
+Instructions go here, in markdown.
+```
+
+Frontmatter is optional — without it the filename is the name and the first
+non-empty line is the description, so a plain `.md` dropped in here works, which
+is what most people try first. There is no YAML parser: three keys did not
+justify the dependency. Names must be lowercase letters, digits and hyphens,
+and an enum on the tool stops the model inventing one.
+
+**`tools:` names the groups the instructions assume**, and loading the skill
+opens them in the lens. Instructions that say "plot it with matplotlib" are no
+use to a model that cannot see the python tool, and making it spend a second
+round trip on `load_tools` to find that out is a round trip the skill already
+knew about. `[python, filesystem]` and a missing comma both parse. The
+declaration costs **nothing to send** — the `load_skill` schema is byte-identical
+with and without it, because the loop consumes the key and strips it before the
+result reaches the model. What the model is told is what *actually* opened,
+never what was asked for: a group can be already open, switched off, or
+misspelled, and a model told about a tool whose schema is not coming will try to
+call it anyway.
+
+**Delivered as a tool result, never injected into the prompt.** That is the
+whole design, and it is hardware rather than taste. The obvious implementation
+is to detect a relevant skill and prepend it to the system prompt — but the
+prefix is what the cache is keyed on, and rewriting it re-reads the whole
+conversation, ~200 s here. A tool call appends to the end, which the cache does
+not mind, and costs one round the model chose to spend.
+
+So the shape is exactly `load_tools`: an index of names and descriptions in the
+tool's own text, and a body only when asked for. Bodies are capped at 6,000
+characters — two skills should not fill a 4,096-token window between them. With
+`skills/` empty the tool is not registered at all, because an index of nothing
+is a schema paid for on every request.
+
+### results — keeping what did not fit
+
+A tool result is capped against the model's window (see
+[Hitting the context window](#hitting-the-context-window)). Before, the tail was
+simply gone: a 118,890-character read became 476 characters and an apology.
+
+Now the whole thing is written to `data/results/` and the cut result carries an
+address instead of a dead end:
+
+```
+[The whole result is 118,890 characters (2,431 lines) and did not fit. It is
+kept as 'r3f9a1c' - call read_result with that id, an offset and a limit to
+read any part of it. Do not answer from the excerpt above if the part you need
+is not in it.]
+```
+
+`read_result` is registered on every turn and offered on none. The lens opens
+its group the moment something is actually set aside, so a conversation that
+never overflows a result never pays for the schema — and once one has
+overflowed the tool stays available, because a conversation that produced one
+large result usually produces more.
+
+Stored under `data/`, deliberately **not** in the workspace: writing there is a
+side effect nobody asked for, and it would happen even with file writes switched
+off — the setting that means *do not put things in my folders*. The store is
+pruned by count and by bytes.
+
+### MCP servers
+
+Model Context Protocol servers are supported over stdio. Copy
+`mcp.example.json` to `mcp.json` — the config is the shape every other MCP
+client uses, so one can be pasted straight in:
+
+```json
+{
+  "mcpServers": {
+    "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
+  }
+}
+```
+
+`mcp.json` is **git-ignored**, because an `env` block is exactly where an API
+key ends up.
+
+Each server becomes its own lens group, `mcp:<name>`, and its tools are named
+`<server>__<tool>`. That grain turned out to be right: naming a server in your
+message opens its tools and nobody else's.
+
+**Registering a server's tools needs their schemas, and the registry is rebuilt
+every turn.** Starting a dozen subprocesses per question is not affordable here,
+so the manifest is **cached** in `data/mcp_tools.json` and servers start only
+when a tool is actually called. `POST /api/mcp/refresh` pays that cost once, on
+request, and stops each server again afterwards. A server whose tools are not
+cached yet contributes nothing until you refresh — which is the honest
+behaviour, and visible in `GET /api/mcp`. Idle servers are reaped after
+`mcp_idle_timeout` (300 s) by the same sweeper that unloads idle llama-servers.
+
+**Permission.** A tool a server annotates `readOnlyHint` runs freely. Anything
+else asks you first, showing which server and which tool. That direction is the
+only safe one: `readOnlyHint` is the *server's claim about itself*, so it can
+move a tool into the safer tier but never out of one, and an absent annotation
+means ask. `"trusted": true` on a server skips the gate for all of its tools.
+
+There is no SDK. Stdio MCP is newline-delimited JSON-RPC 2.0, and the client
+side is one request and one reply; the tests drive a real server subprocess over
+the real protocol, including one that logs a notification before answering —
+which is precisely what breaks a client that assumes the next line is its reply.
+
+Not supported: HTTP transport and OAuth (local servers are stdio), and MCP
+resources and prompts (tools only).
+
 ---
 
 ## 10. Chat history
@@ -2749,6 +2959,7 @@ a connection failure.
 | `AGENT_CONNECT_TIMEOUT` | `10` | Seconds |
 | `AGENT_MAX_HISTORY` | `60` | Messages kept; 0 disables trimming |
 | `AGENT_MAX_ITERATIONS` | `8` | Tool rounds per turn |
+| `AGENT_LAZY_TOOLS` | `1` | Send a short index instead of every tool schema. `0` sends the whole roster, as before |
 | `AGENT_WORKSPACE` | project dir | The only directory tools may read. The starting point; the UI can move it for the session |
 | `AGENT_MAX_READ_BYTES` | `200000` | Largest readable file |
 | `AGENT_DB_PATH` | `data/chat_history.db` | History and memory database |
@@ -2807,6 +3018,11 @@ a connection failure.
 Model paths, ports, contexts, threads, GPU layers, RAM thresholds and the
 router's fast/strong pair live in [`models.json`](models.json).
 
+Four paths are code defaults rather than environment variables, because they
+are locations rather than settings: `skills/` (authored, versioned, meant to be
+read), `data/results/` and `data/mcp_tools.json` (generated state), and
+`mcp.json` beside them. Change them in [`config.py`](config.py) if you need to.
+
 ---
 
 ## 14. Tests
@@ -2815,23 +3031,11 @@ router's fast/strong pair live in [`models.json`](models.json).
 cd "C:\path\to\Hakim Local Agent" && .venv\Scripts\python -m unittest discover -s tests -t .
 ```
 
-**1140 tests, no model server needed, and none of them touch the network.**
-They run in about 35 seconds.
+**1343 tests, no model server needed, and none of them touch the network.**
+They run in about three minutes.
 
 | File | Covers |
-|
-The document-search tests use a fake embedder, so the suite stays fast and
-needs no model on disk. The three that load BGE for real are skipped unless
-you ask for them:
-
-```bash
-set RAG_MODEL_TESTS=1
-.venv\Scripts\python -m unittest tests.test_rag.RealModelTests
-```
-
-They take about 140 s, almost all of it importing torch.
-
----|---|
+|---|---|
 | `test_agent.py` | Loop: plain replies, one call, several calls, tool errors, iteration limit, malformed replies, stopping at each checkpoint |
 | `test_tools.py` | Calculator, workspace jail, OCR validation, registry |
 | `test_python_tool.py` | Restricted execution; spawns real child processes |
@@ -2846,18 +3050,38 @@ They take about 140 s, almost all of it importing torch.
 | `test_turns.py` | The queue: serialisation, positions, bounded backlog, a runner that raises, stopping a queued or running turn |
 | `test_remote.py` | Hosted models: registry shape, key handling, connectivity cache, error hints |
 | `test_api.py` | Every endpoint, the SSE event sequence, routing, reasoning suppression, tool switches, the workspace and its picker, ending a turn, what a queued turn sees, a refused backlog, remote consent, uploads, editing a question |
-
-The API tests use the same manager harness as the model tests and a scripted
-chat client, so none of them depend on whether something happens to be
-listening on a port — which has produced false greens here before.
 | `test_file_writes.py` | Writing, overwrite gating, self-protection |
 | `test_python_scripts.py` | Script files in both modes, and the workspace guard |
 | `test_git_tool.py` | Real throwaway repositories; write gating |
 | `test_memory.py` | Store, recall, forget |
 | `test_rag.py` | Extraction, chunking, the vector file, hybrid search and its migration |
+| `test_lens.py` | What a turn sends, what opens a group, and that opening is monotonic |
+| `test_skills.py` | Frontmatter, discovery, the index, and a skill opening the tools it named |
+| `test_results.py` | Offloading, paging back, id validation, pruning by count and bytes |
+| `test_mcp.py` | The real protocol against a real server subprocess: handshake, matching a reply to its id, a server that logs before answering, and one that dies |
+| `test_approval.py` | The mid-turn consent handshake, and what happens with nobody to ask |
+| `test_http_approval.py` | Which requests are free, which ask, and redirects re-checked per hop |
+| `test_conversation_actions.py` | Deleting a message, forking a conversation, model-written titles |
+| `test_context_report.py`, `test_context_budget.py` | What a turn's context is made of, and what had to be dropped |
 
-The manager tests stub only `_spawn` and `_healthy` — the OS boundary. Everything
-above it is the real implementation.
+The API tests use the same manager harness as the model tests and a scripted
+chat client, so none of them depend on whether something happens to be
+listening on a port — which has produced false greens here before.
+
+The manager tests stub only `_spawn` and `_healthy` — the OS boundary.
+Everything above it is the real implementation. The MCP tests stub nothing at
+all: a mock would paper over exactly the parts worth testing.
+
+The document-search tests use a fake embedder, so the suite stays fast and
+needs no model on disk. The three that load BGE for real are skipped unless
+you ask for them:
+
+```bash
+set RAG_MODEL_TESTS=1
+.venv\Scripts\python -m unittest tests.test_rag.RealModelTests
+```
+
+They take about 140 s, almost all of it importing torch.
 
 ---
 
@@ -2865,18 +3089,39 @@ above it is the real implementation.
 
 Every tool call from the model is treated as untrusted input.
 
-**The model cannot:** write, rename or delete files; reach the network; read
-outside the workspace; or see your environment variables. It can run terminal
-commands only if you enable the terminal tool, and then only the read-only ones
-on its allowlist.
+**The model cannot, without you saying so:** write, rename or delete files;
+reach the network; read outside the workspace; or see your environment
+variables. Deleting and renaming it cannot do at all, however many switches are
+on.
+
+**Three tiers, not two.** Some things are refused outright, some run freely, and
+the ones in between **stop the turn and ask you**, showing the exact command
+line, URL or tool call before anything happens. The turn waits on a real
+handshake — it is not a notification you can miss — and declining is reported
+back to the model as a result, so it carries on rather than failing. Where
+there is nobody to ask (the CLI, a test), anything in that middle tier is
+refused rather than run, so the gate cannot be stepped around by the caller.
 
 **Boundaries:**
 
 - Calculator: AST whitelist, no `eval`
 - Filesystem: resolve-then-check containment, read-only
-- Python: off by default, separate process, honestly documented as *not* a sandbox
-- Terminal: off by default, allowlisted programs, no shell interpretation
-- HTTP: off by default, loopback-only allowlist, redirects not followed
+- Python: off by default, separate process, honestly documented as *not* a
+  sandbox. Unrestricted mode asks before each script, for the same reason the
+  terminal does
+- Terminal: off by default. 46 allowlisted programs, no shell interpretation;
+  reading runs, changing asks, and 27 names — every shell, `xargs`, `sudo`,
+  `python -c` — are never allowed at all, because a prompt nobody can audit is
+  a rubber stamp rather than a control
+- HTTP: off by default. Loopback and the allowlist run; any other host, and
+  every `POST`/`PUT`/`PATCH`/`DELETE`, asks first. Redirects are followed only
+  within the free list and re-checked at every hop, five at most. `file://` and
+  credentials in a URL stay refused — a prompt cannot stand in for either
+- MCP: no servers unless you write `mcp.json`. A tool the server annotates
+  `readOnlyHint` runs; everything else asks. That direction only — the
+  annotation is the server's claim about itself, so it can move a tool into the
+  safer tier and never out of one. `mcp.json` is git-ignored because an `env`
+  block is where an API key ends up
 - Writes: off by default; create only, and the agent's own source is refused
 - Git: off by default; no push, and nothing that discards uncommitted work
 - Registry: validates arguments, converts every failure into a message for the
@@ -3034,22 +3279,12 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 
 **Next, in order of value:**
 
-1. **Context controls.** Show what a turn's context is made of — conversation
-   against tool schemas, against the model's window — and what had to be
-   dropped to fit. The numbers exist on every turn now; the interface is the
-   remaining half.
-2. **Regenerate an answer.** Reuses the rewind mechanism and the pickers that
-   already ride on `ChatRequest`. Replaces the previous answer rather than
-   keeping alternatives, which needs no schema change.
-3. **Attachment previews** in the composer, so an image is visible before it
-   is sent rather than only as a path.
-4. Watch auto-routing perform a real switch — the last of the three original
+1. Watch auto-routing perform a real switch — the last of the three original
    untested gaps.
-
-**Interface:**
-
-- **Settings deserves better than an icon.** It is a single button now; the
-  things behind it have outgrown that.
+2. **Settings deserves better than an icon.** It is a single button now; the
+   things behind it have outgrown that.
+3. **A UI for MCP servers.** Adding one means editing `mcp.json` by hand and
+   calling `POST /api/mcp/refresh`. The endpoints exist; the panel does not.
 
 **Giving the model more room:**
 
@@ -3080,6 +3315,31 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 
 **Done, with the measurement that closed it:**
 
+- **The tool lens** — the roster reaches the model as a short index and opens a
+  group at a time. **3,991 estimated tokens down to 632** on a first turn with
+  everything switched on: ~275 s of prompt processing down to ~44 s. Opening is
+  monotonic, because the tool list sits in the prompt prefix and changing it
+  costs a full re-read.
+- **Skills** — instruction packs asked for by name, delivered as a tool result
+  so the prefix cache survives. ~36 tokens of index per skill. A skill can name
+  the tool groups its instructions assume, and loading it opens them, which
+  costs nothing to send: the `load_skill` schema is byte-identical with and
+  without the declaration.
+- **Large-result offloading** — a **118,890-character** result became 476
+  characters and an apology; it now becomes 476 characters and a retrievable
+  handle. `read_result` is registered every turn and offered on none until
+  something actually overflows.
+- **MCP servers** — stdio, no SDK, each server its own lens group. Measured
+  cold: **455 tokens**, rising to 586 once the server is named and 802 for the
+  whole roster. The manifest is cached because the registry is rebuilt every
+  turn and a subprocess per server per question is not affordable here.
+  `readOnlyHint` can move a tool into the safer tier and never out of one.
+- **Context controls, regenerate, fork, delete and model-written titles** —
+  what a turn's context is made of, against the model's window, and what had to
+  be dropped. The naming prompt is bare: no system prompt, no tools, no
+  thinking.
+- **Attachment previews** in the composer, so an image is visible before it is
+  sent rather than only as a path.
 - **Loading a model through the manager** — was the largest untested gap.
   Gemma now loads through `POST /api/models/{key}/load` in **18.1 s**, and a
   turn through `/api/chat` completes in **34.1 s**.
