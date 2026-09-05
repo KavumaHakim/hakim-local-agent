@@ -108,6 +108,15 @@ export interface ChatOptions {
   enableThinking: boolean
   autoRoute: boolean
   onConversationChanged: (id: number) => void
+  /**
+   * The model has been asked to name this conversation.
+   *
+   * `null` while it is being written, so the sidebar can show that something
+   * is coming rather than the placeholder sitting there looking final. Also
+   * `null` when the attempt produced nothing usable, in which case the
+   * placeholder is what stays.
+   */
+  onTitle?: (conversationId: number, title: string | null) => void
 }
 
 let counter = 0
@@ -196,6 +205,9 @@ export function useChat(options: ChatOptions) {
       overrideModel?: string,
       confirmRemote = false,
       attachments: string[] = [],
+      // Overrides the current setting for this one turn. Used by "skip
+      // reasoning", which re-asks the same question without it.
+      override: { thinking?: boolean } = {},
     ) => {
       const trimmed = prompt.trim()
       // An attachment with no text is a valid turn.
@@ -222,7 +234,8 @@ export function useChat(options: ChatOptions) {
         prompt: trimmed,
         conversation_id: conversationId,
         model_key: overrideModel ?? latest.current.modelKey,
-        enable_thinking: latest.current.enableThinking,
+        enable_thinking:
+          override.thinking ?? latest.current.enableThinking,
         auto_route: latest.current.autoRoute,
         confirm_remote: confirmRemote,
         attachments,
@@ -395,12 +408,25 @@ export function useChat(options: ChatOptions) {
               // Not persisted server-side, so it lasts until a reload.
               reasoning: thinking || undefined,
               context: event.context,
+              stats: event.stats,
             }
             setMessages((current) => [...current, answer])
             settled = true
             drop(key)
             break
           }
+
+          case 'title':
+            // Deliberately independent of the turn, which `done` has already
+            // dropped. The namer runs after the answer and only on a
+            // conversation's first exchange, so tying the turn's lifetime to
+            // a title event would leave every later turn in the list forever
+            // - and with it a slot that never comes back.
+            //
+            // Null means the name is being written, or that nothing usable
+            // came back; either way the placeholder is what stands.
+            latest.current.onTitle?.(event.conversation_id, event.title)
+            break
 
           case 'stopped': {
             // Whatever had been generated is kept, and the server has already
@@ -533,6 +559,32 @@ export function useChat(options: ChatOptions) {
   )
 
   /**
+   * Abandon a thinking turn and ask the same question without thinking.
+   *
+   * A model cannot be told to stop reasoning mid-generation - there is no
+   * such signal in the API - so this is the honest version of "skip": end the
+   * turn, and immediately re-ask with thinking off. On hardware where
+   * deliberating costs minutes, that is the button that saves them.
+   *
+   * The question comes from the turn itself rather than the transcript,
+   * because the optimistic user row is already on screen and the stored one
+   * may not exist yet.
+   */
+  const skipReasoning = useCallback(
+    async (key: string) => {
+      const turn = turns.find((entry) => entry.key === key)
+      if (!turn) return
+      const { prompt, modelKey } = turn
+      await stop(key)
+      if (prompt.trim()) {
+        void send(prompt, modelKey ?? undefined, false, [], { thinking: false })
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [turns, stop, send],
+  )
+
+  /**
    * Answer a command the agent asked permission for.
    *
    * The prompt is cleared here rather than waiting for the server's
@@ -577,5 +629,6 @@ export function useChat(options: ChatOptions) {
     editAndResend,
     stop,
     answerApproval,
+    skipReasoning,
   }
 }

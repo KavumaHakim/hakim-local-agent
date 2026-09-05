@@ -68,6 +68,17 @@ export const SidebarIcon = svg(
 
 export const CheckIcon = svg(<path d="m5 13 4 4L19 7" />)
 
+/** A branch splitting from a trunk: this conversation, carried on twice. */
+export const ForkIcon = svg(
+  <>
+    <circle cx="6" cy="18" r="2.5" />
+    <circle cx="6" cy="6" r="2.5" />
+    <circle cx="18" cy="8" r="2.5" />
+    <path d="M6 8.5v7" />
+    <path d="M15.5 8.5c-4 0-9 1-9 7" />
+  </>,
+)
+
 export const PowerIcon = svg(
   <>
     <path d="M12 3v9" />

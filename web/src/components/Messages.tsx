@@ -2,18 +2,20 @@
  * The transcript: messages, the tools each turn ran, and the empty state.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
 import { Markdown } from '../lib/markdown'
-import type { ContextReport, Message, ToolCall } from '../lib/types'
+import type { ContextReport, Message, ToolCall, TurnStats } from '../lib/types'
 import {
   AlertIcon,
   BrainIcon,
   CheckIcon,
   ChevronIcon,
+  ForkIcon,
   PencilIcon,
   RetryIcon,
   SparkIcon,
   ToolIcon,
+  TrashIcon,
 } from './Icons'
 import { CopyButton } from './CopyButton'
 import { SpeakButton, speakable } from './SpeakButton'
@@ -154,6 +156,66 @@ export function ReasoningPanel({
   )
 }
 
+/**
+ * One of the small round buttons in a message footer.
+ *
+ * Extracted because there are now four of them and they were diverging: the
+ * hover states had already drifted apart by one shade.
+ */
+function IconAction({
+  icon: Icon,
+  label,
+  onClick,
+  danger = false,
+}: {
+  icon: (props: { className?: string }) => ReactElement
+  label: string
+  onClick: () => void
+  danger?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={`grid size-[22px] place-items-center rounded-sm text-faint transition hover:bg-tint ${
+        danger ? 'hover:text-danger' : 'hover:text-fg'
+      }`}
+    >
+      <Icon className="size-3.5" />
+    </button>
+  )
+}
+
+/**
+ * How fast the model actually produced this answer.
+ *
+ * llama-server's own measurement, not one taken from this side: it knows when
+ * a token was produced, where the browser only knows when it arrived through
+ * the stream. Absent on a reloaded conversation, because it is reported once
+ * and never stored - so this draws nothing rather than claiming zero.
+ */
+function Throughput({ stats }: { stats?: TurnStats }) {
+  const rate = stats?.tokens_per_second
+  if (!rate) return null
+  return (
+    <span
+      className="tabular-nums"
+      title={
+        stats.output_tokens
+          ? `${stats.output_tokens.toLocaleString()} tokens generated` +
+            (stats.prompt_tokens
+              ? `, ${stats.prompt_tokens.toLocaleString()} read`
+              : '')
+          : undefined
+      }
+    >
+      {rate.toFixed(1)} tok/s
+    </span>
+  )
+}
+
 /** Compact token counts: 940, 1.2k, 12k. */
 function short(tokens: number): string {
   if (tokens < 1000) return String(tokens)
@@ -267,6 +329,8 @@ export function MessageView({
   message,
   onRetry,
   onEdit,
+  onFork,
+  onDelete,
   editingBlocked,
   canSpeak,
 }: {
@@ -279,6 +343,10 @@ export function MessageView({
   onRetry?: () => void
   /** Rewind to this question, replace it, and ask again. */
   onEdit?: (text: string) => void
+  /** Copy the conversation up to here into a new one, and open it. */
+  onFork?: () => void
+  /** Remove this one message, leaving the rest of the conversation. */
+  onDelete?: () => void
   /** Why editing is unavailable right now, if it is. */
   editingBlocked?: string
   /** True when a Piper voice is installed. False draws no speaker at all. */
@@ -289,6 +357,8 @@ export function MessageView({
       <UserMessage
         message={message}
         onEdit={onEdit}
+        onFork={onFork}
+        onDelete={onDelete}
         editingBlocked={editingBlocked}
       />
     )
@@ -306,11 +376,21 @@ export function MessageView({
           <span className="font-mono">{message.model_key}</span>
         )}
         {message.elapsed != null && <span>{formatDuration(message.elapsed)}</span>}
+        <Throughput stats={message.stats} />
         <div className="ml-auto flex items-center gap-1 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
           {canSpeak && message.content.trim() && (
             <SpeakButton text={speakable(message.content)} />
           )}
           <CopyButton text={message.content} label="" />
+          {onFork && <IconAction icon={ForkIcon} label="Branch from here" onClick={onFork} />}
+          {onDelete && (
+            <IconAction
+              icon={TrashIcon}
+              label="Delete just this message"
+              onClick={onDelete}
+              danger
+            />
+          )}
           {onRetry && (
             <button
               type="button"
@@ -339,10 +419,14 @@ export function MessageView({
 function UserMessage({
   message,
   onEdit,
+  onFork,
+  onDelete,
   editingBlocked,
 }: {
   message: Message
   onEdit?: (text: string) => void
+  onFork?: () => void
+  onDelete?: () => void
   editingBlocked?: string
 }) {
   const [editing, setEditing] = useState(false)
@@ -432,6 +516,15 @@ function UserMessage({
           </button>
         )}
         <CopyButton text={message.content} label="" />
+        {onFork && <IconAction icon={ForkIcon} label="Branch from here" onClick={onFork} />}
+        {onDelete && (
+          <IconAction
+            icon={TrashIcon}
+            label="Delete just this message"
+            onClick={onDelete}
+            danger
+          />
+        )}
       </div>
       {/* A raised surface, not an accent flood. The system uses the accent
           as a line and a glow; a solid violet bubble was the one large

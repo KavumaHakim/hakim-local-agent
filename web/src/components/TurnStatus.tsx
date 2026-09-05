@@ -20,6 +20,8 @@ interface Props {
   onStop: () => void
   /** Answer a command the agent is waiting on. */
   onApprove: (granted: boolean) => void
+  /** Abandon this turn and ask the same thing without thinking. */
+  onSkipReasoning: () => void
 }
 
 /**
@@ -85,6 +87,7 @@ export function TurnStatus({
   onDismiss,
   onStop,
   onApprove,
+  onSkipReasoning,
 }: Props) {
   const generating = useElapsed(turn.startedAt)
   const stopping = turn.stopping
@@ -204,6 +207,28 @@ export function TurnStatus({
               the only thing arriving for minutes, and hiding it would put the
               screen back to blank. */}
           <ReasoningPanel text={turn.reasoning} live />
+          {/*
+            Only while thinking is all that has arrived. A model cannot be
+            told to stop reasoning - there is no such signal in the API - so
+            this ends the turn and asks the same question again with thinking
+            off. On hardware where deliberating costs minutes, that is the
+            button that saves them, and it is worthless once the answer has
+            started.
+          */}
+          {turn.reasoning && !turn.text && !turn.stopping && (
+            <div className="mb-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onSkipReasoning}
+                className="rounded-md border border-line px-2.5 py-1 text-[11px] text-muted transition hover:border-accent-line hover:text-fg"
+              >
+                Skip thinking
+              </button>
+              <span className="text-[10.5px] text-faint">
+                Asks again without it. What it has thought so far is discarded.
+              </span>
+            </div>
+          )}
           <ToolPills tools={turn.tools} />
           {turn.text ? (
             <div className="text-[15px] text-fg">

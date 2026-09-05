@@ -48,6 +48,8 @@ export interface Message {
    * claiming a turn cost nothing.
    */
   context?: ContextReport
+  /** Throughput for this turn. Client-side only, like `context`. */
+  stats?: TurnStats
 }
 
 export interface Conversation {
@@ -57,6 +59,8 @@ export interface Conversation {
   created_at: string
   updated_at: string
   message_count: number
+  /** False while the name is still the first line of the first question. */
+  titled?: boolean
 }
 
 export interface ConversationDetail extends Conversation {
@@ -299,6 +303,22 @@ export interface Health {
  * the context is assembled before the model is involved, so there is no
  * tokeniser to ask. The ratio is conservative, so these run high.
  */
+/**
+ * What the server measured about its own throughput for one turn.
+ *
+ * llama-server's numbers, not ours: it knows when a token was produced,
+ * where the browser only knows when it arrived. Absent on a reloaded
+ * conversation, like `reasoning` and `context` - reported on `done` and
+ * never stored.
+ */
+export interface TurnStats {
+  /** Generation rate, across every round of the turn. */
+  tokens_per_second?: number
+  output_tokens?: number
+  prompt_tokens?: number
+  prompt_tokens_per_second?: number
+}
+
 export interface ContextReport {
   /** The conversation itself. */
   estimated_tokens: number
@@ -359,6 +379,13 @@ export type TurnEvent =
       model_key: string
       /** Absent from older stored turns, so every reader must tolerate it. */
       context?: ContextReport
+      stats?: TurnStats
+    }
+  | {
+      type: 'title'
+      conversation_id: number
+      /** Null while it is being written, and if it could not be. */
+      title: string | null
     }
   | {
       type: 'stopped'

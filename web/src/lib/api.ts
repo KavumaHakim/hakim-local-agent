@@ -135,6 +135,25 @@ export const api = {
       body: JSON.stringify({ request_id: requestId, granted }),
     }),
 
+  /** Copy a conversation up to this message into a new one. */
+  forkConversation: (conversationId: number, messageId: number) =>
+    request<Conversation>(
+      `/conversations/${conversationId}/messages/${messageId}/fork`,
+      { method: 'POST' },
+    ),
+
+  /**
+   * Delete one message, leaving the rest.
+   *
+   * Distinct from `rewind`, which takes everything after it too - the paths
+   * differ so neither can be mistaken for the other.
+   */
+  deleteMessage: (conversationId: number, messageId: number) =>
+    request<RewindResult>(
+      `/conversations/${conversationId}/messages/${messageId}/only`,
+      { method: 'DELETE' },
+    ),
+
   workspace: () => request<WorkspaceInfo>('/workspace'),
 
   /** Point the file tools at another folder. Applies from the next turn. */

@@ -104,11 +104,31 @@ export default function App() {
     [tools, workspace],
   )
 
+  // Conversations the model is currently naming. Held here rather than in the
+  // list itself because the list is refetched, and a refetch mid-write would
+  // drop the fact that something is coming.
+  const [naming, setNaming] = useState<Set<number>>(new Set())
+
   const chat = useChat({
     modelKey,
     enableThinking: thinking,
     autoRoute,
     onConversationChanged: () => void conversations.refresh(),
+    onTitle: useCallback(
+      (id: number, title: string | null) => {
+        setNaming((current) => {
+          const next = new Set(current)
+          if (title === null) next.add(id)
+          else next.delete(id)
+          return next
+        })
+        // A real name means the stored row changed, so the list has to be
+        // re-read. A null means it is still being written, or that nothing
+        // usable came back - neither changed anything worth refetching.
+        if (title !== null) void conversations.refresh()
+      },
+      [conversations],
+    ),
   })
 
   useEffect(() => {
@@ -262,6 +282,43 @@ export default function App() {
     })
   }, [])
 
+  /**
+   * Copy this conversation up to a message, and open the copy.
+   *
+   * Opening it is the point: forking and staying put would leave no sign that
+   * anything happened, and the copy is where the next question belongs.
+   */
+  const forkFrom = useCallback(
+    async (messageId: number) => {
+      if (chat.conversationId === null || messageId < 0) return
+      try {
+        const copy = await api.forkConversation(chat.conversationId, messageId)
+        await conversations.refresh()
+        await chat.openConversation(copy.id)
+        setNote(null)
+      } catch (failure) {
+        setNote(failure instanceof Error ? failure.message : String(failure))
+      }
+    },
+    [chat, conversations],
+  )
+
+  /** Remove one message, leaving the rest of the conversation alone. */
+  const deleteMessage = useCallback(
+    async (messageId: number) => {
+      if (chat.conversationId === null || messageId < 0) return
+      try {
+        await api.deleteMessage(chat.conversationId, messageId)
+        await chat.openConversation(chat.conversationId)
+        setNote(null)
+      } catch (failure) {
+        // The useful refusal is the 409: a turn is still running.
+        setNote(failure instanceof Error ? failure.message : String(failure))
+      }
+    },
+    [chat],
+  )
+
   const submit = useCallback(
     (text: string) => {
       const command = parseCommand(text)
@@ -393,6 +450,7 @@ export default function App() {
           pane={pane}
           onClose={() => setPaneOpen(false)}
           conversations={conversations.conversations}
+          namingConversations={naming}
           activeConversationId={chat.conversationId}
           onOpenConversation={(id) => void chat.openConversation(id)}
           onDeleteConversation={async (id) => {
@@ -482,6 +540,14 @@ export default function App() {
                       : undefined
                   }
                   onEdit={(text) => void editQuestion(message.id, text)}
+                  onFork={
+                    message.id > 0 ? () => void forkFrom(message.id) : undefined
+                  }
+                  onDelete={
+                    message.id > 0 && !chat.busy
+                      ? () => void deleteMessage(message.id)
+                      : undefined
+                  }
                   editingBlocked={
                     chat.busy
                       ? 'Editing rewinds the conversation, so it waits for the running turn to finish or be stopped.'
@@ -513,6 +579,7 @@ export default function App() {
                   onApprove={(granted) =>
                     void chat.answerApproval(turn.key, granted)
                   }
+                  onSkipReasoning={() => void chat.skipReasoning(turn.key)}
                 />
               ))}
               <div ref={bottom} />

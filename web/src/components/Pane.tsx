@@ -47,6 +47,8 @@ interface Props {
   onClose: () => void
 
   conversations: Conversation[]
+  /** Conversations the model is naming right now, shown as a shimmer. */
+  namingConversations?: Set<number>
   activeConversationId: number | null
   onOpenConversation: (id: number) => void
   onDeleteConversation: (id: number) => void
@@ -109,6 +111,7 @@ export function Pane(props: Props) {
 
 function HistoryPane({
   conversations,
+  namingConversations,
   activeConversationId,
   onOpenConversation,
   onDeleteConversation,
@@ -155,7 +158,17 @@ function HistoryPane({
                 title={`${conversation.message_count} messages`}
                 className="min-w-0 flex-1 truncate text-left text-[12.5px] text-fg opacity-80 group-hover:opacity-100"
               >
-                {conversation.title}
+                {namingConversations?.has(conversation.id) ? (
+                  // A shimmer rather than the placeholder sitting there
+                  // looking final: the model is writing a name right now, and
+                  // it is about to change under the reader's eyes.
+                  <span
+                    aria-label="Naming this conversation"
+                    className="block h-[13px] w-3/4 animate-pulse rounded bg-tint-2"
+                  />
+                ) : (
+                  conversation.title
+                )}
               </button>
               <button
                 type="button"
