@@ -13,6 +13,7 @@ from tools.python_tool import build_python_file_tool, build_python_tool
 from tools.git_tool import build_git_tools
 from tools.http_tool import build_http_tool
 from tools.results import ResultStore, build_result_tool
+from tools.skills import SkillLibrary
 from tools.shell_tool import ApprovalCheck, build_shell_tool
 
 
@@ -78,6 +79,12 @@ def build_default_registry(
     # truncating a result, and the lens only opens its group once something
     # has actually been set aside.
     registry.register(build_result_tool(ResultStore(config.results_dir)))
+
+    # Only when there is something to offer. An index of nothing is a tool
+    # definition the model pays for on every request and can never use.
+    library = SkillLibrary(config.skills_dir)
+    if len(library):
+        registry.register(library.tool())
 
     disabled: list[DisabledTool] = []
 

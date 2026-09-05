@@ -53,6 +53,8 @@ CATEGORY_HELP = {
     "memory": "remember, recall and forget things across conversations",
     "documents": "search the indexed documents",
     "ocr": "read text out of an image",
+    "skills": "written instructions for particular kinds of task",
+    "results": "read back a tool result that was too large to show",
 }
 
 # Words that mean a category is probably wanted. Matched whole, lowercased.
@@ -144,7 +146,15 @@ class ToolLens:
         self,
         registry: ToolRegistry,
         *,
-        always: tuple[str, ...] = ("calculator",),
+        # `skills` is open from the start, and that is not an oversight: its
+        # tool *is* the index, and a model cannot ask for instructions it has
+        # never been told exist. Gating that behind a keyword would hide the
+        # feature rather than defer it.
+        #
+        # `results` is deliberately *not* here. The loop opens it the moment
+        # something is actually set aside, so `read_result` costs nothing in a
+        # conversation that never overflows a result - which is most of them.
+        always: tuple[str, ...] = ("calculator", "skills"),
     ) -> None:
         self._registry = registry
         # Categories the roster actually has, so a signal for a switched-off

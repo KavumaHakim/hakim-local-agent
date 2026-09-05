@@ -344,6 +344,10 @@ class Config:
     # writes switched off - the setting that means "do not put things in
     # my folders". Pruned by count and by bytes; see tools/results.py.
     results_dir: Path = field(default=PROJECT_ROOT / "data" / "results")
+    # Written instructions the model can ask for by name. In the project
+    # rather than under data/ because they are authored, versioned and
+    # meant to be read - the opposite of generated state.
+    skills_dir: Path = field(default=PROJECT_ROOT / "skills")
     # How many memories may be retrieved into one turn's context.
     memory_top_k: int = 5
     # Below this final score a memory is not worth its prompt tokens. This is
