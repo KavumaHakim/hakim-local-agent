@@ -219,7 +219,8 @@ class RegistryTests(unittest.TestCase):
 
     def test_default_tools(self):
         self.assertEqual(
-            self.registry.names(), ["calculate", "list_directory", "read_text_file"]
+            self.registry.names(),
+            ["calculate", "list_directory", "read_result", "read_text_file"],
         )
 
     def test_risky_tools_are_disabled_by_default(self):
@@ -230,11 +231,18 @@ class RegistryTests(unittest.TestCase):
             self.assertIn(risky, categories)
 
     def test_nothing_risky_is_registered_by_default(self):
-        # The real invariant behind the default set: only reading and
-        # arithmetic are offered without an explicit opt-in.
-        self.assertEqual(
-            self.registry.names(), ["calculate", "list_directory", "read_text_file"]
-        )
+        # The real invariant behind the default set: nothing that writes,
+        # executes or reaches the network is offered without an explicit
+        # opt-in. Asserted as an absence rather than an exact list, which is
+        # what this test meant all along - the exact list had already broken
+        # it three times for unrelated additions, and did so again when
+        # `read_result` arrived.
+        risky = {
+            "write_text_file", "create_directory", "run_python",
+            "run_python_file", "run_command", "http_request",
+            "git_commit", "git_create_branch",
+        }
+        self.assertEqual(risky & set(self.registry.names()), set())
 
     def test_python_tool_registers_when_enabled(self):
         registry, disabled = build_default_registry(
@@ -283,7 +291,9 @@ class RegistryTests(unittest.TestCase):
 
     def test_categories_group_tools(self):
         categories = self.registry.categories()
-        self.assertEqual(sorted(categories), ["calculator", "filesystem"])
+        self.assertEqual(
+            sorted(categories), ["calculator", "filesystem", "results"]
+        )
         self.assertEqual(len(categories["filesystem"]), 2)
 
 

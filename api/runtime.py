@@ -33,6 +33,7 @@ from models.manager import ModelManager, ModelManagerError, ModelSpec
 from models.qwen import QwenClient, QwenError
 from models.remote import RemoteClient
 from tools.registry import build_default_registry
+from tools.results import ResultStore
 
 from api.turns import Turn, TurnQueue
 
@@ -717,6 +718,7 @@ class Runtime:
                 registry,
                 memory=memory,
                 conversation_id=request.conversation_id,
+                results=ResultStore(config.results_dir),
             )
             agent.load_history(history)
 

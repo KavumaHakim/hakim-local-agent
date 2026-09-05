@@ -338,6 +338,12 @@ class Config:
     memory_processing_enabled: bool = False
     # Where the memory vector index lives.
     memory_store: Path = field(default=PROJECT_ROOT / "data" / "memory")
+    # Tool results too large for the model's window, kept so it can page
+    # through them. Deliberately not in the workspace: writing there is a
+    # side effect nobody asked for, and it would happen even with file
+    # writes switched off - the setting that means "do not put things in
+    # my folders". Pruned by count and by bytes; see tools/results.py.
+    results_dir: Path = field(default=PROJECT_ROOT / "data" / "results")
     # How many memories may be retrieved into one turn's context.
     memory_top_k: int = 5
     # Below this final score a memory is not worth its prompt tokens. This is

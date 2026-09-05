@@ -86,6 +86,7 @@ class Agent:
         tools: ToolRegistry,
         memory: Any = None,
         conversation_id: int | None = None,
+        results: Any = None,
     ) -> None:
         self._client = client
         self._config = config
@@ -111,6 +112,10 @@ class Agent:
         # the Agent rather than the registry because what has been opened is a
         # property of *this conversation*, and the registry is shared.
         self._lens = ToolLens(tools) if config.lazy_tools else None
+        # Where a result too big for the window is kept so the model can page
+        # through it. None when the registry has no `read_result` - without
+        # the tool, storing the text would be writing to disk for nobody.
+        self._results = results
 
     @property
     def tools(self) -> ToolRegistry:
@@ -203,13 +208,15 @@ class Agent:
 
             for call in turn.tool_calls:
                 result = self._execute(call)
+                whole = result.content
                 content = result.content_within(self._result_budget())
                 # Counted here rather than inferred later: once the result is
                 # a JSON string in the history, the only way to tell a cut one
                 # from a tool that happens to return a "truncated" field is to
                 # compare against the uncut text, which is what this does.
-                if len(content) < len(result.content):
+                if len(content) < len(whole):
                     self._truncated_results += 1
+                    content = self._offload(whole, content)
                 self._history.append(
                     {
                         "role": "tool",
@@ -373,6 +380,39 @@ class Agent:
             report.get("estimated_tokens", 0) + report["tool_tokens"]
         )
         return report
+
+    def _offload(self, whole: str, cut: str) -> str:
+        """Keep the whole result, and tell the model where it went.
+
+        A cut result already says how much is missing. This turns that dead
+        end into an address: the same first page, plus an id the model can
+        page through with `read_result`.
+
+        The tool's group is opened here rather than being permanently on,
+        because `read_result` is useless until something has been set aside
+        and its schema is not free. Opening is monotonic, so once a
+        conversation has produced one large result the tool stays available -
+        which is right, since a conversation that produced one usually
+        produces more.
+
+        Falls back to the cut text unchanged if anything goes wrong. Losing
+        the tail is what already happened; failing the turn would be worse.
+        """
+        if self._results is None:
+            return cut
+        stored = self._results.save(whole)
+        if stored is None:
+            return cut
+        if self._lens is not None:
+            self._lens.open_categories_by_name(["results"])
+        note = (
+            f"\n\n[The whole result is {stored.characters:,} characters "
+            f"({stored.lines:,} lines) and did not fit. It is kept as "
+            f"{stored.id!r} - call read_result with that id, an offset and a "
+            f"limit to read any part of it. Do not answer from the excerpt "
+            f"above if the part you need is not in it.]"
+        )
+        return cut + note
 
     def _absorb_stats(self, message: dict[str, Any]) -> None:
         """Fold one round's throughput numbers into the turn's.
