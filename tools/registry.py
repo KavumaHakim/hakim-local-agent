@@ -12,6 +12,7 @@ from tools.ocr_tool import OcrClient
 from tools.python_tool import build_python_file_tool, build_python_tool
 from tools.git_tool import build_git_tools
 from tools.http_tool import build_http_tool
+from tools.mcp_client import McpManager
 from tools.results import ResultStore, build_result_tool
 from tools.skills import SkillLibrary
 from tools.shell_tool import ApprovalCheck, build_shell_tool
@@ -85,6 +86,20 @@ def build_default_registry(
     library = SkillLibrary(config.skills_dir)
     if len(library):
         registry.register(library.tool())
+
+    # From the cache, never by asking the servers: this runs on every turn.
+    # A server whose tools are not cached yet contributes nothing until
+    # someone refreshes, which is the honest behaviour - the alternative is
+    # every turn paying for a dozen subprocess starts.
+    for tool in McpManager(
+        config.mcp_config, config.mcp_cache, idle_timeout=config.mcp_idle_timeout
+    ).tools(approve=approve):
+        try:
+            registry.register(tool)
+        except ValueError:
+            # A server whose name collides with a built-in tool. The built-in
+            # wins; renaming the server is the operator's fix.
+            continue
 
     disabled: list[DisabledTool] = []
 

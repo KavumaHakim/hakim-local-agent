@@ -40,3 +40,7 @@ secrets.json
 # that is the only place the OCR tool can read from, which puts them here when
 # the workspace is the project itself.
 uploads/
+
+# Your MCP servers. Kept out because an "env" block is exactly where an
+# API key ends up. mcp.example.json is the one that ships.
+mcp.json

@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "Copy this to mcp.json to connect MCP servers. The shape is the one every",
+    "other MCP client uses, so a config can be pasted in from elsewhere.",
+    "",
+    "Nothing here runs until you run POST /api/mcp/refresh once: the tool list",
+    "is cached, because the registry is rebuilt every turn and starting a",
+    "subprocess per server each time is not affordable on this machine. After",
+    "a refresh, a server starts only when one of its tools is actually called,",
+    "and is stopped again after mcp_idle_timeout.",
+    "",
+    "A tool the server annotates with readOnlyHint runs freely. Everything",
+    "else is shown to you for approval first, the way `git commit` and a POST",
+    "are. Set \"trusted\": true on a server to skip that for all of its tools -",
+    "which is a thing to state deliberately, not a default.",
+    "",
+    "Each server is its own lens category (mcp:<name>), so its schemas stay",
+    "out of the prompt until the conversation looks like it needs them."
+  ],
+  "mcpServers": {
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/path/to/a/folder"],
+      "enabled": false
+    },
+    "sqlite": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "C:/path/to/db.sqlite"],
+      "enabled": false
+    }
+  }
+}

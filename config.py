@@ -348,6 +348,14 @@ class Config:
     # rather than under data/ because they are authored, versioned and
     # meant to be read - the opposite of generated state.
     skills_dir: Path = field(default=PROJECT_ROOT / "skills")
+    # MCP servers, in the shape every other MCP client uses so a config
+    # can be copied straight in. The cache is what each server said it
+    # offers: the registry is rebuilt every turn, and starting a
+    # subprocess per server to ask again each time is not affordable
+    # here. `POST /api/mcp/refresh` is what pays that cost, on request.
+    mcp_config: Path = field(default=PROJECT_ROOT / "mcp.json")
+    mcp_cache: Path = field(default=PROJECT_ROOT / "data" / "mcp_tools.json")
+    mcp_idle_timeout: float = 300.0
     # How many memories may be retrieved into one turn's context.
     memory_top_k: int = 5
     # Below this final score a memory is not worth its prompt tokens. This is

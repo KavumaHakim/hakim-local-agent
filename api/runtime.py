@@ -32,6 +32,7 @@ from models.connectivity import Connectivity
 from models.manager import ModelManager, ModelManagerError, ModelSpec
 from models.qwen import QwenClient, QwenError
 from models.remote import RemoteClient
+from tools.mcp_client import McpManager
 from tools.registry import build_default_registry
 from tools.results import ResultStore
 
@@ -262,6 +263,14 @@ class Runtime:
         # switches are: nothing here should outlive the process quietly.
         self._recent_workspaces: list[Path] = [self.config.workspace]
         self._voice = None
+        # One per process, because a connection is a subprocess and
+        # two managers would each think they owned it. Built eagerly:
+        # it reads a small JSON file and starts nothing.
+        self.mcp = McpManager(
+            self.config.mcp_config,
+            self.config.mcp_cache,
+            idle_timeout=self.config.mcp_idle_timeout,
+        )
         # How the shutdown route ends the process, once it has answered.
         # SIGINT rather than anything harder, so uvicorn runs the same
         # lifespan shutdown Ctrl+C does - the one that unloads models and

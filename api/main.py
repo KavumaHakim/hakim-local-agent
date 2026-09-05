@@ -99,6 +99,9 @@ def _sweeper(runtime: Runtime, stop: threading.Event) -> None:
             # so it needs the same sweep. It is only ever there because
             # somebody pressed the speaker button.
             runtime.sweep_voice()
+            # An MCP server is a subprocess held open between calls, exactly
+            # like a llama-server, so it is reaped on the same terms.
+            runtime.mcp.sweep()
             # Memory processing is the one thing here that may START a model.
             # It is last, it is skipped whenever a turn is running, and it is
             # off unless AGENT_ENABLE_MEMORY_PROCESSING says otherwise.
@@ -144,6 +147,8 @@ def _lifespan_for(supplied: Runtime | None):
             # reloader kills the worker in a way that does not always reach
             # this.
             runtime.manager.stop_all()
+            # Same reason: a missed stop leaks a subprocess.
+            runtime.mcp.stop_all()
 
     return lifespan
 

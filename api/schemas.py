@@ -581,6 +581,24 @@ class StopTurnOut(BaseModel):
     message: str
 
 
+class McpServerOut(BaseModel):
+    name: str
+    command: str
+    trusted: bool
+    # How many of its tools are cached. 0 means it has never been reached, or
+    # answered with none - refreshing says which.
+    tools: int
+    error: str = ""
+
+
+class McpOut(BaseModel):
+    """What the agent knows about its MCP servers, from the cache."""
+
+    servers: list[McpServerOut]
+    configured: bool
+    config_path: str
+
+
 class ApprovalRequest(BaseModel):
     """A decision on one command the agent asked about."""
 
