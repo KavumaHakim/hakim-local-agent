@@ -32,6 +32,7 @@ CHARS_PER_TOKEN = 3.5
 from models.qwen import ChatClient, TokenCallback
 from tools.base import ToolRegistry, ToolResult
 from tools.lens import LOAD_TOOLS, ToolLens
+from tools.skills import LOAD_SKILL, NEEDS_TOOLS
 
 
 class AgentError(Exception):
@@ -262,7 +263,50 @@ class Agent:
         """
         if self._lens is not None and call.name == LOAD_TOOLS:
             return ToolResult(name=call.name, payload=self._lens.load(call.arguments))
-        return self._tools.execute(call.name, call.arguments)
+        result = self._tools.execute(call.name, call.arguments)
+        if call.name == LOAD_SKILL:
+            return self._open_skill_tools(result)
+        return result
+
+    def _open_skill_tools(self, result: ToolResult) -> ToolResult:
+        """Open the tool groups a skill said its instructions need.
+
+        A skill that explains how to plot something is no use to a model that
+        cannot see the python tool, and the round trip it would otherwise
+        spend on `load_tools` discovering that is one the skill already knew
+        about. The prefix-cache miss is the same one opening the group costs
+        whenever it happens; this only moves it earlier.
+
+        The declared list never reaches the model. What it is told is what
+        *actually* opened, which is not the same thing: a group can be already
+        open, switched off, or named wrongly in the skill file, and a model
+        told about a tool whose schema is not coming will try to call it.
+
+        When the lens is off every tool is in every request already, so there
+        is nothing to open - the key is dropped and the result is otherwise
+        unchanged.
+        """
+        payload = result.payload
+        if not isinstance(payload, dict) or NEEDS_TOOLS not in payload:
+            return result
+
+        payload = dict(payload)
+        wanted = payload.pop(NEEDS_TOOLS) or []
+        if self._lens is None:
+            return ToolResult(name=result.name, payload=payload)
+
+        opened = sorted(self._lens.open_categories_by_name([str(w) for w in wanted]))
+        if opened:
+            payload["loaded_tools"] = opened
+            # Appended to the existing note rather than added beside it: two
+            # instruction fields in one result get read as two topics, and
+            # this is a clause of the first one.
+            payload["note"] = (
+                f"{payload.get('note', '')} The tools these instructions need "
+                f"({', '.join(opened)}) are loaded, and available from your "
+                f"next message."
+            ).strip()
+        return ToolResult(name=result.name, payload=payload)
 
     def _result_budget(self) -> int:
         """How much of the context this tool result may take, right now.

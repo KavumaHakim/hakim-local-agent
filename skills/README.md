@@ -33,6 +33,35 @@ here works — which is what most people will try first.
 The name must be lowercase letters, digits and hyphens: the model has to
 repeat it back, and an enum on the tool stops it inventing one.
 
+## Skills that need tools
+
+A third key, `tools:`, names the tool groups the instructions assume. Loading
+the skill opens them.
+
+```markdown
+---
+name: plotting
+description: How charts are drawn and where they are saved
+tools: python, filesystem
+---
+```
+
+`tools: [python, filesystem]` means the same thing, and so does a space
+instead of the comma. The group names are the ones in the `load_tools` index —
+`filesystem`, `python`, `terminal`, `git`, `http`, `memory`, `documents`,
+`ocr`, and `mcp:<server>` for an MCP server.
+
+Why it exists: instructions that say *"plot it with matplotlib"* are no use to
+a model that cannot see the python tool, and making it spend a second round
+trip on `load_tools` to discover that is a round trip the skill already knew
+about. Opening a group costs a prefix-cache miss whichever way it happens;
+this only moves it earlier.
+
+A name that is misspelled, or belongs to a tool that is switched off, simply
+opens nothing. The model is told what **actually** opened rather than what was
+asked for — being told about a tool whose schema is not coming is worse than
+not being told at all.
+
 ## How it reaches the model
 
 As a **tool result**, never as part of the prompt. That is a hardware

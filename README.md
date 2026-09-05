@@ -3107,6 +3107,31 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 
 **Measured and decided against:**
 
+- **Subagents** — a research agent, a coding agent, a document agent, each on
+  its own model. Two things kill it here, and neither is a matter of effort.
+
+  `max_active` is 1, and `ModelManager._stop_others` enforces it: two chat
+  models are never resident on 8 GB. So "a different model per agent" means a
+  full model swap per delegation, both ways — 18 s at best, and that is the
+  load alone.
+
+  Same-model subagents avoid that and still lose. A subagent is a fresh
+  conversation, so it is a fresh prompt prefix, and llama.cpp's cache is keyed
+  on exactly that: **~200 s to read in, and another ~200 s when control comes
+  back**. What it buys is context isolation, and that is already bought more
+  cheaply — large-result offloading keeps a 50,000-line file out of the window
+  without a second conversation at all.
+
+  Worth revisiting only on hardware that can hold two models, where the second
+  prefix is not the dominant cost.
+
+- **A single `AgentState` object** — conversation, session state, working
+  memory, long-term memory and tool results collected behind one façade. They
+  are already separate: `chat_store.py`, `memory/` (four layers, working
+  memory deliberately never persisted), and `tools/results.py`. Merging them
+  produces a tidier diagram and no measurable change, so the refactor is cost
+  with no return.
+
 - **Borderless table detection** (`find_tables(strategy="text")`). It does
   recover the data rows of an unruled table, but measured on the 120-page prose
   book it took **56.9 s against 0.61 s** — about 93× — and reported a table on
