@@ -271,3 +271,66 @@ class HandshakeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnrestrictedPythonGateTests(unittest.TestCase):
+    """Running an arbitrary script is the most powerful thing here.
+
+    It sat behind two opt-ins and no prompt, while `mkdir` through the
+    terminal tool asked - which put the gate the wrong way round the moment
+    the terminal one existed. Only the unrestricted form asks: the restricted
+    one cannot import, open a file or reach the network, so there is nothing
+    for a person to weigh.
+    """
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        (self.root / "hi.py").write_text("print('ran')", encoding="utf-8")
+
+    def tool(self, *, unrestricted=True, approve=None):
+        from tools.filesystem import WorkspaceFiles
+        from tools.python_tool import build_python_file_tool
+
+        return build_python_file_tool(
+            workspace=WorkspaceFiles(self.root),
+            timeout=10,
+            max_output_chars=1000,
+            unrestricted=unrestricted,
+            approve=approve,
+        )
+
+    def test_without_anyone_to_ask_it_refuses(self):
+        from tools.python_tool import PythonToolError
+
+        with self.assertRaises(PythonToolError) as caught:
+            self.tool().run(path="hi.py")
+        self.assertIn("nobody to ask", str(caught.exception))
+
+    def test_declining_runs_nothing(self):
+        asked = []
+
+        def decline(what, why):
+            asked.append((what, why))
+            return False
+
+        result = self.tool(approve=decline).run(path="hi.py")
+
+        self.assertFalse(result["success"])
+        self.assertTrue(result["declined"])
+        self.assertIn("run_python_file hi.py", asked[0][0])
+        self.assertIn("no restrictions", asked[0][1])
+
+    def test_approving_runs_it(self):
+        result = self.tool(approve=lambda w, y: True).run(path="hi.py")
+        self.assertTrue(result["success"], result)
+        self.assertIn("ran", result["stdout"])
+
+    def test_the_restricted_form_never_asks(self):
+        """It cannot import or open anything, so there is nothing to weigh."""
+        asked = []
+        self.tool(
+            unrestricted=False, approve=lambda w, y: asked.append(w) or True
+        ).run(path="hi.py")
+        self.assertEqual(asked, [])

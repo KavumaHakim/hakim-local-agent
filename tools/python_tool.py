@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.base import Tool, ToolError
+from tools.shell_tool import ApprovalCheck
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -319,8 +320,42 @@ def build_python_file_tool(
     timeout: float,
     max_output_chars: int,
     unrestricted: bool,
+    approve: ApprovalCheck | None = None,
 ) -> Tool:
+    """The file runner, asked about first when it is the unrestricted one.
+
+    Running an arbitrary script is the most powerful thing in this project -
+    more so than any command the terminal tool will run - and the terminal
+    tool asks before creating a directory. Leaving this one silent while
+    `mkdir` prompts had the gate exactly the wrong way round.
+
+    Only the unrestricted form asks. The restricted one cannot import, open a
+    file or reach the network, so there is nothing for a person to weigh.
+    """
+
     def _run(path: str) -> dict[str, Any]:
+        if unrestricted:
+            asked = f"run_python_file {path}"
+            if approve is None:
+                raise PythonToolError(
+                    f"{asked} needs approval before it can run, and there is "
+                    f"nobody to ask in this context. Run the script yourself, "
+                    f"or use the web interface where the prompt can be shown."
+                )
+            if not approve(
+                asked,
+                "runs a Python script with no restrictions - imports, the "
+                "filesystem and the network are all available to it",
+            ):
+                return {
+                    "success": False,
+                    "error": (
+                        f"Not approved: {asked} was declined, or the request "
+                        f"timed out. Do not try to run it another way."
+                    ),
+                    "path": path,
+                    "declined": True,
+                }
         return run_python_file(
             path,
             workspace=workspace,

@@ -12,6 +12,7 @@ from tools.ocr_tool import OcrClient
 from tools.python_tool import build_python_file_tool, build_python_tool
 from tools.git_tool import build_git_tools
 from tools.http_tool import build_http_tool
+from tools.results import ResultStore, build_result_tool
 from tools.shell_tool import ApprovalCheck, build_shell_tool
 
 
@@ -73,6 +74,11 @@ def build_default_registry(
     for tool in workspace.tools():
         registry.register(tool)
 
+    # Always registered, never free: `read_result` is the other half of
+    # truncating a result, and the lens only opens its group once something
+    # has actually been set aside.
+    registry.register(build_result_tool(ResultStore(config.results_dir)))
+
     disabled: list[DisabledTool] = []
 
     if config.file_writes_enabled:
@@ -104,6 +110,7 @@ def build_default_registry(
                 timeout=config.python_timeout,
                 max_output_chars=config.python_max_output_chars,
                 unrestricted=config.python_unrestricted,
+                approve=approve,
             )
         )
     else:
