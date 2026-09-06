@@ -3413,6 +3413,17 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
   what a turn's context is made of, against the model's window, and what had to
   be dropped. The naming prompt is bare: no system prompt, no tools, no
   thinking.
+- **Syntax highlighting**, hand-written in `web/src/lib/highlight.ts` — seven
+  languages, one alternation each, scanned in a single pass so comments and
+  strings win ties. Tokens rather than markup, so the no-innerHTML property
+  holds; an unknown language renders plain rather than guessed, and every rule
+  accepts an unterminated form that stops at end of line, so a half-arrived
+  block does not paint the rest of the file. **+2.34 kB of JavaScript and
+  +0.17 kB of CSS, gzipped**, against ~120 kB for highlight.js.
+- **The thinking panel follows the trace** and stops when you scroll up,
+  worked out from the height the trace had before each update. The obvious
+  scroll listener lost a race — measured, scrolled up to 30 px and back at the
+  bottom five seconds later.
 - **Attachment previews** in the composer, so an image is visible before it is
   sent rather than only as a path.
 - **Models got their own pane.** Settings had grown back into the single
