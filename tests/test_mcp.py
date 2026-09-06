@@ -310,5 +310,107 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(report["servers"].get("fake"), 3)
 
 
+
+class ReloadTests(unittest.TestCase):
+    """Adding a server to mcp.json while the API is running.
+
+    The manager the API holds is built once at startup. Before `reload`, a
+    server added to the file was invisible to it forever - and `refresh` would
+    report success having asked the old set.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.config = self.root / "mcp.json"
+        self.cache = self.root / "cache.json"
+        self.write({"fake": self.entry()})
+
+    def entry(self, **extra) -> dict:
+        return {"command": sys.executable, "args": [SERVER], **extra}
+
+    def write(self, servers: dict) -> None:
+        self.config.write_text(
+            json.dumps({"mcpServers": servers}), encoding="utf-8"
+        )
+
+    def manager(self) -> McpManager:
+        made = McpManager(self.config, self.cache)
+        self.addCleanup(made.stop_all)
+        return made
+
+    def test_a_server_added_to_the_file_is_seen_after_a_reload(self):
+        made = self.manager()
+        self.assertEqual([s.name for s in made.servers], ["fake"])
+
+        self.write({"fake": self.entry(), "second": self.entry()})
+        made.reload()
+
+        self.assertEqual([s.name for s in made.servers], ["fake", "second"])
+
+    def test_refreshing_picks_up_a_new_server_without_being_asked_to_reload(self):
+        """The whole point: pressing Refresh after editing the file works."""
+        made = self.manager()
+        self.write({"fake": self.entry(), "second": self.entry()})
+
+        report = made.refresh()
+
+        self.assertEqual(report["servers"], {"fake": 3, "second": 3})
+
+    def test_a_server_removed_from_the_file_goes(self):
+        made = self.manager()
+        self.write({})
+        made.reload()
+        self.assertEqual(made.servers, [])
+
+    def test_a_running_server_that_was_removed_is_stopped(self):
+        """It is a subprocess started from a command line that no longer exists."""
+        made = self.manager()
+        made.refresh()
+        next(t for t in made.tools() if t.name == "fake__echo").run(text="x")
+
+        self.write({})
+        made.reload()
+
+        self.assertEqual(made.stop_all(), [])
+
+    def test_a_running_server_whose_command_changed_is_stopped(self):
+        made = self.manager()
+        made.refresh()
+        next(t for t in made.tools() if t.name == "fake__echo").run(text="x")
+
+        self.write({"fake": self.entry(trusted=True)})
+        made.reload()
+
+        self.assertEqual(made.stop_all(), [])
+
+    def test_a_server_left_alone_keeps_its_connection(self):
+        """Reloading is not an excuse to restart everything."""
+        made = self.manager()
+        made.refresh()
+        next(t for t in made.tools() if t.name == "fake__echo").run(text="x")
+
+        self.write({"fake": self.entry(), "second": self.entry()})
+        made.reload()
+
+        self.assertEqual(made.stop_all(), ["fake"])
+
+    def test_disabling_a_server_in_the_file_removes_it(self):
+        made = self.manager()
+        self.write({"fake": self.entry(enabled=False)})
+        made.reload()
+        self.assertEqual(made.servers, [])
+
+    def test_cached_tools_reads_the_file_and_starts_nothing(self):
+        made = self.manager()
+        self.assertEqual(made.cached_tools(), {})
+
+        made.refresh()
+
+        self.assertEqual(sorted(made.cached_tools()), ["fake"])
+        self.assertEqual(made.stop_all(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

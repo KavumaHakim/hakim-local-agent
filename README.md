@@ -2608,6 +2608,21 @@ cached yet contributes nothing until you refresh — which is the honest
 behaviour, and visible in `GET /api/mcp`. Idle servers are reaped after
 `mcp_idle_timeout` (300 s) by the same sweeper that unloads idle llama-servers.
 
+**The Tools pane lists them**, with the command each would run, how many tools
+are cached, whether it is trusted, and — after a refresh — why one would not
+start. Refresh is a button rather than something that happens on load, because
+it is the only thing in that pane that starts a process, and it is refused with
+a 409 while a turn is running or queued.
+
+Refreshing **re-reads `mcp.json` first**, so a server added while the API is
+running becomes real without a restart. It did not, until the panel existed to
+show it: the registry builds a fresh manager every turn and so had always seen
+the current file, while the long-lived manager behind `/api/mcp/refresh` was
+built at startup and would cheerfully refresh the *old* set and report success.
+Servers switched off with `"enabled": false` are listed as off rather than
+omitted, for the same reason — a server that vanishes from the panel reads as a
+broken config file.
+
 **Permission.** A tool a server annotates `readOnlyHint` runs freely. Anything
 else asks you first, showing which server and which tool. That direction is the
 only safe one: `readOnlyHint` is the *server's claim about itself*, so it can
@@ -3323,8 +3338,8 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
    untested gaps.
 2. **Settings deserves better than an icon.** It is a single button now; the
    things behind it have outgrown that.
-3. **A UI for MCP servers.** Adding one means editing `mcp.json` by hand and
-   calling `POST /api/mcp/refresh`. The endpoints exist; the panel does not.
+3. **Syntax highlighting for more languages.** Seven are covered; a fence
+   labelled anything else renders plain, which is correct but plain.
 
 **Giving the model more room:**
 
@@ -3374,6 +3389,12 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
   whole roster. The manifest is cached because the registry is rebuilt every
   turn and a subprocess per server per question is not affordable here.
   `readOnlyHint` can move a tool into the safer tier and never out of one.
+  The **Tools pane now lists them** — command, cached tool count, trusted,
+  disabled, and why one would not start. Building the panel found the bug it
+  existed to expose: `refresh` iterated a spec list frozen at startup, so a
+  server added to `mcp.json` while the API ran was refreshed away silently. It
+  re-reads the file first now, verified live by adding a server to a running
+  API and watching it come back with three tools.
 - **Context controls, regenerate, fork, delete and model-written titles** —
   what a turn's context is made of, against the model's window, and what had to
   be dropped. The naming prompt is bare: no system prompt, no tools, no

@@ -589,6 +589,10 @@ class McpServerOut(BaseModel):
     # answered with none - refreshing says which.
     tools: int
     error: str = ""
+    # Listed even when off. The manager drops disabled servers, so without
+    # this a server someone switched off in mcp.json disappears from the
+    # panel entirely, which reads as "the file is wrong".
+    enabled: bool = True
 
 
 class McpOut(BaseModel):

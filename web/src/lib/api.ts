@@ -17,6 +17,7 @@ import type {
   ModelOverride,
   ModelsResponse,
   RescanResponse,
+  McpResponse,
   ResourcesResponse,
   RewindResult,
   OcrBackend,
@@ -108,6 +109,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ enabled }),
     }),
+
+  mcp: () => request<McpResponse>('/mcp'),
+
+  /**
+   * Ask every MCP server what it offers, and cache it.
+   *
+   * The expensive one - each server is started, questioned and stopped - and
+   * a 409 while a turn is running or queued, because it rebuilds the roster
+   * that turn is using.
+   */
+  refreshMcp: () => request<McpResponse>('/mcp/refresh', { method: 'POST' }),
 
   /** Choose which reader ocr_image uses. Applies from the next turn. */
   setOcrBackend: (backend: OcrBackend) =>

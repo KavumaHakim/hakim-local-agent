@@ -9,6 +9,8 @@
 import { useEffect, useState } from 'react'
 import type {
   Conversation,
+  McpResponse,
+  McpServer,
   Model,
   ModelOverride,
   ModelsResponse,
@@ -67,6 +69,14 @@ interface Props {
   toolError: string | null
   onToggleTool: (id: string, enabled: boolean) => void
   onSetOcrBackend: (backend: OcrBackend) => void
+
+  /** Null in tests and anywhere the section is not wanted; it renders nothing. */
+  mcp: {
+    data: McpResponse | null
+    refreshing: boolean
+    error: string | null
+  } | null
+  onRefreshMcp: () => void
 
   workspace: WorkspaceInfo | null
   onOpenWorkspacePicker: () => void
@@ -186,13 +196,8 @@ function HistoryPane({
   )
 }
 
-function ToolsPane({
-  tools,
-  toolPending,
-  toolError,
-  onToggleTool,
-  onSetOcrBackend,
-}: Props) {
+function ToolsPane(props: Props) {
+  const { tools, toolPending, toolError, onToggleTool, onSetOcrBackend } = props
   if (!tools) return <p className="text-[11.5px] text-faint">Loading…</p>
 
   const parents = tools.switches.filter((entry) => !entry.depends_on)
@@ -223,7 +228,107 @@ function ToolsPane({
       />
 
       {toolError && <p className="mt-2 text-[11px] text-danger">{toolError}</p>}
+
+      <McpServers {...props} />
     </>
+  )
+}
+
+/**
+ * The MCP servers, and the button that asks them what they offer.
+ *
+ * Here rather than in a pane of its own because an MCP server *is* tools —
+ * each one arrives as its own lens group and its tools sit in the same roster
+ * above. What it is not is a switch: servers are added by editing a file, so
+ * the honest job of this section is to show what that file says, whether the
+ * agent has ever reached each one, and why it could not.
+ *
+ * **Refreshing is the only expensive thing in this pane.** Every server is
+ * started, questioned and stopped, which is why it is a button rather than
+ * something that happens on load — and why it is refused mid-turn, since it
+ * rebuilds the roster the running turn is using.
+ */
+function McpServers({ mcp, onRefreshMcp }: Props) {
+  if (!mcp) return null
+
+  return (
+    <section className="mt-5 border-t border-line pt-3">
+      <div className="mb-1.5 flex items-center gap-2">
+        <h3 className="flex-1 text-[11.5px] tracking-[0.02em] text-fg">
+          MCP servers
+        </h3>
+        {mcp.data && mcp.data.servers.length > 0 && (
+          <button
+            type="button"
+            onClick={() => void onRefreshMcp()}
+            disabled={mcp.refreshing}
+            title="Start each server, ask what it offers, stop it again"
+            className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition hover:border-accent-line hover:text-fg disabled:opacity-50"
+          >
+            {mcp.refreshing ? 'Asking…' : 'Refresh'}
+          </button>
+        )}
+      </div>
+
+      {!mcp.data ? (
+        <p className="text-[11px] text-faint">Loading…</p>
+      ) : mcp.data.servers.length === 0 ? (
+        <p className="text-[11px] leading-relaxed text-faint">
+          {mcp.data.configured
+            ? 'None configured yet. Add one to '
+            : 'No config file. Copy mcp.example.json to '}
+          <span className="font-mono break-all">{mcp.data.config_path}</span>
+          {mcp.data.configured ? '.' : ' and add a server.'}
+        </p>
+      ) : (
+        <ul className="space-y-1.5">
+          {mcp.data.servers.map((server) => (
+            <McpServerRow key={server.name} server={server} />
+          ))}
+        </ul>
+      )}
+
+      {mcp.error && <p className="mt-2 text-[11px] text-danger">{mcp.error}</p>}
+    </section>
+  )
+}
+
+function McpServerRow({ server }: { server: McpServer }) {
+  return (
+    <li className="rounded-md bg-tint px-2 py-1.5">
+      <div className="flex items-baseline gap-2">
+        <span
+          className={`font-mono text-[11.5px] ${server.enabled ? 'text-fg' : 'text-faint line-through'}`}
+        >
+          {server.name}
+        </span>
+        <span className="ml-auto shrink-0 text-[10.5px] text-faint">
+          {!server.enabled
+            ? 'off'
+            : server.tools === 0
+              ? 'not asked yet'
+              : `${server.tools} ${server.tools === 1 ? 'tool' : 'tools'}`}
+        </span>
+      </div>
+
+      <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint" title={server.command}>
+        {server.command}
+      </p>
+
+      {server.trusted && (
+        // Worth saying out loud: it is the one setting here that removes a
+        // question the agent would otherwise have to ask a person.
+        <p className="mt-1 text-[10.5px] text-warn">
+          Trusted — its tools run without asking
+        </p>
+      )}
+
+      {server.error && (
+        <p className="mt-1 text-[10.5px] leading-relaxed text-danger">
+          {server.error}
+        </p>
+      )}
+    </li>
   )
 }
 

@@ -227,6 +227,27 @@ export interface ToolsResponse {
 
 export type OcrBackend = 'tesseract' | 'model'
 
+/** One MCP server, as `mcp.json` describes it and the cache remembers it. */
+export interface McpServer {
+  name: string
+  /** The command line, truncated server-side. Shown so it can be checked. */
+  command: string
+  /** Its tools skip the approval gate. Stated in the file, never inferred. */
+  trusted: boolean
+  /** How many of its tools are cached. 0 means it has never been reached. */
+  tools: number
+  /** From the last refresh, if it would not start. */
+  error: string
+  enabled: boolean
+}
+
+export interface McpResponse {
+  servers: McpServer[]
+  /** Whether mcp.json exists at all - the first-run case. */
+  configured: boolean
+  config_path: string
+}
+
 /** The folder the file tools may reach, and what is pointed at it. */
 export interface WorkspaceInfo {
   path: string

@@ -12,6 +12,7 @@ import type {
   Conversation,
   HubFiles,
   HubModel,
+  McpResponse,
   ModelDownload,
   ModelOverride,
   ModelsResponse,
@@ -274,6 +275,50 @@ export function useTools() {
   }, [])
 
   return { data, toggle, pending, error, setOcrBackend, refresh }
+}
+
+/**
+ * The MCP servers, and the one button that costs anything.
+ *
+ * Kept apart from `useTools` because the two answer different questions and
+ * fail differently. The roster is what the model can call *now*; this is what
+ * `mcp.json` describes, which may be several servers the agent has never
+ * reached. Refreshing is the only thing here that starts a process, and it is
+ * refused outright while a turn is running - so it needs its own pending and
+ * its own error, not a share of the roster's.
+ */
+export function useMcp() {
+  const [data, setData] = useState<McpResponse | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      setData(await api.mcp())
+    } catch {
+      /* reading the config is cheap and retried; a banner would say nothing */
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true)
+    setError(null)
+    try {
+      // The response is the whole snapshot including per-server errors, so
+      // "it refreshed" and "this one would not start" arrive together.
+      setData(await api.refreshMcp())
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setRefreshing(false)
+    }
+  }, [])
+
+  return { data, refresh, refreshing, error, reload: load }
 }
 
 /**

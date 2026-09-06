@@ -387,7 +387,36 @@ class McpManager:
     def servers(self) -> list[ServerSpec]:
         return [self._specs[name] for name in sorted(self._specs)]
 
+    def reload(self) -> None:
+        """Re-read mcp.json.
+
+        The long-lived manager the API holds is built once at startup, so
+        without this, adding a server to the file and pressing Refresh would
+        cheerfully refresh the *old* set and report success. The registry does
+        not have this problem - it builds a new manager every turn - which is
+        exactly the kind of inconsistency that only shows up once there is a
+        panel displaying both.
+
+        A connection whose spec has changed or disappeared is stopped: it is a
+        subprocess started from a command line that no longer exists.
+        """
+        with self._lock:
+            fresh = {
+                spec.name: spec
+                for spec in load_servers(self._config_path)
+                if spec.enabled
+            }
+            for name, connection in list(self._connections.items()):
+                if fresh.get(name) != self._specs.get(name):
+                    connection.stop()
+                    self._connections.pop(name, None)
+            self._specs = fresh
+
     # --- the cached manifest ---
+
+    def cached_tools(self) -> dict[str, list[dict[str, Any]]]:
+        """What each server last said it offers. Reads the file, starts nothing."""
+        return self._read_cache()
 
     def _read_cache(self) -> dict[str, list[dict[str, Any]]]:
         try:
@@ -423,7 +452,11 @@ class McpManager:
         Each is started and stopped again around the question: the point of
         refreshing is to make the *next* turns cheap, not to leave a dozen
         subprocesses resident on an 8 GB machine.
+
+        The config is re-read first, so this is also how a server added to
+        mcp.json while the API is running becomes real.
         """
+        self.reload()
         manifest: dict[str, list[dict[str, Any]]] = {}
         errors: dict[str, str] = {}
 

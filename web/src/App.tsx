@@ -25,6 +25,7 @@ import {
   useHotkey,
   useModelHub,
   useModels,
+  useMcp,
   useTools,
   useWorkspace,
 } from './hooks/useResources'
@@ -60,6 +61,7 @@ export default function App() {
 
   const models = useModels()
   const tools = useTools()
+  const mcp = useMcp()
   const conversations = useConversations()
   const workspace = useWorkspace()
 
@@ -472,6 +474,8 @@ export default function App() {
           onSetOcrBackend={(backend) => void tools.setOcrBackend(backend)}
           toolError={tools.error}
           onToggleTool={(id, enabled) => void toggleTool(id, enabled)}
+          mcp={mcp}
+          onRefreshMcp={() => void mcp.refresh()}
           workspace={workspace.workspace}
           onOpenWorkspacePicker={() => setPickingWorkspace(true)}
           onOpenModelBrowser={() => setBrowsingModels(true)}

@@ -189,7 +189,15 @@ class ApiTestCase(unittest.TestCase):
         registry_path = write_registry(tmp)
         self.manager = ManagerHarness(registry_path)
         config = dataclasses.replace(
-            Config(), db_path=tmp / "chat.db", workspace=tmp
+            Config(),
+            db_path=tmp / "chat.db",
+            workspace=tmp,
+            # Pointed at the temp directory, not left at the default. The
+            # default is the repo's own mcp.json, so a developer with servers
+            # configured would run a different test suite from one without -
+            # the same trap the skills tests fell into.
+            mcp_config=tmp / "mcp.json",
+            mcp_cache=tmp / "mcp_tools.json",
         )
         self.runtime = HarnessRuntime(config, self.manager)
         self.client = TestClient(create_app(self.runtime))
@@ -1563,6 +1571,94 @@ class MetaRouteTests(ApiTestCase):
         self.assertTrue(body["ok"])
         self.assertFalse(body["busy"])
         self.assertEqual(body["queue_depth"], 0)
+
+
+
+class McpRouteTests(ApiTestCase):
+    """What the MCP panel reads, and the one request that costs anything."""
+
+    def write_config(self, servers: dict) -> None:
+        self.runtime.config.mcp_config.write_text(
+            json.dumps({"mcpServers": servers}), encoding="utf-8"
+        )
+
+    def get(self) -> dict:
+        response = self.client.get("/api/mcp")
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def test_no_config_file_is_reported_not_an_error(self):
+        """The first-run case: the panel has to say what to create."""
+        body = self.get()
+
+        self.assertFalse(body["configured"])
+        self.assertEqual(body["servers"], [])
+        self.assertTrue(body["config_path"].endswith("mcp.json"))
+
+    def test_servers_are_listed_from_the_file(self):
+        self.write_config({"b": {"command": "x"}, "a": {"command": "y", "args": ["z"]}})
+
+        body = self.get()
+
+        self.assertTrue(body["configured"])
+        # Sorted, so the panel does not reorder itself when the file is edited.
+        self.assertEqual([s["name"] for s in body["servers"]], ["a", "b"])
+        self.assertEqual(body["servers"][0]["command"], "y z")
+
+    def test_a_disabled_server_is_listed_as_disabled(self):
+        """The manager drops these. Dropping them here would read as a bad file."""
+        self.write_config({"off": {"command": "x", "enabled": False}})
+
+        server = self.get()["servers"][0]
+
+        self.assertFalse(server["enabled"])
+        self.assertEqual(server["tools"], 0)
+
+    def test_trusted_is_carried_through(self):
+        self.write_config({"vault": {"command": "x", "trusted": True}})
+        self.assertTrue(self.get()["servers"][0]["trusted"])
+
+    def test_a_server_added_after_startup_appears_without_a_restart(self):
+        """The runtime's manager is built once; the snapshot reads the file."""
+        self.assertEqual(self.get()["servers"], [])
+
+        self.write_config({"late": {"command": "x"}})
+
+        self.assertEqual([s["name"] for s in self.get()["servers"]], ["late"])
+
+    def test_tool_counts_come_from_the_cache_and_start_nothing(self):
+        self.write_config({"cached": {"command": "x"}})
+        self.runtime.config.mcp_cache.write_text(
+            json.dumps({"servers": {"cached": [{"name": "a"}, {"name": "b"}]}}),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(self.get()["servers"][0]["tools"], 2)
+
+    def test_refreshing_reports_a_server_that_will_not_start(self):
+        """The error is the whole value of the button when it goes wrong."""
+        self.write_config({"broken": {"command": "definitely-not-real-xyz"}})
+
+        response = self.client.post("/api/mcp/refresh")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        server = response.json()["servers"][0]
+        self.assertEqual(server["tools"], 0)
+        self.assertIn("Could not start", server["error"])
+
+    def test_refreshing_is_refused_while_a_turn_is_running(self):
+        """It rebuilds the roster the running turn is holding."""
+        with mock.patch.object(self.runtime.queue, "busy", return_value=True):
+            response = self.client.post("/api/mcp/refresh")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("turn is running", response.json()["detail"])
+
+    def test_refreshing_is_refused_while_a_turn_is_queued(self):
+        with mock.patch.object(self.runtime.queue, "depth", return_value=2):
+            response = self.client.post("/api/mcp/refresh")
+
+        self.assertEqual(response.status_code, 409)
 
 
 if __name__ == "__main__":

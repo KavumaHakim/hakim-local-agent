@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from api.deps import get_runtime
 from api.runtime import FLAGS_BY_ID, TOOL_FLAGS, Runtime
 from models.manager import ModelManagerError, ModelState, memory_status
+from tools.mcp_client import load_servers
 
 from api.schemas import (
     DisabledToolOut,
@@ -213,8 +214,17 @@ def refresh_mcp(runtime: Runtime = Depends(get_runtime)):
 
 
 def _mcp_snapshot(runtime: Runtime, errors: dict | None = None) -> McpOut:
+    """What the config says now, and what the cache holds for it.
+
+    Read from the file rather than from `runtime.mcp`, for two reasons. The
+    manager drops disabled servers, so one switched off in mcp.json would
+    vanish from the panel rather than appear switched off. And the manager's
+    list is from startup: someone who has just added a server should see it
+    before they press Refresh, not after. Refreshing is what reloads the
+    manager itself.
+    """
     config = runtime.effective_config()
-    counts = runtime.mcp._read_cache()
+    counts = runtime.mcp.cached_tools()
     errors = errors or {}
     return McpOut(
         servers=[
@@ -222,10 +232,11 @@ def _mcp_snapshot(runtime: Runtime, errors: dict | None = None) -> McpOut:
                 name=spec.name,
                 command=" ".join([spec.command, *spec.args])[:200],
                 trusted=spec.trusted,
+                enabled=spec.enabled,
                 tools=len(counts.get(spec.name, [])),
                 error=errors.get(spec.name, ""),
             )
-            for spec in runtime.mcp.servers
+            for spec in sorted(load_servers(config.mcp_config), key=lambda s: s.name)
         ],
         configured=config.mcp_config.is_file(),
         config_path=str(config.mcp_config),
