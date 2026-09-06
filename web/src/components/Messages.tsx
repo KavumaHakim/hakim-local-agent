@@ -115,9 +115,49 @@ export function ReasoningPanel({
   text: string
   live?: boolean
 }) {
+  const scroller = useRef<HTMLDivElement | null>(null)
+  // How tall the trace was last time this ran. The whole mechanism, and the
+  // reason there is no scroll listener: see below.
+  const wasTall = useRef(0)
+
+  // Follow the trace as it is written, but only while the reader is still at
+  // the bottom of it. A panel that yanks itself down while someone is reading
+  // the middle is worse than one that never moves.
+  //
+  // "Still at the bottom" is worked out from the height the trace had *before*
+  // this update, which is what `wasTall` holds. The obvious implementation - a
+  // scroll listener setting a flag - looked right and lost a race: scroll
+  // events are delivered asynchronously, so a token arriving between the
+  // reader's scroll and its event found the flag still saying "following",
+  // scrolled to the bottom, and from then on every gap was zero and it never
+  // let go. Measured: scrolled up to 30px, five seconds later back at the
+  // bottom. This comparison is synchronous, so there is no window to lose.
+  useEffect(() => {
+    const element = scroller.current
+    if (!element || !live) return
+    const previously = wasTall.current
+    wasTall.current = element.scrollHeight
+    // Within a line or two of the end counts as the end: fractional heights
+    // mean an exact comparison never holds, and the panel would stop
+    // following after the first frame.
+    const gap = previously - element.scrollTop - element.clientHeight
+    if (gap < 32) element.scrollTop = element.scrollHeight
+  }, [text, live])
+
   if (!text.trim()) return null
   return (
-    <details className="group mb-2 rounded-xl border border-line bg-sunken/60">
+    <details
+      className="group mb-2 rounded-xl border border-line bg-sunken/60"
+      // Opening it mid-stream should show the end, not the beginning. The
+      // effect above cannot do this: the text has not changed, so it does not
+      // fire. `onToggle` rather than a click on the summary, because it runs
+      // after the panel is actually open and so has a height to scroll.
+      onToggle={(event) => {
+        if (!event.currentTarget.open) return
+        const element = scroller.current
+        if (element) element.scrollTop = element.scrollHeight
+      }}
+    >
       <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs text-muted transition hover:text-fg">
         <BrainIcon
           className={`size-3.5 shrink-0 text-accent ${live ? 'animate-breathe' : ''}`}
@@ -128,7 +168,10 @@ export function ReasoningPanel({
         </span>
         <span className="ml-auto text-faint transition group-open:rotate-90">›</span>
       </summary>
-      <div className="max-h-72 overflow-y-auto border-t border-line px-3 py-2">
+      <div
+        ref={scroller}
+        className="max-h-72 overflow-y-auto border-t border-line px-3 py-2"
+      >
         <div className="mb-1 flex">
           <CopyButton text={text} className="ml-auto" />
         </div>

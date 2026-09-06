@@ -9,10 +9,16 @@
  *
  * Supported: fenced code, headings, bullet and numbered lists, blockquotes,
  * rules, paragraphs, and inline code, bold, italic and links.
+ *
+ * Fenced code is syntax-highlighted when the fence names a language this
+ * knows - see ./highlight, which is hand-written for the same reason and
+ * produces tokens rather than HTML, so the no-innerHTML property above still
+ * holds. A fence with no language, or one it does not know, renders plain.
  */
 
-import type { ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import { Formula } from './math'
+import { highlight, type TokenKind } from './highlight'
 
 export function Markdown({ text }: { text: string }) {
   return <>{renderBlocks(text)}</>
@@ -351,7 +357,22 @@ function Table({ header, align, rows }: TableData) {
   )
 }
 
+/** Which token kind gets which colour. The whole vocabulary is five. */
+const TOKEN_CLASS: Record<TokenKind, string> = {
+  comment: 'text-syntax-comment italic',
+  keyword: 'text-syntax-keyword',
+  string: 'text-syntax-string',
+  number: 'text-syntax-number',
+  name: 'text-syntax-name',
+  plain: '',
+}
+
 function CodeBlock({ language, code }: { language: string; code: string }) {
+  // Memoised because a streaming reply re-renders this on every token, and
+  // tokenising is the only work in the transcript that scales with the length
+  // of the block rather than with what just arrived.
+  const tokens = useMemo(() => highlight(code, language), [code, language])
+
   return (
     <figure className="my-3 overflow-hidden rounded-lg border border-line bg-sunken">
       {language && (
@@ -361,7 +382,17 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
       )}
       {/* The only element allowed to scroll sideways; the page never does. */}
       <pre className="overflow-x-auto p-3 text-[13px] leading-relaxed">
-        <code className="font-mono">{code}</code>
+        <code className="font-mono">
+          {tokens.map((token, index) =>
+            token.kind === 'plain' ? (
+              token.text
+            ) : (
+              <span key={index} className={TOKEN_CLASS[token.kind]}>
+                {token.text}
+              </span>
+            ),
+          )}
+        </code>
       </pre>
     </figure>
   )

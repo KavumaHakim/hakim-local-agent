@@ -54,6 +54,16 @@
   --warn: #d6a45f;
   --danger: #d97a80;
 
+  /* Code, on the same lightness step as the accent so no one colour jumps
+     forward. Five roles is the whole vocabulary: comments recede to the
+     muted step, keywords take the accent the interface already uses, and
+     strings, numbers and builtins get one hue each. */
+  --syntax-comment: var(--neutral-600);
+  --syntax-keyword: var(--accent-soft);
+  --syntax-string: #7fb98a;
+  --syntax-number: #d6a45f;
+  --syntax-name: #6fa8cf;
+
   --shadow-sm: 0 0 0 1px #3f424d;
   --shadow-md: 0 0 0 1px #595d6c, 0 6px 18px rgba(0, 0, 0, 0.55);
   --shadow-lg: 0 0 0 1px #9397ab, 0 16px 40px rgba(0, 0, 0, 0.65);
@@ -95,6 +105,14 @@
   --warn: #8a6220;
   --danger: #a83f45;
 
+  /* Darkened for a light ground, not reused: the dark values are set against
+     #1c1e2b and fail contrast on #e7eaf5. */
+  --syntax-comment: var(--neutral-600);
+  --syntax-keyword: var(--accent-soft);
+  --syntax-string: #2f7d5c;
+  --syntax-number: #8a6220;
+  --syntax-name: #2b6a91;
+
   --shadow-sm: 0 0 0 1px rgba(34, 36, 44, 0.1);
   --shadow-md: 0 0 0 1px rgba(34, 36, 44, 0.09), 0 6px 18px rgba(34, 36, 44, 0.1);
   --shadow-lg: 0 0 0 1px rgba(34, 36, 44, 0.1), 0 16px 40px rgba(34, 36, 44, 0.16);
@@ -135,6 +153,12 @@
   --color-ok: var(--ok);
   --color-warn: var(--warn);
   --color-danger: var(--danger);
+
+  --color-syntax-comment: var(--syntax-comment);
+  --color-syntax-keyword: var(--syntax-keyword);
+  --color-syntax-string: var(--syntax-string);
+  --color-syntax-number: var(--syntax-number);
+  --color-syntax-name: var(--syntax-name);
 
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI',
     Roboto, sans-serif;

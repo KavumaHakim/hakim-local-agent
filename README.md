@@ -2682,8 +2682,10 @@ Stored at `data/chat_history.db`; `AGENT_DB_PATH` moves it.
 
 ## 11. The web UI
 
-React 19, TypeScript, Vite 8 and Tailwind 4, in [`web/`](web/). About 70 kB
-gzipped, because the dependency list stops at those four.
+React 19, TypeScript, Vite 8 and Tailwind 4, in [`web/`](web/). 93 kB of
+JavaScript and 8 kB of CSS gzipped, because the dependency list stops at those
+four — the markdown renderer, the maths and the syntax highlighting are all
+written here rather than installed.
 
 - User turns are right-aligned accent bubbles; replies sit flat and full-width
 - **Every tool call expands** to the arguments it sent and the whole payload it
@@ -2721,6 +2723,32 @@ It builds React elements, never HTML, so there is no `dangerouslySetInnerHTML`
 anywhere in the app and no sanitiser to get wrong. A model that emits
 `<script>` emits eight harmless characters. Links are restricted to `http(s)`,
 so a `javascript:` URL renders as text.
+
+**Syntax highlighting is hand-written too**, in
+[`web/src/lib/highlight.ts`](web/src/lib/highlight.ts), for the same reason the
+renderer is: highlight.js is around 120 kB minified for its common languages
+and Shiki ships a WASM regex engine — either one is larger than this entire
+bundle. It knows Python, JavaScript/TypeScript, JSON, shell, CSS, SQL and
+HTML, and it produces **tokens, not markup**, so the property above still
+holds.
+
+Measured cost of adding it: **+2.34 kB of JavaScript and +0.17 kB of CSS,
+gzipped.**
+
+Two behaviours are deliberate:
+
+- **An unknown language is not guessed at.** A fence with no label, or one it
+  does not know, renders exactly as it did before. Guessing paints Python
+  keywords through a log file, which reads as a bug in the model's output
+  rather than in the renderer.
+- **A half-arrived block behaves.** Code streams a token at a time, so at some
+  point every string is unterminated. Each rule accepts an unterminated form
+  that stops at the end of the line, so one `"` arriving mid-reply colours the
+  rest of that line and not the rest of the file.
+
+Five colours is the whole vocabulary — comment, keyword, string, number, name —
+and they are theme tokens like everything else, with a separate set for the
+light ground because the dark values fail contrast on it.
 
 ### Queueing questions
 
@@ -2888,6 +2916,18 @@ page reloads, and the panel says so.
 
 Only models that think produce any: Qwen3 with **Extended thinking** on.
 Ministral does not, and its panel simply never appears.
+
+**The panel follows the trace as it is written**, and stops the moment you
+scroll up in it. At 2 tok/s a long thought outgrows the panel well before it
+finishes, and without this the only part you could read live was the beginning.
+
+It is worked out from the height the trace had *before* each update, not from a
+scroll listener. The listener version looked right and lost a race: scroll
+events are delivered asynchronously, so a token arriving between your scroll
+and its event found the flag still saying "following", jumped to the bottom,
+and from then on never let go. Measured before the fix — scrolled up to 30 px,
+five seconds later back at the bottom. The height comparison is synchronous, so
+there is no window to lose.
 
 ---
 
