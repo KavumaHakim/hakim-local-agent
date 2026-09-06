@@ -203,6 +203,11 @@ export function Composer({
     box.current?.focus()
   }
 
+  /** The slash word typed so far, ignoring any argument after it. */
+  function typedCommand(text: string): string {
+    return text.trim().split(/\s+/)[0].toLowerCase()
+  }
+
   function submit() {
     if (disabled || uploading || !sendable) return
     onSubmit(value.trim())
@@ -224,7 +229,22 @@ export function Composer({
       }
       if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) {
         event.preventDefault()
-        accept(suggestions[highlighted])
+        const chosen = suggestions[highlighted]
+        // Enter on a command that is already spelled out *sends* it. The
+        // dropdown stays open while the text still matches something, so
+        // without this it ate every Enter and a slash command could only be
+        // run by clicking Send - under a footer that says "Enter to send".
+        // Worse for the ones taking an argument: Enter on `/model tiny` re-
+        // accepted `/model ` and threw the argument away.
+        //
+        // Compared against the *highlighted* suggestion rather than any
+        // match, so `/model` arrowed down to `/models` still completes on
+        // Enter, and a second Enter sends it. Tab always completes.
+        if (event.key === 'Enter' && chosen.slash === typedCommand(value)) {
+          submit()
+        } else {
+          accept(chosen)
+        }
         return
       }
     }

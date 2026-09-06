@@ -6,12 +6,16 @@
  * was always long and nothing in it was ever properly visible. The rail picks
  * *one* subject and the pane beside it shows only that.
  *
+ * Models are their own subject rather than a section of Settings, which had
+ * quietly grown back into the thing this split existed to undo.
+ *
  * Clicking the active button collapses the pane, so the rail doubles as the
  * show/hide control rather than needing a separate one.
  */
 
 import type { ReactNode } from 'react'
 import {
+  ChipIcon,
   ClockIcon,
   FolderIcon,
   MoonIcon,
@@ -22,7 +26,7 @@ import {
   ToolIcon,
 } from './Icons'
 
-export type PaneId = 'history' | 'tools' | 'workspace' | 'settings'
+export type PaneId = 'history' | 'models' | 'tools' | 'workspace' | 'settings'
 
 interface Props {
   active: PaneId
@@ -60,6 +64,14 @@ export function Rail({
         onClick={() => onSelect('history')}
       >
         <ClockIcon className="size-[19px]" />
+      </RailButton>
+
+      <RailButton
+        label="Models"
+        selected={open && active === 'models'}
+        onClick={() => onSelect('models')}
+      >
+        <ChipIcon className="size-[19px]" />
       </RailButton>
 
       <RailButton

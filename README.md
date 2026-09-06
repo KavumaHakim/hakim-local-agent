@@ -2702,6 +2702,14 @@ JavaScript and 8 kB of CSS gzipped, because the dependency list stops at those
 four — the markdown renderer, the maths and the syntax highlighting are all
 written here rather than installed.
 
+**The 56px rail picks one subject; the pane beside it shows only that** —
+History, Models, Tools, Workspace, and Settings at the foot. Everything used to
+live in one scrolling sidebar, and Settings had grown back into it: appearance,
+two behaviour switches, a download prompt, the per-model overrides, the tuner,
+the llama-server path and the router summary, stacked in 262px. Models are
+their own pane now, because most of that height was theirs and it is the part
+you reopen. Settings is what you set once, and fits without scrolling.
+
 - User turns are right-aligned accent bubbles; replies sit flat and full-width
 - **Every tool call expands** to the arguments it sent and the whole payload it
   got back - the same thing the model saw. A 60-character summary is enough to
@@ -2948,9 +2956,17 @@ there is no window to lose.
 
 ## 12. Commands
 
-Type `/` in the composer and a dropdown appears. ↑/↓ to move, Enter or Tab to
-accept, Esc to dismiss, or click. **⌘K / Ctrl+K** opens a palette over the same
-commands plus every model and saved conversation.
+Type `/` in the composer and a dropdown appears. ↑/↓ to move, Tab to complete,
+Esc to dismiss, or click. **Enter completes a partial command and sends a
+complete one** — ⌘K / Ctrl+K opens a palette over the same commands plus every
+model and saved conversation.
+
+That Enter rule is newer than the dropdown. The dropdown stays open while the
+text still matches something, so it used to swallow *every* Enter: a slash
+command could only be run by clicking Send, under a footer reading "Enter to
+send", and Enter on `/model tiny` re-completed `/model ` and threw the argument
+away. Enter now compares against the highlighted suggestion — so `/model`
+arrowed down to `/models` still completes, and a second Enter sends it.
 
 | Command | Does |
 |---|---|
@@ -3336,9 +3352,7 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 
 1. Watch auto-routing perform a real switch — the last of the three original
    untested gaps.
-2. **Settings deserves better than an icon.** It is a single button now; the
-   things behind it have outgrown that.
-3. **Syntax highlighting for more languages.** Seven are covered; a fence
+2. **Syntax highlighting for more languages.** Seven are covered; a fence
    labelled anything else renders plain, which is correct but plain.
 
 **Giving the model more room:**
@@ -3401,6 +3415,13 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
   thinking.
 - **Attachment previews** in the composer, so an image is visible before it is
   sent rather than only as a path.
+- **Models got their own pane.** Settings had grown back into the single
+  scrolling column the rail exists to prevent - appearance, two switches, a
+  download prompt, per-model overrides, the tuner, the llama-server path and
+  the router summary in 262px. Settings now fits without scrolling. Found a
+  standing bug on the way: the command dropdown swallowed every Enter, so no
+  slash command could be sent from the keyboard at all, and Enter on
+  `/model tiny` destroyed the argument.
 - **Loading a model through the manager** — was the largest untested gap.
   Gemma now loads through `POST /api/models/{key}/load` in **18.1 s**, and a
   turn through `/api/chat` completes in **34.1 s**.

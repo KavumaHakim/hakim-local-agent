@@ -226,7 +226,7 @@ export default function App() {
           setThinking((value) => !value)
           break
         case 'models':
-          setPane('settings')
+          setPane('models')
           setPaneOpen(true)
           break
         case 'tools':

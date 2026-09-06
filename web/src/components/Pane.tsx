@@ -4,6 +4,12 @@
  * Shows one subject at a time, chosen by the rail. That is the whole point of
  * the split: the old sidebar stacked model, settings, history and tools into
  * one column, so every section was cramped and the panel always scrolled.
+ *
+ * Settings had grown back into exactly that - appearance, two behaviour
+ * switches, a download prompt, per-model overrides, the tuner, the
+ * llama-server path and the router summary, in 262px - so models are their
+ * own pane now. Most of that height was theirs, and it is the part someone
+ * opens repeatedly; what stayed in Settings is what you set once.
  */
 
 import { useEffect, useState } from 'react'
@@ -39,6 +45,7 @@ import {
 
 const TITLES: Record<PaneId, string> = {
   history: 'History',
+  models: 'Models',
   tools: 'Tools',
   workspace: 'Workspace',
   settings: 'Settings',
@@ -111,6 +118,7 @@ export function Pane(props: Props) {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3.5 pb-4">
         {props.pane === 'history' && <HistoryPane {...props} />}
+        {props.pane === 'models' && <ModelsPane {...props} />}
         {props.pane === 'tools' && <ToolsPane {...props} />}
         {props.pane === 'workspace' && <WorkspacePane {...props} />}
         {props.pane === 'settings' && <SettingsPane {...props} />}
@@ -588,7 +596,19 @@ function WorkspacePane({ tools, models, workspace, onOpenWorkspacePicker }: Prop
   )
 }
 
-function SettingsPane({
+/**
+ * Everything about which model answers, and how it is configured.
+ *
+ * Split out of Settings, which had quietly grown back into the single
+ * scrolling column this pane exists to replace: appearance, two behaviour
+ * switches, a download prompt, the per-model overrides, the tuner, the
+ * llama-server path and the router summary, all stacked in 262px.
+ *
+ * Models are a subject in their own right — most of that height was theirs,
+ * and it is the part someone comes back to. What stayed behind in Settings is
+ * what you set once.
+ */
+function ModelsPane({
   models,
   modelBusyKey,
   onSetPrimary,
@@ -600,29 +620,30 @@ function SettingsPane({
   onSetServerExe,
   autoRoute,
   onAutoRoute,
-  thinking,
-  onThinking,
-  appearance,
-  onAppearance,
 }: Props) {
   return (
     <div className="space-y-4">
-      <AppearanceSettings appearance={appearance} onChange={onAppearance} />
-
-      <hr className="border-line" />
-
+      {/* Here rather than in Settings: it decides which model answers, which
+          is this pane's whole subject. */}
       <Setting
         label="Auto-route by task"
         hint="Simple prompts to the fast model, involved ones to the strong one. Never routes back down, and asks before sending a turn off this machine."
         on={autoRoute}
         onToggle={onAutoRoute}
       />
-      <Setting
-        label="Extended thinking"
-        hint="The model reasons before answering. Much slower on CPU; the trace is shown but never replayed to the model."
-        on={thinking}
-        onToggle={onThinking}
-      />
+
+      {models && (
+        <ModelSettings
+          models={models}
+          busyKey={modelBusyKey}
+          onSetPrimary={onSetPrimary}
+          onRescan={onRescanModels}
+          onSetHidden={onSetModelHidden}
+          onOverride={onOverrideModel}
+          onClearOverride={onClearModelOverride}
+          onSetServerExe={onSetServerExe}
+        />
+      )}
 
       <div className="rounded-md border border-line bg-sunken px-2.5 py-2">
         <p className="text-[11.5px]">Need another model?</p>
@@ -638,19 +659,6 @@ function SettingsPane({
           Find a model
         </button>
       </div>
-
-      {models && (
-        <ModelSettings
-          models={models}
-          busyKey={modelBusyKey}
-          onSetPrimary={onSetPrimary}
-          onRescan={onRescanModels}
-          onSetHidden={onSetModelHidden}
-          onOverride={onOverrideModel}
-          onClearOverride={onClearModelOverride}
-          onSetServerExe={onSetServerExe}
-        />
-      )}
 
       {models && (
         <div className="border-t border-line pt-3 text-[11px] text-faint">
@@ -685,6 +693,24 @@ function SettingsPane({
           </p>
         </div>
       )}
+    </div>
+  )
+}
+
+/** What you set once: how the transcript reads, and whether it thinks. */
+function SettingsPane({ thinking, onThinking, appearance, onAppearance }: Props) {
+  return (
+    <div className="space-y-4">
+      <AppearanceSettings appearance={appearance} onChange={onAppearance} />
+
+      <hr className="border-line" />
+
+      <Setting
+        label="Extended thinking"
+        hint="The model reasons before answering. Much slower on CPU; the trace is shown but never replayed to the model."
+        on={thinking}
+        onToggle={onThinking}
+      />
     </div>
   )
 }
