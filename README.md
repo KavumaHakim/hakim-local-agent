@@ -3430,16 +3430,6 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 
 **Later:**
 
-- **KaTeX, if the maths gets harder than this.** `web/src/lib/math.tsx`
-  renders the LaTeX subset the models here actually write — twelve commands
-  appear across the stored replies, and six carry almost all of it. It handles
-  chemistry properly (`2 Ca + H₂O + Heat → 2 Ca(OH)₂`, real subscripts, a
-  stacked ½) and makes calculus readable. What it does not do is the long
-  tail: matrices, aligned environments, big operators with limits above and
-  below, anything genuinely typeset. KaTeX does all of that and costs roughly
-  as much as the entire current bundle (~293 KB), which is why it was not the
-  first answer. That file is the thing it would replace — the delimiter
-  detection in `markdown.tsx` would stay as it is.
 - Web search and `fetch_url`, once you decide the network boundary is worth
     crossing
 - Deciding whether memories should be injected into the prompt automatically,
@@ -3461,6 +3451,29 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
   the tool groups its instructions assume, and loading it opens them, which
   costs nothing to send: the `load_skill` schema is byte-identical with and
   without the declaration.
+- **KaTeX, loaded only when there is maths.** The measurement first, because
+  it decided the shape: across the stored replies, **13 of 365 messages
+  contain maths at all** — 68 spans, ten distinct commands, every one already
+  handled by `web/src/lib/math.tsx`, and **zero** instances of the long tail
+  KaTeX exists for (matrices, aligned environments, operators with limits).
+  KaTeX is 273 KB of JS, 25 KB of CSS and 296 KB of woff2 against a 320 KB
+  bundle, so loading it for every conversation would roughly double the
+  download to typeset something 96% of messages do not contain.
+
+  So it is imported dynamically on the first formula. Measured: the main
+  bundle went **319.94 KB → 322.02 KB**, a 2.08 KB loader, with KaTeX in a
+  259 KB chunk beside it. Verified in the browser — a page with no maths
+  fetches nothing; opening one with maths fetches the chunk, the stylesheet
+  and **three** font files rather than all twenty.
+
+  The small renderer stays, as the instant paint and as the fallback when the
+  chunk cannot be fetched at all — this application is meant to run offline,
+  and maths must still render on a machine with no network. Verified by
+  deleting the chunk from a production build and loading it: 12 roots drawn by
+  the old renderer, no raw LaTeX on the page, no error. The trade is that
+  KaTeX emits an HTML string rather than React elements, so it is inserted
+  with `dangerouslySetInnerHTML` — safe because `trust` is left at its default
+  of false, which is what keeps `\href` and the other raw-markup escapes off.
 - **Large-result offloading** — a **118,890-character** result became 476
   characters and an apology; it now becomes 476 characters and a retrievable
   handle. `read_result` is registered every turn and offered on none until
