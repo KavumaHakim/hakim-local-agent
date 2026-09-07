@@ -267,6 +267,7 @@ def _snapshot(runtime: Runtime, errors: dict | None = None) -> McpOut:
                 summary=entry.summary,
                 package=entry.package,
                 runtime=entry.runtime,
+                remote=entry.remote,
                 caution=entry.caution,
                 unmaintained=entry.unmaintained,
                 needs=[

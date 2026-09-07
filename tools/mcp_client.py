@@ -55,8 +55,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from urllib.request import getproxies
 
 import requests
+from requests.utils import should_bypass_proxies
 
 from tools.base import Tool, ToolError
 
@@ -460,6 +462,39 @@ class McpConnection:
         return self._request("tools/call", {"name": tool, "arguments": arguments})
 
 
+def _new_session(url: str) -> requests.Session:
+    """A session that uses the machine's proxy but none of its credentials.
+
+    `trust_env` off is the rule the HTTP tool follows, and for the same
+    reason: a `.netrc` entry is not part of what this server was configured to
+    receive, and no credential of yours should ride along.
+
+    **But a proxy is not a credential.** It is how this machine reaches the
+    network at all, and switching it off does not protect anything - it just
+    means that on a proxied network no remote MCP server is reachable, which
+    is how this was found. `trust_env` is one switch over several behaviours,
+    so the proxy is read back explicitly and the rest stays off.
+
+    The distinction the HTTP tool draws does not transfer, either: it fetches
+    urls *the model composed*, where ambient settings are a real leak. An MCP
+    server url is one a person wrote in `mcp.json`.
+
+    `no_proxy` is honoured, which matters more here than usual - the common
+    case is a server on `127.0.0.1`, and sending that through a corporate
+    proxy would break the transport for exactly the servers most likely to be
+    used.
+
+    `getproxies()` reads the platform's own settings as well as the
+    environment - on Windows, the proxy configured in Settings - which is what
+    makes this work for someone who never exported a variable.
+    """
+    session = requests.Session()
+    session.trust_env = False
+    if not should_bypass_proxies(url, no_proxy=os.environ.get("no_proxy")):
+        session.proxies = getproxies()
+    return session
+
+
 class McpHttpConnection:
     """One server reached over Streamable HTTP.
 
@@ -497,11 +532,7 @@ class McpHttpConnection:
         self._lock = threading.Lock()
         self.last_used = 0.0
 
-        self._http = requests.Session()
-        # No ambient credentials, the same rule the HTTP tool follows: a
-        # proxy setting or a .netrc entry is not part of what this server was
-        # configured to receive.
-        self._http.trust_env = False
+        self._http = _new_session(self._spec.url)
 
     @property
     def alive(self) -> bool:
@@ -557,8 +588,7 @@ class McpHttpConnection:
                 pass
         self._http.close()
         # A closed Session cannot be reused, so a later start gets a new one.
-        self._http = requests.Session()
-        self._http.trust_env = False
+        self._http = _new_session(self._spec.url)
 
     # --- the protocol ---
 

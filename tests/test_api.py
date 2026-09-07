@@ -1755,10 +1755,29 @@ class McpCatalogRouteTests(ApiTestCase):
         self.assertTrue(all(not item["added"] for item in body["catalog"]))
 
     def test_every_catalogue_entry_says_what_it_would_run(self):
-        """Nobody should have to agree to a package they cannot see."""
+        """Nobody should have to agree to a package they cannot see.
+
+        A remote entry runs nothing here, so its runtime is "none" and the
+        thing to show is the host it contacts instead - which `package`
+        carries, and which is why that assertion still applies to both.
+        """
         for item in self.get()["catalog"]:
             self.assertTrue(item["package"], item["name"])
-            self.assertIn(item["runtime"], ("node", "python"))
+            expected = ("none",) if item["remote"] else ("node", "python")
+            self.assertIn(item["runtime"], expected, item["name"])
+
+    def test_switching_on_a_remote_entry_writes_a_url_not_a_command(self):
+        response = self.client.post("/api/mcp/servers", json={"catalog": "exa"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        entry = self.config()["mcpServers"]["exa"]
+        self.assertTrue(entry["url"].startswith("https://"))
+        self.assertNotIn("command", entry)
+
+        server = next(
+            s for s in self.get()["servers"] if s["name"] == "exa"
+        )
+        self.assertEqual(server["transport"], "http")
 
     def test_switching_one_on_writes_the_command_from_the_repository(self):
         response = self.client.post("/api/mcp/servers", json={"catalog": "fetch"})

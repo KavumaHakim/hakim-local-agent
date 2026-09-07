@@ -649,8 +649,13 @@ class McpCatalogItem(BaseModel):
     # The package npx or uvx resolves on first run, shown so someone can
     # check what they are agreeing to execute.
     package: str
-    # "node" or "python" - what has to be installed for it to start.
+    # "node" or "python" - what has to be installed for it to start, or
+    # "none" for a remote one, where nothing is installed at all.
     runtime: str
+    # Somebody else's server, reached over HTTP. Nothing is downloaded and
+    # nothing runs here - so the "this fetches and executes a package"
+    # warning the pane carries would be false for it.
+    remote: bool = False
     caution: str
     # Whether it is already in mcp.json, so the toggle knows which way it is.
     added: bool

@@ -269,6 +269,8 @@ export interface McpCatalogItem {
   package: string
   /** "node" or "python" - what has to be installed for it to start. */
   runtime: string
+  /** Somebody else's server over HTTP: nothing is downloaded or run here. */
+  remote: boolean
   /** What someone should know before switching it on. May be empty. */
   caution: string
   /** Whether it is already in mcp.json. */

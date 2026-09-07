@@ -1424,12 +1424,14 @@ function Setting({
  * a lens group of its own.
  *
  * Three honest things the interface has to carry, because nothing else will
- * say them. A catalogue entry is **not bundled**: switching it on writes a
- * command line that `npx` or `uvx` resolves the first time it runs, which
- * downloads a package from npm or PyPI and executes it. A server added by url
- * is **somebody else's**, so a tool call and its arguments leave this machine
- * — the row says `remote` for that reason. And switching one *off* keeps the
- * entry, so turning it back on is not typing the command again.
+ * say them. A catalogue entry with a command is **not bundled**: switching it
+ * on writes a command line that `npx` or `uvx` resolves the first time it
+ * runs, which downloads a package from npm or PyPI and executes it. A server
+ * reached by url is **somebody else's** — nothing is downloaded and nothing
+ * runs here, but a tool call and its arguments leave this machine, which is
+ * the opposite trade rather than a smaller one; those rows say `remote`. And
+ * switching one *off* keeps the entry, so turning it back on is not typing
+ * the command again.
  */
 function McpPane({
   mcp,
@@ -1564,6 +1566,14 @@ function CatalogRow({
         <div className="min-w-0 flex-1">
           <p className="text-[12px] text-fg">
             {item.title}
+            {item.remote && (
+              <span
+                title="Somebody else's server, reached over HTTP. Nothing is downloaded and nothing runs here — but what a tool is given goes to them."
+                className="ml-1.5 rounded-sm bg-tint-2 px-1 py-px align-[1px] text-[9.5px] tracking-wide text-faint uppercase"
+              >
+                remote
+              </span>
+            )}
             {item.unmaintained && (
               <span
                 title="Published upstream as no longer supported. It still installs and runs."

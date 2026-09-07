@@ -211,16 +211,24 @@ class RegistryTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name).resolve()
         (self.root / "a.txt").write_text("A", encoding="utf-8")
-        # skills_dir and results_dir point into the temp directory, not the
-        # project. These tests are about which tools the config produces, and
-        # they were reading the repository's own skills/ folder - so adding a
-        # skill file changed what an unrelated test saw. That is the same
-        # brittleness the comment below already records, arriving by a
-        # different door.
+        # skills_dir, results_dir and the two mcp paths point into the temp
+        # directory, not the project. These tests are about which tools the
+        # config produces, and they were reading the repository's own skills/
+        # folder - so adding a skill file changed what an unrelated test saw.
+        # That is the same brittleness the comment below already records,
+        # arriving by a different door.
+        #
+        # mcp_config and mcp_cache arrived by a third door, and later: the
+        # defaults are the repo's own mcp.json and tool cache, so switching a
+        # server on while developing added `mcp:<name>` and its tools to the
+        # registry and failed two exact-set assertions here. A developer with
+        # servers configured must not run a different suite from one without.
         self.config = Config(
             workspace=self.root,
             skills_dir=self.root / "skills",
             results_dir=self.root / "results",
+            mcp_config=self.root / "mcp.json",
+            mcp_cache=self.root / "mcp_tools.json",
         )
         self.registry, self.disabled = build_default_registry(self.config)
 

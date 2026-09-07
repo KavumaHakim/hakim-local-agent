@@ -17,6 +17,7 @@ import time
 import unittest
 from unittest import mock
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from tools.mcp_client import (
     McpConfigError,
@@ -31,6 +32,7 @@ from tools.mcp_client import (
     load_servers,
     open_connection,
     resolve_env,
+    _new_session,
 )
 from tests import fake_mcp_http_server
 from tools import mcp_catalog
@@ -545,11 +547,31 @@ class CatalogTests(unittest.TestCase):
         looked right. The label and the argument have to agree, and the
         argument is what runs."""
         for entry in mcp_catalog.CATALOG:
+            if entry.remote:
+                continue  # nothing is run; covered by the host test below
             package = entry.package.split(" ")[0]
             self.assertTrue(package, entry.name)
             self.assertTrue(
                 any(package == arg for arg in entry.args),
                 f"{entry.name}: package {package!r} is not in args {entry.args}",
+            )
+
+    def test_a_remote_entry_names_the_host_it_actually_reaches(self):
+        """The same rule as the package one, for the other kind of entry.
+
+        What is shown has to be what is contacted, or the label is decoration
+        - and this is the label someone reads before agreeing to send their
+        queries somewhere.
+        """
+        for entry in mcp_catalog.CATALOG:
+            if not entry.remote:
+                continue
+            host = urlsplit(entry.url).hostname or ""
+            self.assertTrue(host, entry.name)
+            self.assertIn(
+                host,
+                entry.package,
+                f"{entry.name}: package {entry.package!r} does not name {host}",
             )
 
     def test_names_are_usable_as_a_tool_prefix(self):
@@ -558,12 +580,66 @@ class CatalogTests(unittest.TestCase):
 
     def test_every_entry_says_what_runtime_it_needs(self):
         for entry in mcp_catalog.CATALOG:
-            self.assertIn(entry.runtime, ("node", "python"), entry.name)
+            self.assertIn(entry.runtime, ("node", "python", "none"), entry.name)
 
     def test_a_uvx_entry_is_python_and_an_npx_entry_is_node(self):
         for entry in mcp_catalog.CATALOG:
+            if entry.remote:
+                continue
             expected = "python" if entry.command == "uvx" else "node"
             self.assertEqual(entry.runtime, expected, entry.name)
+
+    def test_only_a_remote_entry_has_no_runtime(self):
+        """"none" means "nothing is installed here", not "unspecified"."""
+        for entry in mcp_catalog.CATALOG:
+            self.assertEqual(
+                entry.runtime == "none", entry.remote, entry.name
+            )
+
+    def test_an_entry_is_a_command_or_a_url_and_never_both(self):
+        """Writing both keys produces the record `load_servers` refuses."""
+        for entry in mcp_catalog.CATALOG:
+            self.assertNotEqual(
+                bool(entry.command),
+                bool(entry.url),
+                f"{entry.name}: has both a command and a url, or neither",
+            )
+
+    def test_every_remote_url_is_one_the_client_will_accept(self):
+        """A catalogue entry that `check_url` refuses is a dead toggle."""
+        for entry in mcp_catalog.CATALOG:
+            if entry.remote:
+                check_url(entry.url, entry.name)  # raises if it would not
+
+    def test_a_remote_entry_says_that_calls_leave_the_machine(self):
+        """The trade is inverted for these: no package to audit, but the
+        arguments of every call go to somebody else. There is no `needs` to
+        make that visible, so the caution has to carry it."""
+        for entry in mcp_catalog.CATALOG:
+            if entry.remote:
+                self.assertTrue(entry.caution, entry.name)
+                self.assertIn("leaves this machine", entry.caution, entry.name)
+
+    def test_resolving_a_remote_entry_writes_a_url_and_no_command(self):
+        entry = mcp_catalog.entry("exa")
+        resolved = entry.resolve(Path("/anywhere"))
+
+        self.assertEqual(resolved["url"], entry.url)
+        self.assertNotIn("command", resolved)
+        self.assertNotIn("args", resolved)
+
+        # And what it writes has to read back as the server it describes -
+        # through the real loader, since that is what decides at runtime.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mcp.json"
+            path.write_text(
+                json.dumps({"mcpServers": {"exa": resolved}}), encoding="utf-8"
+            )
+            loaded = load_servers(path)
+
+        self.assertEqual(len(loaded), 1)
+        self.assertTrue(loaded[0].remote)
+        self.assertEqual(loaded[0].url, entry.url)
 
     def test_anything_reaching_a_service_asks_for_a_credential(self):
         """A service server with no `needs` starts and then fails opaquely."""
@@ -795,6 +871,76 @@ class HttpTransportTests(unittest.TestCase):
 
         self.assertEqual(connection.call("echo", {"text": "again"})
                          ["content"][0]["text"], "again")
+
+
+class ProxyTests(unittest.TestCase):
+    """Which sessions use the machine's proxy, and which never do.
+
+    This is not a detail: with the proxy off, no remote MCP server is
+    reachable on a proxied network at all - which is how it was found, Exa
+    timing out while pip and npm worked.
+    """
+
+    def session(self, url: str, **environ):
+        with mock.patch.dict(os.environ, environ, clear=True):
+            return _new_session(url)
+
+    def test_an_external_url_uses_the_proxy(self):
+        session = self.session(
+            "https://mcp.example.com/mcp",
+            HTTPS_PROXY="http://proxy.local:8080",
+        )
+        self.assertEqual(session.proxies.get("https"), "http://proxy.local:8080")
+
+    def test_a_loopback_url_does_not(self):
+        """The common case is a server on 127.0.0.1, and sending that through
+        a corporate proxy would break exactly the servers most likely used."""
+        session = self.session(
+            "http://127.0.0.1:8765/mcp",
+            HTTPS_PROXY="http://proxy.local:8080",
+            HTTP_PROXY="http://proxy.local:8080",
+            no_proxy="localhost,127.0.0.1,::1",
+        )
+        self.assertFalse(session.proxies)
+
+    def test_a_host_listed_in_no_proxy_does_not(self):
+        session = self.session(
+            "https://internal.example.com/mcp",
+            HTTPS_PROXY="http://proxy.local:8080",
+            no_proxy="internal.example.com",
+        )
+        self.assertFalse(session.proxies)
+
+    def test_credentials_are_still_never_inherited(self):
+        """The proxy is read back; `trust_env` stays off, so .netrc is not."""
+        session = self.session(
+            "https://mcp.example.com/mcp",
+            HTTPS_PROXY="http://proxy.local:8080",
+        )
+        self.assertFalse(session.trust_env)
+
+    def test_with_no_proxy_configured_nothing_is_set(self):
+        """Patched, because `getproxies()` also reads the Windows registry.
+
+        Clearing the environment is not enough to prove this on a machine
+        whose proxy is set in Windows' own settings - the first version of
+        this test asserted an empty dict and failed here for exactly that
+        reason. Reading the registry is wanted, so the test moved rather than
+        the behaviour.
+        """
+        with mock.patch("tools.mcp_client.getproxies", return_value={}):
+            self.assertFalse(_new_session("https://mcp.example.com/mcp").proxies)
+
+    def test_the_machines_own_settings_count_not_only_the_environment(self):
+        """`getproxies()` reads Windows' proxy settings as well as the env,
+        which is what makes this work for someone who never exported a
+        variable."""
+        with mock.patch(
+            "tools.mcp_client.getproxies",
+            return_value={"https": "http://from-the-registry:8080"},
+        ):
+            session = _new_session("https://mcp.example.com/mcp")
+        self.assertEqual(session.proxies["https"], "http://from-the-registry:8080")
 
 
 class UrlValidationTests(unittest.TestCase):

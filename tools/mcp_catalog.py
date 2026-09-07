@@ -28,9 +28,16 @@ google-maps - is published with "Package no longer supported", last released
 in 2025. The reference servers that run locally - filesystem, memory,
 sequential-thinking, everything - are still shipping. The vendors took their
 own integrations over and mostly publish them as **remote HTTP servers**,
-which this client cannot reach: it speaks stdio only. The archived packages
-still install and still work; they are offered on that basis and labelled, so
-nobody wonders later why a tool stopped getting fixes.
+which this client now reaches. The archived packages still install and still
+work; they are offered on that basis and labelled, so nobody wonders later why
+a tool stopped getting fixes.
+
+**An entry is a command or a url, never both.** A url entry is somebody else's
+server, reached over Streamable HTTP: nothing is downloaded, nothing executes
+here, and its `runtime` is "none". The trade is the other way round from a
+local one - there is no package to audit, but the arguments of every call
+leave this machine. That belongs in `caution`, and for the one such entry it
+is the first thing it says.
 
 Two things are deliberately *not* here:
 
@@ -72,9 +79,16 @@ class CatalogEntry:
     title: str
     # What it gives the model, in the interface's voice.
     summary: str
-    command: str
+    command: str = ""
     args: tuple[str, ...] = ()
+    # Set instead of `command` for a server that is somebody else's, reached
+    # over Streamable HTTP rather than started here. One or the other.
+    url: str = ""
+    # Sent with every request to a remote one. `${VAR}` is read from the
+    # environment when the server is reached.
+    headers: dict[str, str] = field(default_factory=dict)
     # "node" or "python" - what has to be installed for it to start at all.
+    # "none" for a remote server: nothing is installed and nothing runs here.
     runtime: str = "node"
     # The package resolved on first use, shown so it can be checked before
     # agreeing to run it.
@@ -90,8 +104,23 @@ class CatalogEntry:
     unmaintained: bool = False
     env: dict[str, str] = field(default_factory=dict)
 
+    @property
+    def remote(self) -> bool:
+        return bool(self.url)
+
     def resolve(self, workspace: Path) -> dict[str, object]:
-        """The mcp.json entry for this server, with placeholders filled in."""
+        """The mcp.json entry for this server, with placeholders filled in.
+
+        A url entry and a command entry are different shapes, and writing both
+        keys would produce exactly the ambiguous record `load_servers` refuses
+        to guess at - so this writes one or the other, never both.
+        """
+        if self.remote:
+            return {
+                "url": self.url,
+                **({"headers": dict(self.headers)} if self.headers else {}),
+                **({"env": dict(self.env)} if self.env else {}),
+            }
         return {
             "command": self.command,
             "args": [
@@ -102,6 +131,26 @@ class CatalogEntry:
 
 
 CATALOG: tuple[CatalogEntry, ...] = (
+    CatalogEntry(
+        name="exa",
+        title="Web search",
+        summary=(
+            "Searches the web and returns clean text, and reads a page in "
+            "full. The real answer to this project not having web access."
+        ),
+        # Exa's own hosted server, over Streamable HTTP. Nothing is installed
+        # and nothing runs on this machine, which is why the runtime is
+        # "none" and there is no package to check.
+        url="https://mcp.exa.ai/mcp",
+        runtime="none",
+        package="mcp.exa.ai (Exa's hosted server)",
+        caution=(
+            "Every query and every page it reads leaves this machine and "
+            "goes to Exa. Both of its tools are annotated read-only, so "
+            "they run without asking - switch this on only if that is what "
+            "you want."
+        ),
+    ),
     CatalogEntry(
         name="fetch",
         title="Fetch a web page",

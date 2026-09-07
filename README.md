@@ -2645,6 +2645,20 @@ pane says so, and shows the package name so it can be checked first. Switching
 one *off* writes `"enabled": false` rather than deleting the entry, so turning
 it back on is not typing the command again.
 
+**A catalogue entry can be a url instead**, and one is: **Exa**, for web
+search. Nothing is downloaded and nothing executes here, so its `runtime` is
+`none` and there is no package to audit — the trade runs the other way, since
+the arguments of every call go to Exa. That is the first sentence of its
+caution rather than a footnote, and those rows are marked `remote`. Its two
+tools are annotated `readOnlyHint`, so under the permission rule below they
+run *without asking*; the caution says so outright, because it is the thing
+someone would otherwise discover afterwards.
+
+This is also the answer to "no web access" that `tools/web.py` was holding
+open. A search tool written here would need a backend, a key and its own
+approval story; Exa's server has all three already, and reaching it costs one
+catalogue entry.
+
 Naming a catalogue entry is not the same as describing one: `POST
 /api/mcp/servers {"catalog": "fetch"}` takes the command line from the table in
 the repository, so a request can ask for an entry but cannot say what it runs.
@@ -2733,6 +2747,22 @@ than aged out, and a 404 against a session we hold means it has expired — the
 connection forgets it and re-handshakes rather than resending it forever. The
 fake server in the tests *enforces* the session rather than merely issuing one,
 because a fake that does not would pass a client that never sends it back.
+
+**The proxy is used; the credentials are not.** The remote client runs with
+`trust_env` off, the same rule the HTTP tool follows, so a `.netrc` entry never
+rides along on a request. But `trust_env` is one switch over several
+behaviours, and a proxy is not a credential — it is how the machine reaches the
+network at all. With it off, *no* remote MCP server is reachable on a proxied
+network, which is exactly how this was found: Exa timed out here while `pip`
+and `npm` worked. So the proxy is read back explicitly and everything else
+stays off. `no_proxy` is honoured, which matters more here than usual, since
+the common case is a server on `127.0.0.1` and routing that through a
+corporate proxy would break the transport for the servers most likely to be
+used.
+
+The distinction the HTTP tool draws does not transfer, either. That tool
+fetches urls **the model composed**, where ambient settings are a real leak. An
+MCP server url is one a person wrote in `mcp.json`.
 
 Not supported: the deprecated 2024 HTTP+SSE two-endpoint transport, interactive
 OAuth (static credentials in `headers` instead), and MCP resources and prompts
