@@ -909,9 +909,15 @@ class ToolSwitchTests(ApiTestCase):
 
     def test_the_ocr_switch_starts_and_stops_its_server(self):
         """One toggle, because the tool is useless without the server and the
-        server is dead weight without the tool."""
+        server is dead weight without the tool.
+
+        Pinned to the model backend, because that coupling is what this is
+        about: Tesseract is the default now and needs no server at all, so on
+        the default this would be asserting something that should not happen.
+        """
         from models.manager import ModelState
 
+        self.runtime.set_ocr_backend("model")
         self.client.post("/api/tools/ocr", json={"enabled": True})
         self.assertIs(self.manager.status("ocr").state, ModelState.READY)
         self.assertIn("ocr_image", {t["name"] for t in self.client.get("/api/tools").json()["tools"]})
@@ -920,7 +926,12 @@ class ToolSwitchTests(ApiTestCase):
         self.assertIs(self.manager.status("ocr").state, ModelState.STOPPED)
 
     def test_ocr_reads_as_off_while_its_server_is_down(self):
-        """The flag alone would show a switch that is on while every use fails."""
+        """The flag alone would show a switch that is on while every use fails.
+
+        Model backend only: there is no server to be down when Tesseract is
+        reading, which is one of the reasons it is now the default.
+        """
+        self.runtime.set_ocr_backend("model")
         self.client.post("/api/tools/ocr", json={"enabled": True})
         self.assertTrue(self.switches()["ocr"]["enabled"])
 
@@ -928,6 +939,24 @@ class ToolSwitchTests(ApiTestCase):
         self.manager.healthy_ports.discard(8081)
         self.manager._processes.pop("ocr", None)
         self.assertFalse(self.switches()["ocr"]["enabled"])
+
+    def test_the_ocr_switch_starts_no_server_on_the_default_backend(self):
+        """Tesseract is the default, and it needs no llama-server.
+
+        The half of the coupling worth keeping is "no tool without its
+        server"; the other half only applies to the backend that has one.
+        Starting 1.4 GB of weights for a reader that does not use them would
+        be the expensive kind of wrong on 8 GB.
+        """
+        from models.manager import ModelState
+
+        self.client.post("/api/tools/ocr", json={"enabled": True})
+
+        self.assertIs(self.manager.status("ocr").state, ModelState.STOPPED)
+        self.assertIn(
+            "ocr_image",
+            {t["name"] for t in self.client.get("/api/tools").json()["tools"]},
+        )
 
     def test_an_unknown_switch_is_a_404(self):
         response = self.client.post("/api/tools/nonsense", json={"enabled": True})

@@ -1747,6 +1747,15 @@ screenshot" does not need a vision model, and paying 1.4 GB and half a minute
 for it is a poor trade. A scanned page whose table you actually need is exactly
 what the model is for.
 
+**Tesseract is the default**, on that measurement. The model held it first,
+on the grounds that changing it would break OCR for anyone without Tesseract
+installed — which is worth less than it sounds: choosing a backend that is not
+there produces a sentence naming the installer, the `TESSERACT_CMD` variable
+and the way back to the model. An actionable error is not a silent break, and
+the common case is the one that should be fast. It also means switching the
+OCR tool on no longer starts a llama-server: Tesseract needs none, so the
+1.4 GB stays unloaded until something actually wants layout.
+
 `OCR_BACKEND` picks, and the Tools pane has a chooser. The model's own tool
 description changes with it, because the two behave differently enough that one
 description would be a lie for whichever is running:
@@ -3196,7 +3205,7 @@ a connection failure.
 | `AGENT_HTTP_TIMEOUT` | `20` | Seconds |
 | `AGENT_HTTP_MAX_BYTES` | `100000` | Response size cap |
 | `AGENT_HTTP_ALLOW_WRITES` | `0` | Permit POST/PUT/PATCH/DELETE |
-| `OCR_BACKEND` | `model` | `tesseract` or `model` |
+| `OCR_BACKEND` | `tesseract` | `tesseract` or `model` |
 | `TESSERACT_CMD` | *(found)* | Full path to tesseract.exe when it is not on PATH |
 | `TESSERACT_LANG` | `eng` | Language pack |
 | `TESSERACT_PSM` | `3` | Page segmentation; 6 for a single block |

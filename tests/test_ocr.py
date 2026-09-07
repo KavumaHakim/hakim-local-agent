@@ -57,6 +57,12 @@ class FakeSession:
 
 def build(tmp: Path, **config_kwargs):
     config_kwargs.setdefault("ocr_max_image_bytes", 1_000_000)
+    # This file is the *model* backend's tests - the request it posts, the
+    # replies it copes with. Pinned rather than inherited, so they keep
+    # testing that when the default backend changes, which it has: these
+    # eight went red the day Tesseract became the default, all of them for
+    # the same uninteresting reason.
+    config_kwargs.setdefault("ocr_backend", "model")
     config = Config(workspace=tmp, **config_kwargs)
     client = OcrClient(config, WorkspaceFiles(tmp))
     client._session = FakeSession()

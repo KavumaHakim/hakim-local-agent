@@ -109,12 +109,21 @@ class Config:
     #   "model"     - the GLM-OCR vision model: ~1.4 GB and ~30 s a page, but
     #                 it understands tables, columns and handwriting.
     #
-    # "model" is the default only because it is what was here first and its
-    # weights are already on disk: changing the default would silently break a
-    # working setup for anyone without Tesseract installed. On this hardware
-    # Tesseract is usually the better trade - set OCR_BACKEND=tesseract once
-    # you have it. Neither is strictly better, which is why it is a switch.
-    ocr_backend: str = "model"
+    # Tesseract is the default. On this hardware it is the better trade by a
+    # wide margin - under a second a page against ~30 s, and no 1.4 GB of
+    # weights competing for 8 GB of RAM with the model actually answering.
+    #
+    # "model" held the default before, on the grounds that changing it would
+    # break a working setup for anyone without Tesseract. That is worth less
+    # than it sounds: selecting a backend that is not installed produces
+    # `missing_message()`, which names the installer, the PATH variable and
+    # the way back to the model. An actionable sentence is not a silent break,
+    # and the common case is the one that should be fast.
+    #
+    # Neither is strictly better, which is why it stays a switch: the model
+    # understands tables, columns and handwriting, and Tesseract transcribes
+    # line by line. Set OCR_BACKEND=model for a page where that matters.
+    ocr_backend: str = "tesseract"
     # Empty means "find it": PATH first, then the Windows installer's own
     # locations. Set it to a full path when Tesseract is somewhere unusual.
     tesseract_cmd: str = ""
