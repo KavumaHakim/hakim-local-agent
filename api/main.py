@@ -35,6 +35,7 @@ from api.routes import (
     chat,
     conversations,
     hub,
+    mcp,
     memory,
     meta,
     models,
@@ -167,6 +168,7 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
     app.include_router(models.router, prefix="/api")
     app.include_router(hub.router, prefix="/api")
     app.include_router(meta.router, prefix="/api")
+    app.include_router(mcp.router, prefix="/api")
     app.include_router(uploads.router, prefix="/api")
     app.include_router(speech.router, prefix="/api")
     app.include_router(workspace.router, prefix="/api")

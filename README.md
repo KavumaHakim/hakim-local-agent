@@ -1659,7 +1659,17 @@ than between *allowed* and *refused*.
 |---|---|---|
 | Free | `GET`/`HEAD` to `127.0.0.1`, `localhost`, `::1` | Goes straight out — the case the tool exists for |
 | Approved | Any other host; any `POST`/`PUT`/`PATCH`/`DELETE` | Turn blocks, the method and full url are shown, goes only on a yes |
-| Refused | `file://` and other schemes, `user:pass@host`, urls with whitespace, unknown methods | No prompt could sensibly stand in for these |
+| Refused | `file://` and other schemes, `user:pass@host`, urls with whitespace, unknown methods, **any write to this API's own port** | No prompt could sensibly stand in for these |
+
+**Why the agent's own API is on that last row.** Its endpoints decide which
+tools are on, where the workspace points, and which MCP servers exist and what
+command they run — and the approval prompt is built from the method and the url
+and *never the body*. "POST to `127.0.0.1:8000/api/mcp/servers`" is a question
+nobody can answer: the body is what decides whether it installs a server that
+runs an arbitrary command. So it is refused, on the same reasoning that refuses
+interpreters in the terminal tool. Reading the API is free — inspecting a local
+service is what this tool is for — and `AGENT_API_PORT` says which port to
+treat this way, so a llama-server on `:8080` is untouched.
 
 Reaching a public host used to require setting `AGENT_HTTP_HOSTS` before the
 process started, and a `POST` to your own local API was impossible without
@@ -2608,11 +2618,51 @@ cached yet contributes nothing until you refresh — which is the honest
 behaviour, and visible in `GET /api/mcp`. Idle servers are reaped after
 `mcp_idle_timeout` (300 s) by the same sweeper that unloads idle llama-servers.
 
-**The Tools pane lists them**, with the command each would run, how many tools
-are cached, whether it is trusted, and — after a refresh — why one would not
-start. Refresh is a button rather than something that happens on load, because
-it is the only thing in that pane that starts a process, and it is refused with
-a 409 while a turn is running or queued.
+**Servers have their own pane**, beside Tools on the rail. It lists what this
+project offers, what you have added, the command each would run, how many
+tools are cached, and — after a refresh — why one would not start. Refresh is
+a button rather than something that happens on load, because it is the only
+thing there that starts a process, and every write is refused with a 409 while
+a turn is running or queued.
+
+**The offered servers are a catalogue, not a bundle.** `tools/mcp_catalog.py`
+is a table of command lines; switching one on writes an entry, and the first
+run has `npx` or `uvx` fetch the package from npm or PyPI and execute it. The
+pane says so, and shows the package name so it can be checked first. Switching
+one *off* writes `"enabled": false` rather than deleting the entry, so turning
+it back on is not typing the command again.
+
+Naming a catalogue entry is not the same as describing one: `POST
+/api/mcp/servers {"catalog": "fetch"}` takes the command line from the table in
+the repository, so a request can ask for an entry but cannot say what it runs.
+
+**Servers reaching an external service need a credential**, declared in the
+catalogue and collected by the pane before the server is switched on. Two ways
+to give one, and the second is better:
+
+- paste the value, and it is written into the `env` block of `mcp.json`;
+- or enter `${SOME_VAR}`, and only that *name* is written — the value is read
+  from this process's environment when the server starts, so the secret never
+  touches the file.
+
+Values are never sent back to the browser. `GET /api/mcp` reports `env_set`,
+the names of the credentials that have a value, and nothing else; a test
+asserts that the value cannot be found anywhere in any response. The child
+process still gets a scrubbed environment — the allowlist in
+`McpConnection`, plus exactly what that server's entry declares — so the rest
+of the API keys in your shell are not handed to somebody else's code.
+
+**A caution about the external-service servers, checked rather than assumed.**
+Every `@modelcontextprotocol` server that talks to a third party — github,
+slack, gitlab, brave-search, google-maps — is published as *"Package no longer
+supported"*, last released in 2025. The reference servers that run locally —
+filesystem, memory, sequential-thinking, everything — are still shipping
+(2026.8.31 at the time of writing). The vendors took their own integrations
+over and mostly publish them as **remote HTTP servers, which this client
+cannot reach**: it speaks stdio only. The archived packages still install and
+still work, so they are offered and labelled `unmaintained` in the pane rather
+than quietly left out. HTTP transport is what would unlock the current
+generation, and it is not built.
 
 Refreshing **re-reads `mcp.json` first**, so a server added while the API is
 running becomes real without a restart. It did not, until the panel existed to
@@ -2622,6 +2672,15 @@ built at startup and would cheerfully refresh the *old* set and report success.
 Servers switched off with `"enabled": false` are listed as off rather than
 omitted, for the same reason — a server that vanishes from the panel reads as a
 broken config file.
+
+**The model cannot reach any of this.** These endpoints decide which programs
+the agent may start, so `tools/http_tool.py` refuses a write to the agent's own
+API outright rather than asking about it. The approval prompt is built from the
+method and the url and never the body, so "POST to 127.0.0.1:8000/api/mcp/servers"
+is a question nobody could answer — the body is what decides whether it installs
+a server running an arbitrary command. Same reasoning as interpreters in the
+terminal tool: a prompt nobody can audit is a rubber stamp. Reading the API
+stays free, because inspecting a local service is what that tool is for.
 
 **Permission.** A tool a server annotates `readOnlyHint` runs freely. Anything
 else asks you first, showing which server and which tool. That direction is the
@@ -2703,7 +2762,7 @@ four — the markdown renderer, the maths and the syntax highlighting are all
 written here rather than installed.
 
 **The 56px rail picks one subject; the pane beside it shows only that** —
-History, Models, Tools, Workspace, and Settings at the foot. Everything used to
+History, Models, Tools, Servers, Workspace, and Settings at the foot. Everything used to
 live in one scrolling sidebar, and Settings had grown back into it: appearance,
 two behaviour switches, a download prompt, the per-model overrides, the tuner,
 the llama-server path and the router summary, stacked in 262px. Models are
@@ -3187,12 +3246,20 @@ refused rather than run, so the gate cannot be stepped around by the caller.
 - HTTP: off by default. Loopback and the allowlist run; any other host, and
   every `POST`/`PUT`/`PATCH`/`DELETE`, asks first. Redirects are followed only
   within the free list and re-checked at every hop, five at most. `file://` and
-  credentials in a URL stay refused — a prompt cannot stand in for either
-- MCP: no servers unless you write `mcp.json`. A tool the server annotates
+  credentials in a URL stay refused — a prompt cannot stand in for either.
+  **A write to the agent's own API is refused rather than asked about**: those
+  endpoints decide which tools are on, where the workspace points and which
+  programs may be started, and the prompt shows a method and a url but never a
+  body, so nobody could check what they were agreeing to. Reading it is free
+- MCP: no servers unless you add one. A tool the server annotates
   `readOnlyHint` runs; everything else asks. That direction only — the
   annotation is the server's claim about itself, so it can move a tool into the
-  safer tier and never out of one. `mcp.json` is git-ignored because an `env`
-  block is where an API key ends up
+  safer tier and never out of one. Adding, switching on and removing servers is
+  a person in the interface, never the model. Credentials go into `mcp.json`,
+  which is git-ignored, or stay out of it entirely behind a `${VAR}` reference;
+  either way no endpoint returns a value, only the names of the ones that are
+  set. The server subprocess gets a scrubbed environment plus exactly what its
+  own entry declares
 - Writes: off by default; create only, and the agent's own source is refused
 - Git: off by default; no push, and nothing that discards uncommitted work
 - Registry: validates arguments, converts every failure into a message for the
@@ -3403,12 +3470,16 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
   whole roster. The manifest is cached because the registry is rebuilt every
   turn and a subprocess per server per question is not affordable here.
   `readOnlyHint` can move a tool into the safer tier and never out of one.
-  The **Tools pane now lists them** — command, cached tool count, trusted,
-  disabled, and why one would not start. Building the panel found the bug it
-  existed to expose: `refresh` iterated a spec list frozen at startup, so a
-  server added to `mcp.json` while the API ran was refreshed away silently. It
-  re-reads the file first now, verified live by adding a server to a running
-  API and watching it come back with three tools.
+  They have **their own pane** now — a catalogue of ten servers with toggles,
+  a form for your own, and credentials collected before a server is switched
+  on. A `${VAR}` value keeps the secret out of `mcp.json` entirely; values are
+  never returned to the browser, only the names of the ones that are set.
+  Building it found three things: `refresh` iterated a spec list frozen at
+  startup, so a server added while the API ran was refreshed away silently;
+  the catalogue's sequential-thinking package name did not exist on npm; and
+  the HTTP tool could have been used to drive the agent's own control plane,
+  since the approval prompt never shows a request body. All three fixed, all
+  three now tested.
 - **Context controls, regenerate, fork, delete and model-written titles** —
   what a turn's context is made of, against the model's window, and what had to
   be dropped. The naming prompt is bare: no system prompt, no tools, no

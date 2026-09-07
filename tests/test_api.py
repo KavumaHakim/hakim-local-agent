@@ -1661,6 +1661,352 @@ class McpRouteTests(ApiTestCase):
         self.assertEqual(response.status_code, 409)
 
 
+
+class McpCatalogRouteTests(ApiTestCase):
+    """Switching a built-in server on, and off again."""
+
+    def get(self) -> dict:
+        response = self.client.get("/api/mcp")
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def config(self) -> dict:
+        return json.loads(
+            self.runtime.config.mcp_config.read_text(encoding="utf-8")
+        )
+
+    def test_the_catalogue_is_offered_before_anything_is_configured(self):
+        body = self.get()
+
+        self.assertEqual(body["servers"], [])
+        self.assertTrue(body["catalog"])
+        self.assertTrue(all(not item["added"] for item in body["catalog"]))
+
+    def test_every_catalogue_entry_says_what_it_would_run(self):
+        """Nobody should have to agree to a package they cannot see."""
+        for item in self.get()["catalog"]:
+            self.assertTrue(item["package"], item["name"])
+            self.assertIn(item["runtime"], ("node", "python"))
+
+    def test_switching_one_on_writes_the_command_from_the_repository(self):
+        response = self.client.post("/api/mcp/servers", json={"catalog": "fetch"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        entry = self.config()["mcpServers"]["fetch"]
+        self.assertEqual(entry["command"], "uvx")
+        self.assertEqual(entry["args"], ["mcp-server-fetch"])
+
+    def test_the_request_cannot_say_what_a_catalogue_entry_runs(self):
+        """Naming an entry takes its command line from the table, not the body."""
+        self.client.post(
+            "/api/mcp/servers",
+            json={
+                "catalog": "fetch",
+                "command": "cmd",
+                "args": ["/c", "whoami"],
+                "name": "something-else",
+            },
+        )
+
+        entry = self.config()["mcpServers"]["fetch"]
+        self.assertEqual(entry["command"], "uvx")
+        self.assertNotIn("something-else", self.config()["mcpServers"])
+
+    def test_a_workspace_placeholder_is_resolved(self):
+        self.client.post("/api/mcp/servers", json={"catalog": "git"})
+
+        args = self.config()["mcpServers"]["git"]["args"]
+        self.assertIn(str(self.runtime.config.workspace), args)
+        self.assertTrue(all("{workspace}" not in a for a in args))
+
+    def test_an_unknown_catalogue_entry_is_a_404(self):
+        response = self.client.post("/api/mcp/servers", json={"catalog": "nope"})
+        self.assertEqual(response.status_code, 404)
+
+    def test_the_catalogue_reports_what_is_already_added(self):
+        self.client.post("/api/mcp/servers", json={"catalog": "fetch"})
+
+        by_name = {item["name"]: item for item in self.get()["catalog"]}
+
+        self.assertTrue(by_name["fetch"]["added"])
+        self.assertFalse(by_name["git"]["added"])
+
+    def test_a_configured_catalogue_server_is_marked_as_one(self):
+        self.client.post("/api/mcp/servers", json={"catalog": "fetch"})
+        server = self.get()["servers"][0]
+        self.assertTrue(server["from_catalog"])
+
+
+class McpCustomServerTests(ApiTestCase):
+    """Servers someone describes themselves."""
+
+    def config(self) -> dict:
+        return json.loads(
+            self.runtime.config.mcp_config.read_text(encoding="utf-8")
+        )
+
+    def add(self, **body):
+        return self.client.post("/api/mcp/servers", json=body)
+
+    def test_a_described_server_is_written(self):
+        response = self.add(name="mine", command="npx", args=["-y", "thing"])
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            self.config()["mcpServers"]["mine"],
+            {"command": "npx", "args": ["-y", "thing"]},
+        )
+
+    def test_a_name_that_would_break_a_tool_prefix_is_refused(self):
+        response = self.add(name="not a name", command="npx")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("lowercase", response.json()["detail"])
+
+    def test_a_server_with_no_command_is_refused(self):
+        response = self.add(name="mine", command="   ")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("command", response.json()["detail"])
+
+    def test_adding_the_same_name_twice_is_a_conflict(self):
+        self.add(name="mine", command="npx")
+        response = self.add(name="mine", command="uvx")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.config()["mcpServers"]["mine"]["command"], "npx")
+
+    def test_replace_overwrites_deliberately(self):
+        self.add(name="mine", command="npx")
+        response = self.add(name="mine", command="uvx", replace=True)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.config()["mcpServers"]["mine"]["command"], "uvx")
+
+    def test_replacing_keeps_an_env_block_someone_wrote_by_hand(self):
+        """There is no second copy of that key."""
+        self.runtime.config.mcp_config.write_text(
+            json.dumps(
+                {"mcpServers": {"mine": {"command": "npx", "env": {"K": "v"}}}}
+            ),
+            encoding="utf-8",
+        )
+
+        self.add(name="mine", command="uvx", replace=True)
+
+        entry = self.config()["mcpServers"]["mine"]
+        self.assertEqual(entry["command"], "uvx")
+        self.assertEqual(entry["env"], {"K": "v"})
+
+    def test_trusted_is_written_only_when_asked_for(self):
+        self.add(name="plain", command="npx")
+        self.add(name="trusty", command="npx", trusted=True)
+
+        servers = self.config()["mcpServers"]
+        self.assertNotIn("trusted", servers["plain"])
+        self.assertTrue(servers["trusty"]["trusted"])
+
+
+class McpToggleTests(ApiTestCase):
+    """Switching one off, and removing it."""
+
+    def setUp(self):
+        super().setUp()
+        self.client.post("/api/mcp/servers", json={"catalog": "fetch"})
+
+    def config(self) -> dict:
+        return json.loads(
+            self.runtime.config.mcp_config.read_text(encoding="utf-8")
+        )
+
+    def servers(self) -> list[dict]:
+        return self.client.get("/api/mcp").json()["servers"]
+
+    def test_switching_off_keeps_the_entry(self):
+        """So switching it back on is not typing the command line again."""
+        response = self.client.patch(
+            "/api/mcp/servers/fetch", json={"enabled": False}
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(self.config()["mcpServers"]["fetch"]["enabled"])
+        self.assertFalse(self.servers()[0]["enabled"])
+
+    def test_switching_back_on(self):
+        self.client.patch("/api/mcp/servers/fetch", json={"enabled": False})
+        self.client.patch("/api/mcp/servers/fetch", json={"enabled": True})
+        self.assertTrue(self.servers()[0]["enabled"])
+
+    def test_trusting_one(self):
+        self.client.patch("/api/mcp/servers/fetch", json={"trusted": True})
+        self.assertTrue(self.servers()[0]["trusted"])
+
+    def test_an_absent_field_is_left_alone(self):
+        self.client.patch("/api/mcp/servers/fetch", json={"trusted": True})
+        self.client.patch("/api/mcp/servers/fetch", json={"enabled": False})
+
+        entry = self.config()["mcpServers"]["fetch"]
+        self.assertTrue(entry["trusted"])
+        self.assertFalse(entry["enabled"])
+
+    def test_patching_one_that_is_not_there_is_a_404(self):
+        response = self.client.patch("/api/mcp/servers/ghost", json={"enabled": False})
+        self.assertEqual(response.status_code, 404)
+
+    def test_removing_it_takes_the_whole_entry(self):
+        response = self.client.delete("/api/mcp/servers/fetch")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.servers(), [])
+        self.assertNotIn("fetch", self.config()["mcpServers"])
+
+    def test_removing_it_frees_the_catalogue_entry_again(self):
+        self.client.delete("/api/mcp/servers/fetch")
+        by_name = {i["name"]: i for i in self.client.get("/api/mcp").json()["catalog"]}
+        self.assertFalse(by_name["fetch"]["added"])
+
+
+class McpWritesMidTurnTests(ApiTestCase):
+    """Every write rebuilds the roster a running turn is holding."""
+
+    def test_each_one_is_refused_while_a_turn_runs(self):
+        with mock.patch.object(self.runtime.queue, "busy", return_value=True):
+            calls = (
+                self.client.post("/api/mcp/servers", json={"catalog": "fetch"}),
+                self.client.patch("/api/mcp/servers/x", json={"enabled": False}),
+                self.client.delete("/api/mcp/servers/x"),
+                self.client.post("/api/mcp/refresh"),
+            )
+
+        for response in calls:
+            self.assertEqual(response.status_code, 409, response.text)
+
+    def test_and_while_one_is_queued(self):
+        with mock.patch.object(self.runtime.queue, "depth", return_value=1):
+            response = self.client.post("/api/mcp/servers", json={"catalog": "fetch"})
+        self.assertEqual(response.status_code, 409)
+
+
+
+class McpCredentialTests(ApiTestCase):
+    """Credentials in, names out.
+
+    The placeholder below is deliberately not shaped like a real token: these
+    tests assert where a value goes and where it must never appear, and using
+    something that looks like a live secret would make the file harder to read
+    and the failure output worse.
+    """
+
+    PLACEHOLDER = "example-not-a-real-token"
+
+    def config(self) -> dict:
+        return json.loads(
+            self.runtime.config.mcp_config.read_text(encoding="utf-8")
+        )
+
+    def add_github(self, value: str | None = None):
+        return self.client.post(
+            "/api/mcp/servers",
+            json={
+                "catalog": "github",
+                "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": value or self.PLACEHOLDER},
+            },
+        )
+
+    def test_the_catalogue_says_which_credentials_a_server_needs(self):
+        by_name = {i["name"]: i for i in self.client.get("/api/mcp").json()["catalog"]}
+
+        needs = by_name["github"]["needs"]
+        self.assertEqual(needs[0]["variable"], "GITHUB_PERSONAL_ACCESS_TOKEN")
+        self.assertTrue(needs[0]["hint"])
+        self.assertEqual(by_name["fetch"]["needs"], [])
+
+    def test_an_archived_package_is_marked_as_one(self):
+        by_name = {i["name"]: i for i in self.client.get("/api/mcp").json()["catalog"]}
+        self.assertTrue(by_name["github"]["unmaintained"])
+        self.assertFalse(by_name["fetch"]["unmaintained"])
+
+    def test_the_value_is_written_to_the_config(self):
+        self.add_github()
+        self.assertEqual(
+            self.config()["mcpServers"]["github"]["env"],
+            {"GITHUB_PERSONAL_ACCESS_TOKEN": self.PLACEHOLDER},
+        )
+
+    def test_the_value_never_comes_back_out(self):
+        """The whole point. A secret in the browser is a secret somewhere
+        nobody asked it to be, and the interface only needs 'set' or 'not'."""
+        self.add_github()
+
+        for response in (
+            self.client.get("/api/mcp"),
+            self.client.post("/api/mcp/servers", json={"catalog": "fetch"}),
+            self.client.patch("/api/mcp/servers/github", json={"enabled": False}),
+        ):
+            self.assertNotIn(self.PLACEHOLDER, response.text)
+
+    def test_which_credentials_are_set_is_reported_by_name(self):
+        self.add_github()
+        server = next(
+            s for s in self.client.get("/api/mcp").json()["servers"]
+            if s["name"] == "github"
+        )
+        self.assertEqual(server["env_set"], ["GITHUB_PERSONAL_ACCESS_TOKEN"])
+
+    def test_a_server_with_no_credentials_reports_none(self):
+        self.client.post("/api/mcp/servers", json={"catalog": "fetch"})
+        server = self.client.get("/api/mcp").json()["servers"][0]
+        self.assertEqual(server["env_set"], [])
+
+    def test_a_blank_value_is_not_written(self):
+        """Otherwise 'set' would be true for something that cannot work."""
+        self.client.post(
+            "/api/mcp/servers",
+            json={"catalog": "gitlab", "env": {
+                "GITLAB_PERSONAL_ACCESS_TOKEN": self.PLACEHOLDER,
+                "GITLAB_API_URL": "   ",
+            }},
+        )
+
+        entry = self.config()["mcpServers"]["gitlab"]
+        self.assertEqual(list(entry["env"]), ["GITLAB_PERSONAL_ACCESS_TOKEN"])
+
+    def test_an_environment_reference_is_stored_as_the_reference(self):
+        """So the secret is never written to the file at all."""
+        self.add_github("${MY_GITHUB_TOKEN}")
+
+        entry = self.config()["mcpServers"]["github"]
+        self.assertEqual(
+            entry["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"], "${MY_GITHUB_TOKEN}"
+        )
+
+    def test_a_credential_survives_being_switched_off_and_on(self):
+        self.add_github()
+        self.client.patch("/api/mcp/servers/github", json={"enabled": False})
+        self.client.patch("/api/mcp/servers/github", json={"enabled": True})
+
+        self.assertEqual(
+            self.config()["mcpServers"]["github"]["env"],
+            {"GITHUB_PERSONAL_ACCESS_TOKEN": self.PLACEHOLDER},
+        )
+
+    def test_removing_the_server_takes_the_credential_with_it(self):
+        self.add_github()
+        self.client.delete("/api/mcp/servers/github")
+        self.assertNotIn("github", self.config()["mcpServers"])
+
+    def test_a_custom_server_can_carry_credentials_too(self):
+        self.client.post(
+            "/api/mcp/servers",
+            json={
+                "name": "mine",
+                "command": "npx",
+                "env": {"SOME_KEY": self.PLACEHOLDER},
+            },
+        )
+        self.assertEqual(
+            self.config()["mcpServers"]["mine"]["env"], {"SOME_KEY": self.PLACEHOLDER}
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 

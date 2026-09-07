@@ -476,6 +476,9 @@ export default function App() {
           onToggleTool={(id, enabled) => void toggleTool(id, enabled)}
           mcp={mcp}
           onRefreshMcp={() => void mcp.refresh()}
+          onAddMcpServer={(body) => void mcp.add(body)}
+          onSetMcpServer={(name, body) => void mcp.set(name, body)}
+          onRemoveMcpServer={(name) => void mcp.remove(name)}
           workspace={workspace.workspace}
           onOpenWorkspacePicker={() => setPickingWorkspace(true)}
           onOpenModelBrowser={() => setBrowsingModels(true)}

@@ -15,6 +15,8 @@
 import { useEffect, useState } from 'react'
 import type {
   Conversation,
+  McpCatalogItem,
+  McpEnvNeed,
   McpResponse,
   McpServer,
   Model,
@@ -46,6 +48,7 @@ import {
 const TITLES: Record<PaneId, string> = {
   history: 'History',
   models: 'Models',
+  mcp: 'Servers',
   tools: 'Tools',
   workspace: 'Workspace',
   settings: 'Settings',
@@ -77,13 +80,23 @@ interface Props {
   onToggleTool: (id: string, enabled: boolean) => void
   onSetOcrBackend: (backend: OcrBackend) => void
 
-  /** Null in tests and anywhere the section is not wanted; it renders nothing. */
+  /** Null anywhere the pane is not wanted; it renders nothing. */
   mcp: {
     data: McpResponse | null
     refreshing: boolean
     error: string | null
+    pending: string | null
   } | null
   onRefreshMcp: () => void
+  onAddMcpServer: (body: {
+    catalog?: string
+    name?: string
+    command?: string
+    args?: string[]
+    env?: Record<string, string>
+  }) => void
+  onSetMcpServer: (name: string, body: { enabled?: boolean; trusted?: boolean }) => void
+  onRemoveMcpServer: (name: string) => void
 
   workspace: WorkspaceInfo | null
   onOpenWorkspacePicker: () => void
@@ -119,6 +132,7 @@ export function Pane(props: Props) {
       <div className="min-h-0 flex-1 overflow-y-auto px-3.5 pb-4">
         {props.pane === 'history' && <HistoryPane {...props} />}
         {props.pane === 'models' && <ModelsPane {...props} />}
+        {props.pane === 'mcp' && <McpPane {...props} />}
         {props.pane === 'tools' && <ToolsPane {...props} />}
         {props.pane === 'workspace' && <WorkspacePane {...props} />}
         {props.pane === 'settings' && <SettingsPane {...props} />}
@@ -236,107 +250,7 @@ function ToolsPane(props: Props) {
       />
 
       {toolError && <p className="mt-2 text-[11px] text-danger">{toolError}</p>}
-
-      <McpServers {...props} />
     </>
-  )
-}
-
-/**
- * The MCP servers, and the button that asks them what they offer.
- *
- * Here rather than in a pane of its own because an MCP server *is* tools —
- * each one arrives as its own lens group and its tools sit in the same roster
- * above. What it is not is a switch: servers are added by editing a file, so
- * the honest job of this section is to show what that file says, whether the
- * agent has ever reached each one, and why it could not.
- *
- * **Refreshing is the only expensive thing in this pane.** Every server is
- * started, questioned and stopped, which is why it is a button rather than
- * something that happens on load — and why it is refused mid-turn, since it
- * rebuilds the roster the running turn is using.
- */
-function McpServers({ mcp, onRefreshMcp }: Props) {
-  if (!mcp) return null
-
-  return (
-    <section className="mt-5 border-t border-line pt-3">
-      <div className="mb-1.5 flex items-center gap-2">
-        <h3 className="flex-1 text-[11.5px] tracking-[0.02em] text-fg">
-          MCP servers
-        </h3>
-        {mcp.data && mcp.data.servers.length > 0 && (
-          <button
-            type="button"
-            onClick={() => void onRefreshMcp()}
-            disabled={mcp.refreshing}
-            title="Start each server, ask what it offers, stop it again"
-            className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition hover:border-accent-line hover:text-fg disabled:opacity-50"
-          >
-            {mcp.refreshing ? 'Asking…' : 'Refresh'}
-          </button>
-        )}
-      </div>
-
-      {!mcp.data ? (
-        <p className="text-[11px] text-faint">Loading…</p>
-      ) : mcp.data.servers.length === 0 ? (
-        <p className="text-[11px] leading-relaxed text-faint">
-          {mcp.data.configured
-            ? 'None configured yet. Add one to '
-            : 'No config file. Copy mcp.example.json to '}
-          <span className="font-mono break-all">{mcp.data.config_path}</span>
-          {mcp.data.configured ? '.' : ' and add a server.'}
-        </p>
-      ) : (
-        <ul className="space-y-1.5">
-          {mcp.data.servers.map((server) => (
-            <McpServerRow key={server.name} server={server} />
-          ))}
-        </ul>
-      )}
-
-      {mcp.error && <p className="mt-2 text-[11px] text-danger">{mcp.error}</p>}
-    </section>
-  )
-}
-
-function McpServerRow({ server }: { server: McpServer }) {
-  return (
-    <li className="rounded-md bg-tint px-2 py-1.5">
-      <div className="flex items-baseline gap-2">
-        <span
-          className={`font-mono text-[11.5px] ${server.enabled ? 'text-fg' : 'text-faint line-through'}`}
-        >
-          {server.name}
-        </span>
-        <span className="ml-auto shrink-0 text-[10.5px] text-faint">
-          {!server.enabled
-            ? 'off'
-            : server.tools === 0
-              ? 'not asked yet'
-              : `${server.tools} ${server.tools === 1 ? 'tool' : 'tools'}`}
-        </span>
-      </div>
-
-      <p className="mt-0.5 truncate font-mono text-[10.5px] text-faint" title={server.command}>
-        {server.command}
-      </p>
-
-      {server.trusted && (
-        // Worth saying out loud: it is the one setting here that removes a
-        // question the agent would otherwise have to ask a person.
-        <p className="mt-1 text-[10.5px] text-warn">
-          Trusted — its tools run without asking
-        </p>
-      )}
-
-      {server.error && (
-        <p className="mt-1 text-[10.5px] leading-relaxed text-danger">
-          {server.error}
-        </p>
-      )}
-    </li>
   )
 }
 
@@ -1327,5 +1241,465 @@ function Setting({
       </div>
       <p className="mt-1 ml-9 text-[11px] leading-relaxed text-faint">{hint}</p>
     </div>
+  )
+}
+
+/**
+ * MCP servers: the ones this project offers, and the ones you add yourself.
+ *
+ * Its own pane rather than a section under Tools, because it is not a switch
+ * on something already here — it is a list of programs this machine may start,
+ * and each one arrives with a handful of tools and a lens group of its own.
+ *
+ * Two honest things the interface has to carry, because nothing else will say
+ * them. A catalogue entry is **not bundled**: switching it on writes a command
+ * line that `npx` or `uvx` resolves the first time it runs, which downloads a
+ * package from npm or PyPI and executes it. And switching one *off* keeps the
+ * entry, so turning it back on is not typing the command again.
+ */
+function McpPane({
+  mcp,
+  onRefreshMcp,
+  onAddMcpServer,
+  onSetMcpServer,
+  onRemoveMcpServer,
+}: Props) {
+  const [adding, setAdding] = useState(false)
+
+  if (!mcp) return null
+  if (!mcp.data) return <p className="text-[11.5px] text-faint">Loading…</p>
+
+  const { servers, catalog } = mcp.data
+  const byName = new Map(servers.map((s) => [s.name, s]))
+  const custom = servers.filter((s) => !s.from_catalog)
+
+  return (
+    <>
+      <p className="mb-3 text-[11.5px] leading-relaxed text-faint">
+        Tools from other programs. Each server is its own group, so its tools
+        only reach the model when the conversation needs them.
+      </p>
+
+      <h3 className="mb-1.5 text-[11px] tracking-[0.04em] text-muted uppercase">
+        Available
+      </h3>
+      <ul className="mb-5 space-y-1">
+        {catalog.map((item) => (
+          <CatalogRow
+            key={item.name}
+            item={item}
+            server={byName.get(item.name) ?? null}
+            pending={mcp.pending === item.name}
+            onAdd={(env) => onAddMcpServer({ catalog: item.name, env })}
+            onSet={(enabled) => onSetMcpServer(item.name, { enabled })}
+            onRemove={() => onRemoveMcpServer(item.name)}
+          />
+        ))}
+      </ul>
+
+      <div className="mb-1.5 flex items-center gap-2">
+        <h3 className="flex-1 text-[11px] tracking-[0.04em] text-muted uppercase">
+          Your own
+        </h3>
+        <button
+          type="button"
+          onClick={() => setAdding((open) => !open)}
+          className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition hover:border-accent-line hover:text-fg"
+        >
+          {adding ? 'Cancel' : 'Add'}
+        </button>
+      </div>
+
+      {adding && (
+        <AddServerForm
+          busy={mcp.pending !== null}
+          onSubmit={(body) => {
+            onAddMcpServer(body)
+            setAdding(false)
+          }}
+        />
+      )}
+
+      {custom.length === 0 && !adding && (
+        <p className="mb-4 text-[11px] leading-relaxed text-faint">
+          None yet. Anything speaking MCP over stdio works — give it the command
+          that starts it.
+        </p>
+      )}
+
+      <ul className="mb-5 space-y-1">
+        {custom.map((server) => (
+          <CustomRow
+            key={server.name}
+            server={server}
+            pending={mcp.pending === server.name}
+            onSet={(enabled) => onSetMcpServer(server.name, { enabled })}
+            onRemove={() => onRemoveMcpServer(server.name)}
+          />
+        ))}
+      </ul>
+
+      {servers.length > 0 && (
+        <button
+          type="button"
+          onClick={onRefreshMcp}
+          disabled={mcp.refreshing}
+          title="Start each server, ask what it offers, stop it again"
+          className="w-full rounded-md border border-line px-2 py-1.5 text-[11px] text-muted transition hover:border-accent-line hover:text-fg disabled:opacity-50"
+        >
+          {mcp.refreshing ? 'Asking each server…' : 'Refresh tool list'}
+        </button>
+      )}
+
+      {mcp.error && <p className="mt-2 text-[11px] text-danger">{mcp.error}</p>}
+
+      <p className="mt-3 border-t border-line pt-2 text-[10.5px] leading-relaxed text-faint">
+        Written to{' '}
+        <span className="font-mono break-all">{mcp.data.config_path}</span>, which
+        is git-ignored. Switching one off keeps its settings.
+      </p>
+    </>
+  )
+}
+
+/** A server this project offers: a toggle, and what saying yes costs. */
+function CatalogRow({
+  item,
+  server,
+  pending,
+  onAdd,
+  onSet,
+  onRemove,
+}: {
+  item: McpCatalogItem
+  server: McpServer | null
+  pending: boolean
+  onAdd: (env?: Record<string, string>) => void
+  onSet: (enabled: boolean) => void
+  onRemove: () => void
+}) {
+  // Open when the toggle is flipped on something that needs a credential
+  // first — switching it on and having it fail later on Refresh with
+  // "server exited" would be the same information, hours later.
+  const [asking, setAsking] = useState(false)
+  const on = Boolean(server?.enabled)
+
+  return (
+    <li className="rounded-md px-2 py-1.5 transition hover:bg-tint">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-[12px] text-fg">
+            {item.title}
+            {item.unmaintained && (
+              <span
+                title="Published upstream as no longer supported. It still installs and runs."
+                className="ml-1.5 rounded-sm bg-tint-2 px-1 py-px align-[1px] text-[9.5px] tracking-wide text-faint uppercase"
+              >
+                unmaintained
+              </span>
+            )}
+          </p>
+          <p className="mt-0.5 text-[10.5px] leading-snug text-faint">
+            {item.summary}
+          </p>
+        </div>
+        <div className="mt-0.5">
+          <Toggle
+            on={on}
+            busy={pending}
+            disabled={pending}
+            label={item.title}
+            onClick={() => {
+              if (server) return onSet(!on)
+              if (item.needs.length > 0) return setAsking((open) => !open)
+              onAdd()
+            }}
+          />
+        </div>
+      </div>
+
+      {asking && !server && (
+        <CredentialForm
+          needs={item.needs}
+          busy={pending}
+          onCancel={() => setAsking(false)}
+          onSubmit={(env) => {
+            setAsking(false)
+            onAdd(env)
+          }}
+        />
+      )}
+
+      {on && (
+        <p className="mt-1 font-mono text-[10px] text-faint">
+          {server?.tools ? `${server.tools} tools` : 'not asked yet'} ·{' '}
+          {item.package}
+        </p>
+      )}
+
+      {server && item.needs.length > 0 && (
+        <p className="mt-1 text-[10.5px] text-faint">
+          {item.needs.every((need) => server.env_set.includes(need.variable))
+            ? 'Credentials set'
+            : `Missing: ${item.needs
+                .filter((need) => !server.env_set.includes(need.variable))
+                .map((need) => need.label)
+                .join(', ')}`}
+        </p>
+      )}
+
+      {item.caution && (
+        <p className="mt-1 text-[10.5px] leading-snug text-warn">{item.caution}</p>
+      )}
+
+      {server?.error && (
+        <p className="mt-1 text-[10.5px] leading-snug text-danger">{server.error}</p>
+      )}
+
+      {server && (
+        <button
+          type="button"
+          onClick={onRemove}
+          disabled={pending}
+          className="mt-1 text-[10.5px] text-faint underline underline-offset-2 transition hover:text-danger disabled:opacity-50"
+        >
+          Remove entirely
+        </button>
+      )}
+    </li>
+  )
+}
+
+/**
+ * Collecting the credentials a server needs before switching it on.
+ *
+ * Two ways to answer, and the second is the better one: paste the value and it
+ * is written into mcp.json, or type `${SOME_VAR}` and only that name is
+ * written, with the value read from this machine's environment when the server
+ * starts. The form says so, because nobody would guess it.
+ *
+ * These are `type="password"` so a value does not sit readable on screen, and
+ * `autoComplete="off"` so the browser does not offer to remember it. What goes
+ * up never comes back down: the API reports which variables are set and never
+ * their values.
+ */
+function CredentialForm({
+  needs,
+  busy,
+  onCancel,
+  onSubmit,
+}: {
+  needs: McpEnvNeed[]
+  busy: boolean
+  onCancel: () => void
+  onSubmit: (env: Record<string, string>) => void
+}) {
+  const [values, setValues] = useState<Record<string, string>>({})
+
+  // Only the first is required; the rest are optional extras like a
+  // self-hosted API URL, and demanding all of them would block the common case.
+  const ready = (values[needs[0].variable] ?? '').trim() !== ''
+
+  return (
+    <form
+      className="mt-2 space-y-2 rounded-md border border-line bg-sunken p-2.5"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (!ready) return
+        onSubmit(values)
+      }}
+    >
+      {needs.map((need) => (
+        <label key={need.variable} className="block">
+          <span className="mb-1 block text-[10.5px] text-fg">{need.label}</span>
+          <input
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            value={values[need.variable] ?? ''}
+            onChange={(event) =>
+              setValues((current) => ({
+                ...current,
+                [need.variable]: event.target.value,
+              }))
+            }
+            placeholder={`\${${need.variable}}`}
+            className="w-full rounded-md border border-transparent bg-surface px-2 py-1 font-mono text-[11px] outline-none placeholder:text-faint focus:border-accent-line"
+          />
+          <span className="mt-1 block text-[10px] leading-snug text-faint">
+            {need.hint}
+          </span>
+        </label>
+      ))}
+
+      <p className="text-[10px] leading-snug text-faint">
+        Stored in mcp.json, which is git-ignored. To keep it out of the file,
+        enter <span className="font-mono">{'${NAME}'}</span> and it is read from
+        this machine&rsquo;s environment when the server starts.
+      </p>
+
+      <div className="flex gap-1.5">
+        <button
+          type="submit"
+          disabled={!ready || busy}
+          className="h-6 rounded-md border border-accent-line px-2.5 text-[11px] text-fg transition hover:bg-accent-tint disabled:opacity-45"
+        >
+          Switch on
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="h-6 rounded-md border border-line px-2.5 text-[11px] text-muted transition hover:text-fg"
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  )
+}
+
+/** One somebody described themselves. */
+function CustomRow({
+  server,
+  pending,
+  onSet,
+  onRemove,
+}: {
+  server: McpServer
+  pending: boolean
+  onSet: (enabled: boolean) => void
+  onRemove: () => void
+}) {
+  return (
+    <li className="rounded-md bg-tint px-2 py-1.5">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[11.5px] text-fg">{server.name}</p>
+          <p
+            className="mt-0.5 truncate font-mono text-[10px] text-faint"
+            title={server.command}
+          >
+            {server.command}
+          </p>
+        </div>
+        <Toggle
+          on={server.enabled}
+          busy={pending}
+          disabled={pending}
+          label={server.name}
+          onClick={() => onSet(!server.enabled)}
+        />
+      </div>
+
+      <p className="mt-1 font-mono text-[10px] text-faint">
+        {server.tools ? `${server.tools} tools` : 'not asked yet'}
+      </p>
+
+      {server.trusted && (
+        <p className="mt-1 text-[10.5px] text-warn">
+          Trusted — its tools run without asking
+        </p>
+      )}
+
+      {server.error && (
+        <p className="mt-1 text-[10.5px] leading-snug text-danger">{server.error}</p>
+      )}
+
+      <button
+        type="button"
+        onClick={onRemove}
+        disabled={pending}
+        className="mt-1 text-[10.5px] text-faint underline underline-offset-2 transition hover:text-danger disabled:opacity-50"
+      >
+        Remove
+      </button>
+    </li>
+  )
+}
+
+/**
+ * Describing a server by hand.
+ *
+ * Arguments are one per line rather than a single string, because splitting on
+ * spaces would break every path with a space in it — which on Windows is most
+ * of them, this project's own folder included.
+ */
+function AddServerForm({
+  busy,
+  onSubmit,
+}: {
+  busy: boolean
+  onSubmit: (body: { name: string; command: string; args: string[] }) => void
+}) {
+  const [name, setName] = useState('')
+  const [command, setCommand] = useState('')
+  const [args, setArgs] = useState('')
+
+  const ready = name.trim() !== '' && command.trim() !== ''
+
+  return (
+    <form
+      className="mb-4 space-y-2 rounded-md border border-line bg-sunken p-2.5"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (!ready) return
+        onSubmit({
+          name: name.trim(),
+          command: command.trim(),
+          args: args
+            .split('\n')
+            .map((a) => a.trim())
+            .filter(Boolean),
+        })
+      }}
+    >
+      <TextField label="Name" value={name} onChange={setName} placeholder="my-server" />
+      <TextField label="Command" value={command} onChange={setCommand} placeholder="npx" />
+      <div>
+        <label className="mb-1 block text-[10.5px] text-faint">
+          Arguments, one per line
+        </label>
+        <textarea
+          value={args}
+          onChange={(event) => setArgs(event.target.value)}
+          rows={3}
+          placeholder={'-y\n@scope/server-name'}
+          className="w-full resize-none rounded-md border border-transparent bg-surface px-2 py-1.5 font-mono text-[11px] outline-none placeholder:text-faint focus:border-accent-line"
+        />
+      </div>
+      <button
+        type="submit"
+        disabled={!ready || busy}
+        className="h-6 rounded-md border border-accent-line px-2.5 text-[11px] text-fg transition hover:bg-accent-tint disabled:opacity-45"
+      >
+        Add server
+      </button>
+    </form>
+  )
+}
+
+/** A labelled single-line input. Distinct from `Field`, which wraps a child. */
+function TextField({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[10.5px] text-faint">{label}</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+        spellCheck={false}
+        className="w-full rounded-md border border-transparent bg-surface px-2 py-1 font-mono text-[11px] outline-none placeholder:text-faint focus:border-accent-line"
+      />
+    </label>
   )
 }

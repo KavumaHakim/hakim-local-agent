@@ -589,16 +589,76 @@ class McpServerOut(BaseModel):
     # answered with none - refreshing says which.
     tools: int
     error: str = ""
+    # Whether this name matches a catalogue entry, so the interface can show
+    # it as a switch rather than as something typed in by hand.
+    from_catalog: bool = False
+    # The names of the credentials that have a value, never the values. A
+    # secret that reaches the browser is a secret in a place nobody asked for
+    # it to be, and the interface only ever needs to say "set" or "not set".
+    env_set: list[str] = []
     # Listed even when off. The manager drops disabled servers, so without
     # this a server someone switched off in mcp.json disappears from the
     # panel entirely, which reads as "the file is wrong".
     enabled: bool = True
 
 
+class McpEnvNeed(BaseModel):
+    """One credential a catalogue server cannot start without."""
+
+    variable: str
+    label: str
+    hint: str = ""
+
+
+class McpCatalogItem(BaseModel):
+    """A server this project offers, not one that is configured."""
+
+    name: str
+    title: str
+    summary: str
+    needs: list[McpEnvNeed] = []
+    # Published upstream as "no longer supported". Shown, not hidden.
+    unmaintained: bool = False
+    # The package npx or uvx resolves on first run, shown so someone can
+    # check what they are agreeing to execute.
+    package: str
+    # "node" or "python" - what has to be installed for it to start.
+    runtime: str
+    caution: str
+    # Whether it is already in mcp.json, so the toggle knows which way it is.
+    added: bool
+
+
+class McpServerIn(BaseModel):
+    """Add a server: name a catalogue entry, or describe one outright."""
+
+    # Naming an entry takes its command line from the repository's own table,
+    # so a request can ask for "fetch" but cannot say what fetch runs.
+    catalog: str | None = None
+    name: str | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    trusted: bool = False
+    replace: bool = False
+    # Credentials, by variable name. A value of "${SOME_VAR}" is read from the
+    # environment when the server starts instead of being stored here. These
+    # go into mcp.json and are never returned by any endpoint - see
+    # `McpServerOut.env_set`, which reports the names alone.
+    env: dict[str, str] | None = None
+
+
+class McpServerUpdate(BaseModel):
+    """Switch one on or off, or trust it. Absent means leave it alone."""
+
+    enabled: bool | None = None
+    trusted: bool | None = None
+
+
 class McpOut(BaseModel):
     """What the agent knows about its MCP servers, from the cache."""
 
     servers: list[McpServerOut]
+    catalog: list[McpCatalogItem] = []
     configured: bool
     config_path: str
 

@@ -382,6 +382,10 @@ class Config:
     # OFF by default. Loopback only unless you widen it: adding a public host
     # is what turns this from a local-service inspector into a web client.
     http_tool_enabled: bool = False
+    # The port this API serves on. Not used to bind - the start scripts and
+    # uvicorn decide that - but to tell the HTTP tool which loopback port is
+    # the agent's own control plane, so it cannot be driven through it.
+    api_port: int = 8000
     http_allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "::1")
     http_timeout: float = 20.0
     http_max_bytes: int = 100_000
@@ -515,6 +519,7 @@ class Config:
             ),
             http_timeout=_env_float("AGENT_HTTP_TIMEOUT", defaults.http_timeout),
             http_max_bytes=_env_int("AGENT_HTTP_MAX_BYTES", defaults.http_max_bytes),
+            api_port=_env_int("AGENT_API_PORT", defaults.api_port),
             http_allow_writes=_env_bool(
                 "AGENT_HTTP_ALLOW_WRITES", defaults.http_allow_writes
             ),

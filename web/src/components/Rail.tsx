@@ -18,6 +18,7 @@ import {
   ChipIcon,
   ClockIcon,
   FolderIcon,
+  ServerIcon,
   MoonIcon,
   PlusIcon,
   SettingsIcon,
@@ -26,7 +27,13 @@ import {
   ToolIcon,
 } from './Icons'
 
-export type PaneId = 'history' | 'models' | 'tools' | 'workspace' | 'settings'
+export type PaneId =
+  | 'history'
+  | 'models'
+  | 'tools'
+  | 'mcp'
+  | 'workspace'
+  | 'settings'
 
 interface Props {
   active: PaneId
@@ -81,6 +88,14 @@ export function Rail({
         badge={toolsWarning}
       >
         <ToolIcon className="size-[19px]" />
+      </RailButton>
+
+      <RailButton
+        label="Servers"
+        selected={open && active === 'mcp'}
+        onClick={() => onSelect('mcp')}
+      >
+        <ServerIcon className="size-[19px]" />
       </RailButton>
 
       <RailButton

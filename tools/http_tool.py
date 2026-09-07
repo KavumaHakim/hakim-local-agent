@@ -48,7 +48,14 @@ The layers, and what each one is actually for:
    ride along on a request the model composed.
 6. **URL credentials refused**, and this stays a refusal too: nobody should be
    asked to eyeball a password embedded in a url and judge it.
-7. **Size cap and timeout**, and binary bodies are described rather than dumped
+7. **Writes to the agent's own API are refused**, not asked about. Its
+   endpoints change what this agent may do - which tools are on, where the
+   workspace points, which MCP servers exist and what command they run - and
+   the approval prompt shows the method and the url but *not the body*, so
+   "POST to 127.0.0.1:8000/api/mcp/servers" is a question nobody can answer.
+   Same reasoning as interpreters in the terminal tool. Reading it is free,
+   because inspecting a local service is what this tool is for.
+8. **Size cap and timeout**, and binary bodies are described rather than dumped
    into the conversation.
 
 **What approval is not.** It means a person read the method and the url before
@@ -77,6 +84,10 @@ from tools.base import Tool, ToolError
 READ_METHODS = ("GET", "HEAD")
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 ALLOWED_SCHEMES = ("http", "https")
+
+# Names that reach this machine. Used to spot the agent's own API, which is
+# the one place a write is refused outright rather than asked about.
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "0.0.0.0")
 
 MAX_URL_LENGTH = 2000
 # Content types we will put into the conversation as text.
@@ -123,8 +134,13 @@ class HttpClient:
         max_bytes: int = 100_000,
         allow_writes: bool = False,
         approve: ApprovalCheck | None = None,
+        own_api_port: int | None = None,
     ) -> None:
         self._allowed = tuple(h.strip().lower() for h in allowed_hosts if h.strip())
+        # The agent's own API. Reading it is fine and is half the point of a
+        # loopback allowlist; writing to it is refused outright - see
+        # `_is_own_api`.
+        self._own_api_port = own_api_port
         self._timeout = timeout
         self._max_bytes = max_bytes
         # Now means "do not ask about writes", not "permit writes at all".
@@ -203,6 +219,19 @@ class HttpClient:
             )
         return upper
 
+    def _is_own_api(self, url: str, host: str) -> bool:
+        """Whether this points at the agent's own API."""
+        if self._own_api_port is None:
+            return False
+        if host not in LOOPBACK_HOSTS:
+            return False
+        try:
+            port = urlparse(url.strip()).port
+        except ValueError:
+            return False
+        # No port means the scheme's default, which is never the API's.
+        return port == self._own_api_port
+
     def plan(self, url: str, method: str) -> Verdict:
         """Decide whether a request may go, and whether to ask first.
 
@@ -211,9 +240,30 @@ class HttpClient:
         means something changes at the other end. A request can be both, and
         then the prompt says both - "sends a POST to api.example.com, which is
         not on the allowed list" is what someone needs to decide on.
+
+        One thing is refused rather than asked about: a write to the agent's
+        own API. The approval prompt shows the method and the url and *not the
+        body*, so "POST to 127.0.0.1:8000/api/mcp/servers" is a question nobody
+        can answer - the body is what decides whether it installs a server that
+        runs an arbitrary command, switches a tool on, or moves the workspace.
+        An unauditable prompt is a rubber stamp, which is the same reason the
+        terminal tool refuses interpreters instead of asking about them.
+        Reading it stays free: inspecting a local service is what the tool is
+        for.
         """
         host = self.check_url(url)
         verb = self.check_method(method)
+
+        if verb in WRITE_METHODS and self._is_own_api(url, host):
+            raise HttpToolError(
+                f"{verb} to the agent's own API (port {self._own_api_port}) is "
+                f"not allowed. Its endpoints change what this agent may do - "
+                f"which tools are on, where the workspace points, which MCP "
+                f"servers exist - and the approval prompt cannot show the "
+                f"request body, so nobody could check what they were agreeing "
+                f"to. Ask the person to make the change in the interface. "
+                f"Reading from it is allowed."
+            )
 
         off_list = not self.is_free_host(host)
         writing = verb in WRITE_METHODS and not self._allow_writes
@@ -449,6 +499,7 @@ def build_http_tool(
     max_bytes: int,
     allow_writes: bool,
     approve: ApprovalCheck | None = None,
+    own_api_port: int | None = None,
 ) -> Tool:
     return HttpClient(
         allowed_hosts=allowed_hosts,
@@ -456,4 +507,5 @@ def build_http_tool(
         max_bytes=max_bytes,
         allow_writes=allow_writes,
         approve=approve,
+        own_api_port=own_api_port,
     ).tool()

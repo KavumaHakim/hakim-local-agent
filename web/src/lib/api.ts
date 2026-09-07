@@ -121,6 +121,38 @@ export const api = {
    */
   refreshMcp: () => request<McpResponse>('/mcp/refresh', { method: 'POST' }),
 
+  /**
+   * Add a server. `catalog` names a built-in one, whose command line comes
+   * from the repository's own table - the rest of the body describes a custom
+   * one instead.
+   */
+  addMcpServer: (body: {
+    catalog?: string
+    name?: string
+    command?: string
+    args?: string[]
+    trusted?: boolean
+    replace?: boolean
+    /** By variable name. A "${VAR}" value is read from the environment. */
+    env?: Record<string, string>
+  }) =>
+    request<McpResponse>('/mcp/servers', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** Switch one on or off, or trust it. Off keeps the entry. */
+  setMcpServer: (name: string, body: { enabled?: boolean; trusted?: boolean }) =>
+    request<McpResponse>(`/mcp/servers/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  removeMcpServer: (name: string) =>
+    request<McpResponse>(`/mcp/servers/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
+
   /** Choose which reader ocr_image uses. Applies from the next turn. */
   setOcrBackend: (backend: OcrBackend) =>
     request<ToolsResponse>('/ocr-backend', {

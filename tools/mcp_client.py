@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -119,6 +120,104 @@ def load_servers(path: Path) -> list[ServerSpec]:
     return found
 
 
+# A server name has to survive being a JSON key, a tool-name prefix and a lens
+# category, so it is kept to what all three read the same way.
+_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
+
+
+class McpConfigError(ToolError):
+    """The config file could not be changed."""
+
+
+def edit_config(path: Path, change) -> None:
+    """Apply `change` to the `mcpServers` map and write the file back.
+
+    **Everything outside the entry being changed is preserved**, because this
+    file is hand-written and git-ignored: it holds `env` blocks with API keys
+    in them, and may hold comments-by-convention, ordering, or keys a future
+    version of some other client understands. Rewriting it from a parsed model
+    of what this code happens to know about would quietly delete a person's
+    credentials, and they have no copy - that is the point of git-ignoring it.
+
+    So: read the raw JSON, hand `change` the servers dict to mutate, write the
+    whole document back. A file that does not exist yet is created; one that is
+    unreadable is an error rather than something to overwrite, for the same
+    reason.
+    """
+    path = Path(path)
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise McpConfigError(f"Could not read {path.name}: {exc}") from None
+        except ValueError as exc:
+            raise McpConfigError(
+                f"{path.name} is not valid JSON ({exc}). Fix it by hand - "
+                f"overwriting it would lose whatever else is in there, "
+                f"including any API keys."
+            ) from None
+        if not isinstance(raw, dict):
+            raise McpConfigError(f"{path.name} does not contain a JSON object.")
+    else:
+        raw = {}
+
+    servers = raw.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+    change(servers)
+    raw["mcpServers"] = servers
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Written beside the target and moved into place, so a failure
+        # half-way through leaves the original rather than a truncated file.
+        temporary = path.with_name(f"{path.name}.tmp")
+        temporary.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    except OSError as exc:
+        raise McpConfigError(f"Could not write {path.name}: {exc}") from None
+
+
+_REFERENCE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+
+def resolve_env(env: dict[str, str]) -> dict[str, str]:
+    """Expand `${VAR}` values from this process's environment.
+
+    The better way to give a server a credential: the value stays in the
+    environment and mcp.json holds only the name of it, so the secret is not
+    written to a file at all. The alternative - pasting the value - is still
+    supported, because plenty of people would rather have it in one place than
+    manage a shell variable.
+
+    Only an entire value of exactly `${NAME}` is treated as a reference. No
+    substitution inside a larger string: half-expanded values are a source of
+    silent mistakes, and nothing here needs them.
+
+    A name that is not set resolves to empty rather than being left as the
+    literal `${NAME}`, which a server would otherwise send to its API as
+    though it were a token.
+    """
+    resolved: dict[str, str] = {}
+    for key, value in env.items():
+        match = _REFERENCE.match(str(value).strip())
+        resolved[key] = os.environ.get(match.group(1), "") if match else str(value)
+    return resolved
+
+
+def check_name(name: str) -> str:
+    """The server name, or an error saying what a name may be."""
+    cleaned = (name or "").strip().lower()
+    if not _NAME.match(cleaned):
+        raise McpConfigError(
+            "A server name must be lowercase letters, digits, hyphens or "
+            "underscores, start with a letter or digit, and be at most 41 "
+            "characters. It becomes the prefix on every tool the server "
+            "offers."
+        )
+    return cleaned
+
+
 class McpConnection:
     """One running server, spoken to over its stdin and stdout.
 
@@ -157,7 +256,7 @@ class McpConnection:
             )
             if name in os.environ
         }
-        environment.update(self._spec.env)
+        environment.update(resolve_env(self._spec.env))
 
         try:
             self._process = subprocess.Popen(

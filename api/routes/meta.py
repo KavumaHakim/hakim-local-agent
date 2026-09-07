@@ -26,14 +26,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from api.deps import get_runtime
 from api.runtime import FLAGS_BY_ID, TOOL_FLAGS, Runtime
 from models.manager import ModelManagerError, ModelState, memory_status
-from tools.mcp_client import load_servers
 
 from api.schemas import (
     DisabledToolOut,
     OcrBackendRequest,
     HealthOut,
-    McpOut,
-    McpServerOut,
     ResourcesOut,
     ShutdownOut,
     SwitchOut,
@@ -185,61 +182,6 @@ def _tools_snapshot(runtime: Runtime) -> ToolsOut:
         ocr_backend=config.ocr_backend,
         ocr_ready=ready,
         ocr_hint=hint,
-    )
-
-
-@router.get("/mcp", response_model=McpOut)
-def list_mcp(runtime: Runtime = Depends(get_runtime)):
-    """The configured servers and how many tools each has cached."""
-    return _mcp_snapshot(runtime)
-
-
-@router.post("/mcp/refresh", response_model=McpOut)
-def refresh_mcp(runtime: Runtime = Depends(get_runtime)):
-    """Ask every server what it offers, and remember.
-
-    The expensive operation, which is why it is a request rather than
-    something that happens on its own: every server is started, questioned
-    and stopped. Refused mid-turn, because the registry a running turn is
-    using was built from the cache this replaces.
-    """
-    if runtime.queue.busy() or runtime.queue.depth():
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "A turn is running or waiting. Refreshing rebuilds the tool "
-            "roster underneath it - let it finish first.",
-        )
-    report = runtime.mcp.refresh()
-    return _mcp_snapshot(runtime, errors=report.get("errors", {}))
-
-
-def _mcp_snapshot(runtime: Runtime, errors: dict | None = None) -> McpOut:
-    """What the config says now, and what the cache holds for it.
-
-    Read from the file rather than from `runtime.mcp`, for two reasons. The
-    manager drops disabled servers, so one switched off in mcp.json would
-    vanish from the panel rather than appear switched off. And the manager's
-    list is from startup: someone who has just added a server should see it
-    before they press Refresh, not after. Refreshing is what reloads the
-    manager itself.
-    """
-    config = runtime.effective_config()
-    counts = runtime.mcp.cached_tools()
-    errors = errors or {}
-    return McpOut(
-        servers=[
-            McpServerOut(
-                name=spec.name,
-                command=" ".join([spec.command, *spec.args])[:200],
-                trusted=spec.trusted,
-                enabled=spec.enabled,
-                tools=len(counts.get(spec.name, [])),
-                error=errors.get(spec.name, ""),
-            )
-            for spec in sorted(load_servers(config.mcp_config), key=lambda s: s.name)
-        ],
-        configured=config.mcp_config.is_file(),
-        config_path=str(config.mcp_config),
     )
 
 

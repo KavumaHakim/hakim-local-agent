@@ -181,6 +181,7 @@ def build_default_registry(
                 max_bytes=config.http_max_bytes,
                 allow_writes=config.http_allow_writes,
                 approve=approve,
+                own_api_port=config.api_port,
             )
         )
     else:

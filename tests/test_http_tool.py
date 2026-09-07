@@ -352,5 +352,90 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("nobody to ask", result.payload["error"])
 
 
+
+class OwnApiTests(unittest.TestCase):
+    """The agent may read its own API and may not write to it.
+
+    Not a matter of taste. The approval prompt is built from the method and
+    the url and never the body, so `POST /api/mcp/servers` is a question with
+    no answerable content - the body decides whether it installs a server
+    running an arbitrary command. An unauditable prompt is a rubber stamp,
+    so this is a refusal rather than a question.
+    """
+
+    def api(self, **kwargs):
+        kwargs.setdefault("own_api_port", 8000)
+        # Approval would otherwise be the thing under test rather than the
+        # refusal: with a yes-man attached, an unguarded write goes through.
+        kwargs.setdefault("approve", lambda what, why: True)
+        return client(**kwargs)
+
+    def test_a_write_to_the_own_api_is_refused(self):
+        with self.assertRaises(HttpToolError) as caught:
+            self.api().plan("http://127.0.0.1:8000/api/mcp/servers", "POST")
+        self.assertIn("own API", str(caught.exception))
+
+    def test_every_write_method_is_refused(self):
+        c = self.api()
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            with self.assertRaises(HttpToolError, msg=method):
+                c.plan("http://127.0.0.1:8000/api/tools/python", method)
+
+    def test_the_refusal_says_what_to_do_instead(self):
+        with self.assertRaises(HttpToolError) as caught:
+            self.api().plan("http://localhost:8000/api/workspace", "POST")
+        message = str(caught.exception)
+        self.assertIn("in the interface", message)
+        self.assertIn("Reading from it is allowed", message)
+
+    def test_every_loopback_spelling_is_covered(self):
+        """127.0.0.1 and localhost reach the same server."""
+        c = self.api()
+        for host in ("127.0.0.1", "localhost"):
+            with self.assertRaises(HttpToolError, msg=host):
+                c.plan(f"http://{host}:8000/api/mcp/servers", "POST")
+
+    def test_reading_the_own_api_is_still_free(self):
+        """Inspecting a local service is what the tool is for."""
+        verdict = self.api().plan("http://127.0.0.1:8000/api/health", "GET")
+        self.assertFalse(verdict.needs_approval)
+
+    def test_another_port_on_loopback_is_untouched(self):
+        """A llama-server on 8080 is exactly what this must not block."""
+        verdict = self.api(allow_writes=True).plan(
+            "http://127.0.0.1:8080/completion", "POST"
+        )
+        self.assertFalse(verdict.needs_approval)
+
+    def test_the_same_port_off_loopback_is_untouched(self):
+        """Someone else's :8000 is not this agent's control plane."""
+        verdict = self.api().plan("http://example.com:8000/x", "POST")
+        self.assertTrue(verdict.needs_approval)
+
+    def test_with_no_port_configured_nothing_changes(self):
+        """The CLI builds the tool without one, and must keep working."""
+        verdict = client(
+            own_api_port=None, approve=lambda w, y: True
+        ).plan("http://127.0.0.1:8000/api/mcp/servers", "POST")
+        self.assertTrue(verdict.needs_approval)
+
+    def test_a_default_port_url_is_not_mistaken_for_the_api(self):
+        """http://127.0.0.1/x is port 80, not 8000."""
+        verdict = self.api().plan("http://127.0.0.1/x", "POST")
+        self.assertTrue(verdict.needs_approval)
+
+    def test_the_refusal_beats_allow_writes(self):
+        """`allow_writes` silences the prompt; it does not open this door."""
+        with self.assertRaises(HttpToolError):
+            self.api(allow_writes=True).plan(
+                "http://127.0.0.1:8000/api/mcp/servers", "POST"
+            )
+
+    def test_it_is_refused_through_the_tool_not_only_the_plan(self):
+        result = self.api().tool()
+        with self.assertRaises(HttpToolError):
+            result.run(url="http://127.0.0.1:8000/api/tools/shell", method="POST")
+
+
 if __name__ == "__main__":
     unittest.main()

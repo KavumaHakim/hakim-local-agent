@@ -1,7 +1,15 @@
 {
   "_comment": [
-    "Copy this to mcp.json to connect MCP servers. The shape is the one every",
-    "other MCP client uses, so a config can be pasted in from elsewhere.",
+    "You do not need this file any more: the Servers pane adds, switches on",
+    "and removes servers for you, and writes mcp.json itself. This is here for",
+    "anyone who would rather edit it by hand, and to document the shape - which",
+    "is the one every other MCP client uses, so a config pastes in from",
+    "elsewhere.",
+    "",
+    "A credential goes in an env block. Either the value itself, or \"${VAR}\",",
+    "which is read from the environment when the server starts so the secret",
+    "never lands in this file. Keep mcp.json out of version control either way;",
+    "the .gitignore already does.",
     "",
     "Nothing here runs until you run POST /api/mcp/refresh once: the tool list",
     "is cached, because the registry is rebuilt every turn and starting a",

@@ -227,6 +227,32 @@ export interface ToolsResponse {
 
 export type OcrBackend = 'tesseract' | 'model'
 
+/** One credential a catalogue server cannot start without. */
+export interface McpEnvNeed {
+  variable: string
+  label: string
+  hint: string
+}
+
+/** A server this project offers. Not installed - a command line and a warning. */
+export interface McpCatalogItem {
+  name: string
+  title: string
+  summary: string
+  /** Credentials to collect before it can start. Empty for local servers. */
+  needs: McpEnvNeed[]
+  /** Published upstream as "no longer supported". Shown, not hidden. */
+  unmaintained: boolean
+  /** The package npx or uvx fetches on first run, so it can be checked. */
+  package: string
+  /** "node" or "python" - what has to be installed for it to start. */
+  runtime: string
+  /** What someone should know before switching it on. May be empty. */
+  caution: string
+  /** Whether it is already in mcp.json. */
+  added: boolean
+}
+
 /** One MCP server, as `mcp.json` describes it and the cache remembers it. */
 export interface McpServer {
   name: string
@@ -239,10 +265,15 @@ export interface McpServer {
   /** From the last refresh, if it would not start. */
   error: string
   enabled: boolean
+  /** From the catalogue, so it shows as a switch rather than a typed-in row. */
+  from_catalog: boolean
+  /** Names of the credentials that have a value. Never the values. */
+  env_set: string[]
 }
 
 export interface McpResponse {
   servers: McpServer[]
+  catalog: McpCatalogItem[]
   /** Whether mcp.json exists at all - the first-run case. */
   configured: boolean
   config_path: string

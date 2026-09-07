@@ -318,7 +318,48 @@ export function useMcp() {
     }
   }, [])
 
-  return { data, refresh, refreshing, error, reload: load }
+  /**
+   * Every write, sharing one pending name and one error.
+   *
+   * They all return the whole snapshot, so the configured list and the
+   * catalogue's `added` flags can never disagree about what exists — which
+   * they would if each response only described the row it changed.
+   */
+  const [pending, setPending] = useState<string | null>(null)
+
+  const act = useCallback(
+    async (name: string, run: () => Promise<McpResponse>) => {
+      setPending(name)
+      setError(null)
+      try {
+        setData(await run())
+      } catch (failure) {
+        setError(failure instanceof Error ? failure.message : String(failure))
+      } finally {
+        setPending(null)
+      }
+    },
+    [],
+  )
+
+  const add = useCallback(
+    (body: Parameters<typeof api.addMcpServer>[0]) =>
+      act(body.catalog ?? body.name ?? '', () => api.addMcpServer(body)),
+    [act],
+  )
+
+  const set = useCallback(
+    (name: string, body: { enabled?: boolean; trusted?: boolean }) =>
+      act(name, () => api.setMcpServer(name, body)),
+    [act],
+  )
+
+  const remove = useCallback(
+    (name: string) => act(name, () => api.removeMcpServer(name)),
+    [act],
+  )
+
+  return { data, refresh, refreshing, error, reload: load, add, set, remove, pending }
 }
 
 /**

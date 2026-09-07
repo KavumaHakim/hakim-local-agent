@@ -47,6 +47,15 @@ export const ChipIcon = svg(
   </>,
 )
 
+/** Stacked units — MCP servers, each a process this machine can start. */
+export const ServerIcon = svg(
+  <>
+    <rect x="4" y="4" width="16" height="7" rx="2" />
+    <rect x="4" y="13" width="16" height="7" rx="2" />
+    <path d="M8 7.5h.01M8 16.5h.01" />
+  </>,
+)
+
 export const ToolIcon = svg(
   <path d="M14.7 6.3a4 4 0 0 1-5 5L5 16v3h3l4.7-4.7a4 4 0 0 1 5-5l-2-2 2-2 2 2z" />,
 )
