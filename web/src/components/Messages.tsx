@@ -40,7 +40,23 @@ export function ToolPills({ tools }: { tools: ToolCall[] }) {
   )
 }
 
-function ToolCallRow({ tool }: { tool: ToolCall }) {
+/**
+ * One tool call, collapsed to a line and expandable to what was exchanged.
+ *
+ * Exported because the Calls pane shows the same thing for a whole
+ * conversation. Two renderings of a tool call would drift, and the one that
+ * drifts is the one nobody is looking at.
+ */
+export function ToolCallRow({
+  tool,
+  wrap = false,
+}: {
+  tool: ToolCall
+  /** Wrap long lines instead of scrolling them sideways. Set by the
+   *  Calls pane, where the column is 262px and a payload read through a
+   *  horizontal scrollbar is not read at all. */
+  wrap?: boolean
+}) {
   // Nothing to expand for a turn loaded before these were recorded.
   const detailed = Boolean(tool.arguments || tool.output)
 
@@ -70,9 +86,11 @@ function ToolCallRow({ tool }: { tool: ToolCall }) {
       {detailed && (
         <div className="space-y-2 border-t border-line px-2.5 py-2">
           {tool.arguments && (
-            <CodePane title="Sent" text={tool.arguments} />
+            <CodePane title="Sent" text={tool.arguments} wrap={wrap} />
           )}
-          {tool.output && <CodePane title="Returned" text={tool.output} />}
+          {tool.output && (
+            <CodePane title="Returned" text={tool.output} wrap={wrap} />
+          )}
           {tool.clipped && (
             <p className="text-[11px] text-faint">
               Shortened for display. The model received the whole thing.
@@ -84,7 +102,15 @@ function ToolCallRow({ tool }: { tool: ToolCall }) {
   )
 }
 
-function CodePane({ title, text }: { title: string; text: string }) {
+function CodePane({
+  title,
+  text,
+  wrap = false,
+}: {
+  title: string
+  text: string
+  wrap?: boolean
+}) {
   return (
     <div>
       <div className="mb-1 flex items-center gap-2">
@@ -94,7 +120,13 @@ function CodePane({ title, text }: { title: string; text: string }) {
         <CopyButton text={text} className="ml-auto" />
       </div>
       <pre className="max-h-64 overflow-auto rounded-md bg-sunken p-2 text-[11px] leading-relaxed">
-        <code className="font-mono whitespace-pre">{text}</code>
+        <code
+          className={`font-mono ${
+            wrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'
+          }`}
+        >
+          {text}
+        </code>
       </pre>
     </div>
   )

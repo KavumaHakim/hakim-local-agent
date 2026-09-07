@@ -451,6 +451,7 @@ export default function App() {
         <Pane
           pane={pane}
           onClose={() => setPaneOpen(false)}
+          messages={chat.messages}
           conversations={conversations.conversations}
           namingConversations={naming}
           activeConversationId={chat.conversationId}

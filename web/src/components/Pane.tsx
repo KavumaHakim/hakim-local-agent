@@ -15,6 +15,7 @@
 import { useEffect, useState } from 'react'
 import type {
   Conversation,
+  Message,
   McpCatalogItem,
   McpEnvNeed,
   McpResponse,
@@ -29,6 +30,7 @@ import type {
   WorkspaceInfo,
 } from '../lib/types'
 import { api } from '../lib/api'
+import { ToolCallRow } from './Messages'
 import type { PaneId } from './Rail'
 import {
   READING_FONTS,
@@ -52,6 +54,7 @@ const TITLES: Record<PaneId, string> = {
   models: 'Models',
   mcp: 'Servers',
   tools: 'Tools',
+  calls: 'Tool calls',
   workspace: 'Workspace',
   settings: 'Settings',
 }
@@ -59,6 +62,9 @@ const TITLES: Record<PaneId, string> = {
 interface Props {
   pane: PaneId
   onClose: () => void
+
+  /** Every message of the open conversation, for the Tool calls pane. */
+  messages: Message[]
 
   conversations: Conversation[]
   /** Conversations the model is naming right now, shown as a shimmer. */
@@ -138,6 +144,7 @@ export function Pane(props: Props) {
         {props.pane === 'models' && <ModelsPane {...props} />}
         {props.pane === 'mcp' && <McpPane {...props} />}
         {props.pane === 'tools' && <ToolsPane {...props} />}
+        {props.pane === 'calls' && <CallsPane {...props} />}
         {props.pane === 'workspace' && <WorkspacePane {...props} />}
         {props.pane === 'settings' && <SettingsPane {...props} />}
       </div>
@@ -384,6 +391,106 @@ function ConversationList({
             </div>
           )
         })}
+      </div>
+    </>
+  )
+}
+
+/**
+ * Every tool call the open conversation made, in one place.
+ *
+ * The transcript already expands each call to what was sent and what came
+ * back, and that is the right place to read *one* — it sits next to the
+ * sentence that provoked it. What it cannot do is answer the questions you
+ * ask when checking the agent's work over a whole conversation: how many
+ * calls were there, which failed, did it call the same thing four times. Those
+ * need the run in one list, away from the prose.
+ *
+ * It is derived from the messages already loaded, not fetched. The detail is
+ * in `message.tools` because a finished turn stores it there, so a second
+ * endpoint would be a second copy of something the page is already holding.
+ *
+ * A turn in flight is deliberately absent. Its live `tool` events carry a
+ * name and a summary but no arguments or result — those arrive with `done` —
+ * so listing them here would put rows in that cannot be expanded, in the one
+ * view whose entire purpose is expanding them.
+ */
+function CallsPane({ messages }: Props) {
+  const [failuresOnly, setFailuresOnly] = useState(false)
+
+  // Flattened with the message each came from, so a call can say where in the
+  // conversation it happened rather than floating free.
+  const calls = messages.flatMap((message, turn) =>
+    (message.tools ?? []).map((tool, index) => ({
+      tool,
+      key: `${message.id}-${index}`,
+      turn: turn + 1,
+    })),
+  )
+  const failed = calls.filter((call) => !call.tool.ok).length
+  const shown = failuresOnly ? calls.filter((call) => !call.tool.ok) : calls
+
+  if (calls.length === 0) {
+    return (
+      <p className="text-[11.5px] leading-relaxed text-faint">
+        No tool calls in this conversation yet. Anything the model runs shows
+        up here, with what it sent and what came back.
+      </p>
+    )
+  }
+
+  // Which names were used and how often - the cheapest way to see a model
+  // stuck in a loop, which is the failure this pane exists to make visible.
+  const counts = new Map<string, number>()
+  for (const call of calls) {
+    counts.set(call.tool.name, (counts.get(call.tool.name) ?? 0) + 1)
+  }
+  const byUse = [...counts.entries()].sort((a, b) => b[1] - a[1])
+
+  return (
+    <>
+      <p className="mb-2 text-[11.5px] leading-relaxed text-faint">
+        {calls.length} {calls.length === 1 ? 'call' : 'calls'} in this
+        conversation
+        {failed > 0 && (
+          <>
+            , <span className="text-danger">{failed} failed</span>
+          </>
+        )}
+        .
+      </p>
+
+      <div className="mb-3 flex flex-wrap gap-1">
+        {byUse.map(([name, count]) => (
+          <span
+            key={name}
+            className="rounded-md bg-tint px-1.5 py-0.5 font-mono text-[10px] text-faint"
+          >
+            {name}
+            {count > 1 && <span className="ml-1 text-fg">{count}</span>}
+          </span>
+        ))}
+      </div>
+
+      {failed > 0 && (
+        <label className="mb-2 flex cursor-pointer items-center gap-2 text-[11px] text-muted">
+          <input
+            type="checkbox"
+            checked={failuresOnly}
+            onChange={(event) => setFailuresOnly(event.target.checked)}
+            className="accent-current"
+          />
+          Only the ones that failed
+        </label>
+      )}
+
+      <div className="space-y-1">
+        {shown.map((call) => (
+          <div key={call.key}>
+            <p className="mb-0.5 text-[10px] text-faint">turn {call.turn}</p>
+            <ToolCallRow tool={call.tool} wrap />
+          </div>
+        ))}
       </div>
     </>
   )

@@ -2834,7 +2834,7 @@ four — the markdown renderer, the maths and the syntax highlighting are all
 written here rather than installed.
 
 **The 56px rail picks one subject; the pane beside it shows only that** —
-History, Models, Tools, Servers, Workspace, and Settings at the foot. Everything used to
+History, Models, Tools, Tool calls, Servers, Workspace, and Settings at the foot. Everything used to
 live in one scrolling sidebar, and Settings had grown back into it: appearance,
 two behaviour switches, a download prompt, the per-model overrides, the tuner,
 the llama-server path and the router summary, stacked in 262px. Models are
@@ -2845,6 +2845,18 @@ you reopen. Settings is what you set once, and fits without scrolling.
 - **Every tool call expands** to the arguments it sent and the whole payload it
   got back - the same thing the model saw. A 60-character summary is enough to
   know `read_text_file` ran and useless for checking it read the right file
+- **The Tool calls pane is the same detail for a whole conversation.** The
+  transcript is the right place to read *one* call, next to the sentence that
+  provoked it; it is the wrong place to ask how many there were, which failed,
+  or whether the model called the same thing over and over. The pane answers
+  those: a count, a failure count, a chip per tool name with how often it was
+  used, a failures-only filter, and every call expandable as in the
+  transcript. On a real stored conversation it opens with *20 calls, 9 failed*
+  and `list_directory 10` — a loop that is invisible scrolling past it. It is
+  derived from the messages already loaded rather than fetched, and a turn in
+  flight is deliberately absent: live `tool` events carry a name and a summary
+  but no payloads, so listing them would put rows into the one view whose
+  purpose is expanding them
 - Copy buttons on prompts, answers, the reasoning trace, and each half of a
   tool call
 - **Attach an image** with the paperclip or by dropping it on the composer, and

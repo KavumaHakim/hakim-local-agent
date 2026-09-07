@@ -15,6 +15,7 @@
 
 import type { ReactNode } from 'react'
 import {
+  ActivityIcon,
   ChipIcon,
   ClockIcon,
   FolderIcon,
@@ -31,6 +32,7 @@ export type PaneId =
   | 'history'
   | 'models'
   | 'tools'
+  | 'calls'
   | 'mcp'
   | 'workspace'
   | 'settings'
@@ -88,6 +90,14 @@ export function Rail({
         badge={toolsWarning}
       >
         <ToolIcon className="size-[19px]" />
+      </RailButton>
+
+      <RailButton
+        label="Tool calls"
+        selected={open && active === 'calls'}
+        onClick={() => onSelect('calls')}
+      >
+        <ActivityIcon className="size-[19px]" />
       </RailButton>
 
       <RailButton

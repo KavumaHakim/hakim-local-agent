@@ -64,6 +64,16 @@ export const ChatIcon = svg(
   <path d="M20 15a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z" />,
 )
 
+/** Tool calls: a checklist, for the run of calls a conversation made. */
+export const ActivityIcon = svg(
+  <>
+    <path d="m3 6 2 2 3-3" />
+    <path d="m3 13 2 2 3-3" />
+    <path d="m3 20 2 2 3-3" />
+    <path d="M12 6h9M12 13h9M12 20h9" />
+  </>,
+)
+
 export const CommandIcon = svg(
   <path d="M9 6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3z" />,
 )
