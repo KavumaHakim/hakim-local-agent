@@ -266,10 +266,16 @@ export const api = {
       body: JSON.stringify({ key }),
     }),
 
-  setRouter: (fast: string, strong: string) =>
+  /**
+   * Replace the auto-router's escalation chain, cheapest first.
+   *
+   * The whole chain, not one end at a time: reordering is the operation
+   * people want, and named slots cannot express it.
+   */
+  setRouter: (chain: string[]) =>
     request<ModelsResponse>('/models/router', {
       method: 'POST',
-      body: JSON.stringify({ fast, strong }),
+      body: JSON.stringify({ chain }),
     }),
 
   /** Retune one model. Applies the next time it starts. */

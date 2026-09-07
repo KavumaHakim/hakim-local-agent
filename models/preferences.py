@@ -61,8 +61,10 @@ class ModelPreferences:
 
     path: Path
     primary: str = ""
-    router_fast: str = ""
-    router_strong: str = ""
+    # The auto-router's escalation chain, cheapest first. Was a
+    # fast/strong pair; a file written by an older build still says so and
+    # is migrated on load, so nobody loses their choice to an upgrade.
+    router_chain: list[str] = field(default_factory=list)
     # key -> {field: value}, filtered to OVERRIDABLE on the way in.
     overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Discovered models the user does not want offered. Curated entries are
@@ -104,11 +106,20 @@ class ModelPreferences:
                     overrides[str(key)] = cleaned
 
         router = raw.get("router") or {}
+        # "chain" is what is written now; "fast"/"strong" is what an older
+        # file says, and reading it as a two-entry chain is exactly what it
+        # meant. Order matters and the pair had one: cheap end first.
+        chain = [str(key) for key in (router.get("chain") or []) if key]
+        if not chain:
+            chain = [
+                str(router.get(name, "") or "")
+                for name in ("fast", "strong")
+                if str(router.get(name, "") or "")
+            ]
         return cls(
             path=path,
             primary=str(raw.get("primary", "") or ""),
-            router_fast=str(router.get("fast", "") or ""),
-            router_strong=str(router.get("strong", "") or ""),
+            router_chain=chain,
             overrides=overrides,
             hidden=[str(key) for key in (raw.get("hidden") or []) if key],
             setup_complete=bool(raw.get("setup_complete", False)),
@@ -131,7 +142,7 @@ class ModelPreferences:
             ),
             "primary": self.primary,
             "server_exe": self.server_exe,
-            "router": {"fast": self.router_fast, "strong": self.router_strong},
+            "router": {"chain": list(self.router_chain)},
             "overrides": self.overrides,
             "hidden": self.hidden,
             "setup_complete": self.setup_complete,
@@ -165,15 +176,24 @@ class ModelPreferences:
         strong end alone, since that is a separate decision.
         """
         self.primary = key
-        if not self.router_fast:
-            self.router_fast = key
+        if not self.router_chain:
+            self.router_chain = [key]
         self.setup_complete = True
 
-    def set_router(self, *, fast: str = "", strong: str = "") -> None:
-        if fast:
-            self.router_fast = fast
-        if strong:
-            self.router_strong = strong
+    def set_router(self, chain: list[str]) -> None:
+        """Replace the escalation chain outright.
+
+        Replaced rather than merged, because order is the point: a setter that
+        took one end at a time could not express "move the 8B above the
+        hosted one" at all. Blanks and repeats are dropped here as well as in
+        the router, so what is persisted is what will be used.
+        """
+        cleaned: list[str] = []
+        for key in chain:
+            key = str(key).strip()
+            if key and key not in cleaned:
+                cleaned.append(key)
+        self.router_chain = cleaned
 
     def override(self, key: str, values: dict[str, Any]) -> dict[str, Any]:
         """Retune one model. Returns what was actually applied."""
@@ -203,7 +223,7 @@ class ModelPreferences:
     def as_dict(self) -> dict[str, Any]:
         return {
             "primary": self.primary,
-            "router": {"fast": self.router_fast, "strong": self.router_strong},
+            "router": {"chain": list(self.router_chain)},
             "overrides": {key: dict(v) for key, v in self.overrides.items()},
             "hidden": list(self.hidden),
             "setup_complete": self.setup_complete,

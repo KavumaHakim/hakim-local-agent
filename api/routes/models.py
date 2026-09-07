@@ -151,8 +151,7 @@ def _snapshot(runtime: Runtime) -> ModelsOut:
         models=models,
         default_key=manager.default_key,
         active_key=active,
-        router_fast=manager.router_fast,
-        router_strong=manager.router_strong,
+        router_chain=list(manager.router_chain),
         max_active=manager.max_active,
         idle_timeout_seconds=int(manager.idle_timeout),
         available_ram_mb=available_ram_mb(),
@@ -256,13 +255,21 @@ def set_primary(body: ModelPrimaryRequest, runtime: Runtime = Depends(get_runtim
 
 @router.post("/router", response_model=ModelsOut)
 def set_router(body: ModelRouterRequest, runtime: Runtime = Depends(get_runtime)):
-    """Point the auto-router's cheap and capable ends at chosen models."""
-    if not body.fast and not body.strong:
+    """Set the auto-router's escalation chain, cheapest first.
+
+    The whole chain, because reordering is the operation people want and
+    per-end setters cannot express it. An empty chain is refused rather than
+    quietly meaning "the default": clearing the routing policy by sending
+    nothing would be too easy to do by accident.
+    """
+    if not [key for key in body.chain if key.strip()]:
         raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Give at least one of fast or strong."
+            status.HTTP_400_BAD_REQUEST,
+            "Give at least one model. A chain of one means the router never "
+            "switches, which is a choice - an empty one is not.",
         )
     try:
-        runtime.manager.set_router(fast=body.fast, strong=body.strong)
+        runtime.manager.set_router(body.chain)
     except ModelManagerError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
     return _snapshot(runtime)

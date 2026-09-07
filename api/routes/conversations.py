@@ -57,11 +57,14 @@ def get_conversation(conversation_id: int, runtime: Runtime = Depends(get_runtim
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such conversation.")
 
     messages = runtime.store.get_messages(conversation_id)
-    strong = runtime.manager.router_strong
+    # "Escalated" now means "went past the cheapest link", since there may be
+    # several to go past rather than one.
+    chain = runtime.manager.router_chain
+    beyond_first = set(chain[1:])
     return ConversationDetail(
         **vars(conversation),
         messages=[MessageOut(**vars(message)) for message in messages],
-        escalated=any(message.model_key == strong for message in messages),
+        escalated=any(message.model_key in beyond_first for message in messages),
     )
 
 

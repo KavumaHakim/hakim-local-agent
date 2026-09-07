@@ -452,6 +452,7 @@ export default function App() {
           pane={pane}
           onClose={() => setPaneOpen(false)}
           messages={chat.messages}
+          onSetRouter={(chain) => void models.setRouter(chain)}
           conversations={conversations.conversations}
           namingConversations={naming}
           activeConversationId={chat.conversationId}
@@ -575,7 +576,10 @@ export default function App() {
                   key={turn.key}
                   turn={turn}
                   onEscalate={() => {
-                    const strong = models.models?.router_strong
+                    // The end of the chain: escalating means "try the most
+                    // capable thing configured", which is the last link.
+                    const chain = models.models?.router_chain ?? []
+                    const strong = chain[chain.length - 1]
                     if (!strong) return
                     setModelKey(strong)
                     const prompt = turn.prompt

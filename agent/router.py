@@ -7,7 +7,7 @@ deliberately conservative:
 
 * it scores the prompt with cheap heuristics before anything is loaded, so a
   correct guess costs nothing at all;
-* it never routes *down*. Once a conversation has needed the strong model,
+* it never routes *down*. Once a conversation has needed a bigger model,
   going back would pay the switch cost twice to save RAM that is already
   spent;
 * it is off unless the caller turns it on, and it always reports a reason so
@@ -16,12 +16,23 @@ deliberately conservative:
 Getting it wrong is cheap in one direction only: starting on the small model
 and escalating wastes one turn, while starting on the big model wastes minutes
 on every trivial question. The thresholds lean small accordingly.
+
+**An ordered chain, cheapest first.** It was a fast/strong pair, which is the
+two-model case of the same idea; somebody with three models had no way to say
+"try the 2B, then the 8B, then the hosted one". The chain is that list, and
+the score picks a position in it: one `THRESHOLD` of score per step, capped at
+the end. With two entries that is exactly the old rule - under the threshold
+the first, at or over it the second - which is why the two-model tests did not
+change.
+
+A chain of one is a valid, and useful, way to say "never switch".
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Sequence
 
 # Work that tends to need the stronger model. Matched as whole words.
 HARD_SIGNALS = (
@@ -59,52 +70,92 @@ class RouteDecision:
 
 
 class TaskRouter:
-    """Picks a model key from the text of a prompt."""
+    """Picks a model from an ordered chain, using the text of a prompt."""
 
     def __init__(
         self,
-        fast_key: str,
-        strong_key: str,
+        chain: Sequence[str],
         *,
         enabled: bool = False,
         threshold: int = THRESHOLD,
     ) -> None:
-        self.fast_key = fast_key
-        self.strong_key = strong_key
+        # Blanks dropped and order-preserving deduplication: a chain with the
+        # same model twice would make one step of escalation do nothing, which
+        # reads as the router being broken.
+        seen: list[str] = []
+        for key in chain:
+            if key and key not in seen:
+                seen.append(key)
+        self.chain = seen
         self.enabled = enabled
         self.threshold = threshold
+
+    @property
+    def first(self) -> str:
+        """Where a conversation starts. Empty only if the chain is."""
+        return self.chain[0] if self.chain else ""
+
+    @property
+    def last(self) -> str:
+        """The end of the chain: nothing to escalate to beyond this."""
+        return self.chain[-1] if self.chain else ""
+
+    def position(self, key: str | None) -> int:
+        """Where `key` sits in the chain, or -1 if it is not in it.
+
+        A model chosen by hand is usually not in the chain at all, and that
+        has to mean "no floor" rather than "position 0" - otherwise picking a
+        big model by hand would let the router demote the next turn.
+        """
+        try:
+            return self.chain.index(key or "")
+        except ValueError:
+            return -1
 
     def choose(
         self,
         prompt: str,
         *,
         current_key: str | None = None,
-        escalated: bool = False,
+        reached: str = "",
     ) -> RouteDecision:
-        """Decide which model should handle `prompt`."""
+        """Decide which model should handle `prompt`.
+
+        `reached` is the furthest-along model this conversation has already
+        used. Together with `current_key` it sets a floor, because routing
+        down would pay the switch cost twice to give back RAM already spent.
+        """
         if not self.enabled:
             return RouteDecision(
-                key=current_key or self.fast_key, reason="auto-routing off"
+                key=current_key or self.first, reason="auto-routing off"
             )
-
-        # Never route down: a conversation that has needed the strong model
-        # keeps it rather than paying to switch back and forth.
-        if escalated or current_key == self.strong_key:
-            return RouteDecision(
-                key=self.strong_key,
-                reason="staying on the strong model for this conversation",
-            )
+        if not self.chain:
+            return RouteDecision(key=current_key or "", reason="no models to route between")
 
         score, reasons = self.score(prompt)
+        # One threshold of score per step along the chain. With two entries
+        # this is the original rule exactly.
+        step = max(1, self.threshold)
+        wanted = min(score // step, len(self.chain) - 1)
 
-        if score >= self.threshold:
+        floor = max(self.position(current_key), self.position(reached))
+        if floor > wanted:
             return RouteDecision(
-                key=self.strong_key,
+                key=self.chain[floor],
                 score=score,
-                reason="looks involved: " + ", ".join(reasons),
+                reason=(
+                    f"staying on {self.chain[floor]} for this conversation"
+                ),
+            )
+
+        if wanted == 0:
+            return RouteDecision(
+                key=self.chain[0], score=score, reason="looks simple enough"
             )
         return RouteDecision(
-            key=self.fast_key, score=score, reason="looks simple enough"
+            key=self.chain[wanted],
+            score=score,
+            reason="looks involved: " + ", ".join(reasons),
         )
 
     def score(self, prompt: str) -> tuple[int, list[str]]:

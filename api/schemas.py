@@ -215,8 +215,9 @@ class ModelsOut(BaseModel):
     models: list[ModelOut]
     default_key: str
     active_key: str | None = None
-    router_fast: str
-    router_strong: str
+    # The auto-router's escalation chain, cheapest first. It was a
+    # fast/strong pair; the first and last entries are those two.
+    router_chain: list[str] = []
     max_active: int
     idle_timeout_seconds: int
     available_ram_mb: int | None = None
@@ -252,8 +253,14 @@ class ServerExeRequest(BaseModel):
 
 
 class ModelRouterRequest(BaseModel):
-    fast: str = ""
-    strong: str = ""
+    """The escalation chain, cheapest first.
+
+    Sent whole rather than as one end at a time, because order is the
+    point: there is no way to say "move this above that" with a pair of
+    named slots.
+    """
+
+    chain: list[str] = []
 
 
 class ModelOverrideRequest(BaseModel):

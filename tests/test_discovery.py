@@ -29,7 +29,7 @@ from models.discovery import (
 )
 from models.gguf import GgufInfo, read_metadata
 from models.manager import ModelManager, ModelManagerError, load_registry
-from models.preferences import ModelPreferences
+from models.preferences import SCHEMA_VERSION, ModelPreferences
 
 # GGUF value type ids, as models/gguf.py reads them.
 _UINT32, _UINT64, _STRING = 4, 10, 8
@@ -426,8 +426,61 @@ class PreferencesTests(unittest.TestCase):
         again = ModelPreferences.load(self.tmp)
         self.assertEqual(again.primary, "tiny")
         self.assertTrue(again.setup_complete)
-        # The router's cheap end follows the primary when it was never set.
-        self.assertEqual(again.router_fast, "tiny")
+        # The chain follows the primary when it was never set: a router
+        # pointing only at models nobody chose is a surprising default.
+        self.assertEqual(again.router_chain, ["tiny"])
+
+    def test_an_older_fast_strong_file_is_read_as_a_chain(self):
+        """Nobody should lose their routing choice to an upgrade.
+
+        The pair had an order - cheap end first - and that is exactly what a
+        two-entry chain means, so the migration is a rename rather than a
+        guess.
+        """
+        (self.tmp / "models.local.json").write_text(
+            json.dumps(
+                {
+                    "version": SCHEMA_VERSION,
+                    "primary": "tiny",
+                    "router": {"fast": "tiny", "strong": "huge"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        prefs = ModelPreferences.load(self.tmp)
+
+        self.assertEqual(prefs.router_chain, ["tiny", "huge"])
+
+    def test_a_migrated_chain_is_written_back_in_the_new_shape(self):
+        (self.tmp / "models.local.json").write_text(
+            json.dumps(
+                {
+                    "version": SCHEMA_VERSION,
+                    "router": {"fast": "tiny", "strong": "huge"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        prefs = ModelPreferences.load(self.tmp)
+        prefs.save()
+
+        written = json.loads(
+            (self.tmp / "models.local.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(written["router"], {"chain": ["tiny", "huge"]})
+
+    def test_a_half_written_old_pair_still_migrates(self):
+        """Only the cheap end was ever set, which was a real state."""
+        (self.tmp / "models.local.json").write_text(
+            json.dumps(
+                {"version": SCHEMA_VERSION, "router": {"fast": "tiny", "strong": ""}}
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(ModelPreferences.load(self.tmp).router_chain, ["tiny"])
 
     def test_a_corrupt_file_returns_to_first_launch_rather_than_crashing(self):
         (self.tmp / "models.local.json").write_text("{not json", encoding="utf-8")
@@ -779,16 +832,36 @@ class ManagerSettingsTests(unittest.TestCase):
         manager.rescan()
         self.assertEqual(manager.default_key, "beta")
 
-    def test_the_router_can_be_pointed_at_chosen_models(self):
+    def test_the_router_chain_can_be_set_and_survives_a_reload(self):
         manager = self.manager()
-        manager.set_router(fast="alpha", strong="beta")
-        self.assertEqual(manager.router_fast, "alpha")
-        self.assertEqual(manager.router_strong, "beta")
-        self.assertEqual(self.manager().router_strong, "beta")
+        manager.set_router(["alpha", "beta"])
+        self.assertEqual(manager.router_chain, ["alpha", "beta"])
+        self.assertEqual(self.manager().router_chain, ["alpha", "beta"])
+
+    def test_the_chain_keeps_the_order_it_was_given(self):
+        """Order is the whole point of a chain rather than two named ends."""
+        manager = self.manager()
+        manager.set_router(["beta", "alpha"])
+        self.assertEqual(manager.router_chain, ["beta", "alpha"])
+        self.assertEqual(self.manager().router_chain, ["beta", "alpha"])
+
+    def test_a_repeated_entry_is_dropped(self):
+        manager = self.manager()
+        manager.set_router(["alpha", "beta", "alpha"])
+        self.assertEqual(manager.router_chain, ["alpha", "beta"])
 
     def test_the_router_cannot_point_at_a_model_that_is_not_there(self):
         with self.assertRaises(ModelManagerError):
-            self.manager().set_router(fast="ghost")
+            self.manager().set_router(["ghost"])
+
+    def test_nothing_is_written_when_one_entry_is_bad(self):
+        """Checked before anything is persisted, so a typo in the third slot
+        does not leave the first two applied and the chain half-changed."""
+        manager = self.manager()
+        manager.set_router(["alpha"])
+        with self.assertRaises(ModelManagerError):
+            manager.set_router(["beta", "ghost"])
+        self.assertEqual(self.manager().router_chain, ["alpha"])
 
 
 @unittest.skipUnless(

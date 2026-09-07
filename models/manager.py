@@ -554,9 +554,27 @@ def load_registry(
     # model is not a choice, so a single-model install is never interrupted.
     setup_required = not preferences.setup_complete and len(chat_keys) > 1
 
-    def routed(name: str) -> str:
-        chosen = getattr(preferences, f"router_{name}", "") or router.get(name, "")
-        return chosen if chosen in offered else fallback
+    def routed_chain() -> list[str]:
+        """The escalation chain, filtered to models actually on offer.
+
+        A key that is not offered - hidden, deleted, or a registry entry this
+        machine has no file for - is dropped rather than kept: the router
+        would otherwise choose a model the manager cannot start. An empty
+        result falls back to the default, which is a chain of one and means
+        "do not switch".
+        """
+        chosen = list(getattr(preferences, "router_chain", []) or [])
+        if not chosen:
+            # models.json may still describe the pair, which is the same
+            # thing at length two.
+            chosen = [
+                str(router.get(name, "") or "") for name in ("fast", "strong")
+            ]
+        kept: list[str] = []
+        for key in chosen:
+            if key and key in offered and key not in kept:
+                kept.append(key)
+        return kept or [fallback]
 
     return {
         "server_exe": chosen_server,
@@ -565,9 +583,8 @@ def load_registry(
         "default": fallback,
         "max_active": int(raw.get("max_active", 1)),
         "idle_timeout": float(raw.get("idle_timeout_seconds", 0)),
-        # Which model the router treats as cheap and which as capable.
-        "router_fast": routed("fast"),
-        "router_strong": routed("strong"),
+        # The auto-router's escalation chain, cheapest first.
+        "router_chain": routed_chain(),
         "models_dir": models_dir,
         "preferences": preferences,
         "discovered": [item.key for item in discovered],
@@ -625,8 +642,7 @@ class ModelManager:
         self._default: str = registry["default"]
         self._max_active: int = registry["max_active"]
         self._idle_timeout: float = registry["idle_timeout"]
-        self.router_fast: str = registry["router_fast"]
-        self.router_strong: str = registry["router_strong"]
+        self.router_chain: list[str] = registry["router_chain"]
         self._models_dir: Path = registry["models_dir"]
         self._preferences: ModelPreferences = registry["preferences"]
         self._discovered: list[str] = registry["discovered"]
@@ -708,8 +724,12 @@ class ModelManager:
             self._preferences.save()
             self._default = key
             self._setup_required = False
-            if self.router_fast not in self._offered:
-                self.router_fast = key
+            # Drop chain entries this machine can no longer start, and seed
+            # an empty chain with the new primary - a router pointing only at
+            # models the user has never chosen is a surprising default.
+            self.router_chain = [
+                entry for entry in self.router_chain if entry in self._offered
+            ] or [key]
 
     def set_server_exe(self, path: str) -> str:
         """Point this machine at a different llama-server, and remember it.
@@ -739,18 +759,23 @@ class ModelManager:
         self.rescan()
         return str(self._server_exe)
 
-    def set_router(self, *, fast: str = "", strong: str = "") -> None:
-        """Point the auto-router's cheap and capable ends at chosen models."""
-        for candidate in (fast, strong):
-            if candidate:
-                self.get_spec(candidate)
+    def set_router(self, chain: list[str]) -> None:
+        """Set the auto-router's escalation chain, cheapest first.
+
+        Every key is checked before anything is written: `get_spec` raises for
+        one this manager cannot start, so a bad entry is refused outright
+        rather than persisted and then silently dropped on the next load.
+        """
+        cleaned: list[str] = []
+        for key in chain:
+            key = str(key).strip()
+            if key and key not in cleaned:
+                self.get_spec(key)
+                cleaned.append(key)
         with self._lock:
-            self._preferences.set_router(fast=fast, strong=strong)
+            self._preferences.set_router(cleaned)
             self._preferences.save()
-            if fast:
-                self.router_fast = fast
-            if strong:
-                self.router_strong = strong
+            self.router_chain = cleaned or [self._default]
 
     def set_override(self, key: str, values: dict[str, Any]) -> dict[str, Any]:
         """Retune one model from the settings panel, and persist it.

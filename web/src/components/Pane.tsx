@@ -76,6 +76,8 @@ interface Props {
   models: ModelsResponse | null
   modelBusyKey: string | null
   onSetPrimary: (key: string) => void
+  /** Replace the auto-router's escalation chain, cheapest first. */
+  onSetRouter: (chain: string[]) => void
   onRescanModels: () => void
   onSetModelHidden: (key: string, hidden: boolean) => void
   onOverrideModel: (key: string, values: ModelOverride) => void
@@ -800,10 +802,134 @@ function WorkspacePane({ tools, models, workspace, onOpenWorkspacePicker }: Prop
  * and it is the part someone comes back to. What stayed behind in Settings is
  * what you set once.
  */
+/**
+ * The auto-router's escalation chain: which model it tries first, and what it
+ * climbs to when a prompt looks harder.
+ *
+ * It was a fixed fast/strong pair shown as text. Somebody with three models
+ * had no way to say "try the 2B, then the 8B, then the hosted one", and no way
+ * to say it in the interface at all — the endpoint existed and nothing called
+ * it.
+ *
+ * Reordered with arrows rather than dragged. Drag-and-drop in a 262px column
+ * is fiddly with a mouse and impossible with a keyboard, and this list is
+ * three or four rows: two buttons per row are simply better, and they work
+ * everywhere.
+ *
+ * Every edit saves immediately. There is no Apply button because there is
+ * nothing to batch — the endpoint takes the whole chain, so each change is one
+ * complete, valid state.
+ */
+function RouterChain({
+  models,
+  busy,
+  onChange,
+}: {
+  models: ModelsResponse
+  busy: boolean
+  onChange: (chain: string[]) => void
+}) {
+  const chain = models.router_chain
+  const label = (key: string) =>
+    models.models.find((model) => model.key === key)?.label ?? key
+  // Only chat models, and only ones not already in the chain. A backend that
+  // cannot answer a turn has no business being an escalation target.
+  const spare = models.models.filter(
+    (model) => !chain.includes(model.key) && model.role !== 'ocr',
+  )
+
+  const move = (from: number, to: number) => {
+    if (to < 0 || to >= chain.length) return
+    const next = [...chain]
+    const [held] = next.splice(from, 1)
+    next.splice(to, 0, held)
+    onChange(next)
+  }
+
+  return (
+    <div className="mb-3">
+      <p className="mb-1.5">
+        Auto-route tries these in order, cheapest first:
+      </p>
+
+      <ol className="mb-1.5 space-y-1">
+        {chain.map((key, index) => (
+          <li key={key} className="flex items-center gap-1">
+            <span className="w-3 shrink-0 text-right font-mono text-[10px]">
+              {index + 1}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-fg" title={key}>
+              {label(key)}
+            </span>
+            <button
+              type="button"
+              disabled={busy || index === 0}
+              onClick={() => move(index, index - 1)}
+              title="Try this one earlier"
+              className="shrink-0 rounded px-1 text-[11px] transition hover:text-fg disabled:opacity-25"
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              disabled={busy || index === chain.length - 1}
+              onClick={() => move(index, index + 1)}
+              title="Try this one later"
+              className="shrink-0 rounded px-1 text-[11px] transition hover:text-fg disabled:opacity-25"
+            >
+              ↓
+            </button>
+            <button
+              type="button"
+              // A chain of one is meaningful - "never switch" - so the last
+              // entry cannot be removed: an empty chain is not a policy.
+              disabled={busy || chain.length === 1}
+              onClick={() => onChange(chain.filter((entry) => entry !== key))}
+              title={
+                chain.length === 1
+                  ? 'The chain cannot be empty'
+                  : 'Take it out of the chain'
+              }
+              className="shrink-0 rounded px-1 text-[11px] transition hover:text-danger disabled:opacity-25"
+            >
+              ×
+            </button>
+          </li>
+        ))}
+      </ol>
+
+      {spare.length > 0 && (
+        <select
+          value=""
+          disabled={busy}
+          onChange={(event) => {
+            if (event.target.value) onChange([...chain, event.target.value])
+          }}
+          className="w-full rounded-md border border-line bg-surface px-1.5 py-1 text-[11px] text-muted outline-none focus:border-accent-line disabled:opacity-50"
+        >
+          <option value="">Add a model to the end…</option>
+          {spare.map((model) => (
+            <option key={model.key} value={model.key}>
+              {model.label}
+            </option>
+          ))}
+        </select>
+      )}
+
+      <p className="mt-1.5 leading-relaxed">
+        {chain.length === 1
+          ? 'One model, so auto-routing never switches.'
+          : `It starts on ${label(chain[0])} and climbs only when a prompt looks harder. It never routes back down within a conversation.`}
+      </p>
+    </div>
+  )
+}
+
 function ModelsPane({
   models,
   modelBusyKey,
   onSetPrimary,
+  onSetRouter,
   onRescanModels,
   onOpenModelBrowser,
   onSetModelHidden,
@@ -819,7 +945,7 @@ function ModelsPane({
           is this pane's whole subject. */}
       <Setting
         label="Auto-route by task"
-        hint="Simple prompts to the fast model, involved ones to the strong one. Never routes back down, and asks before sending a turn off this machine."
+        hint="Simple prompts to the first model in the chain below, harder ones further along it. Never routes back down, and asks before sending a turn off this machine."
         on={autoRoute}
         onToggle={onAutoRoute}
       />
@@ -854,10 +980,11 @@ function ModelsPane({
 
       {models && (
         <div className="border-t border-line pt-3 text-[11px] text-faint">
-          <p className="mb-1">
-            Router: <span className="font-mono">{models.router_fast}</span> →{' '}
-            <span className="font-mono">{models.router_strong}</span>
-          </p>
+          <RouterChain
+            models={models}
+            busy={modelBusyKey !== null}
+            onChange={onSetRouter}
+          />
           <p className="mb-1">
             {/* 0 disables the idle sweep, and "unloads after 0s idle" would
                 say the exact opposite of what happens. */}

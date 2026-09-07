@@ -157,8 +157,8 @@ export interface ModelsResponse {
   models: Model[]
   default_key: string
   active_key: string | null
-  router_fast: string
-  router_strong: string
+  /** The auto-router's escalation chain, cheapest first. */
+  router_chain: string[]
   max_active: number
   idle_timeout_seconds: number
   available_ram_mb: number | null

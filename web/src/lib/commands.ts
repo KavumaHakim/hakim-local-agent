@@ -46,7 +46,7 @@ export const COMMANDS: CommandSpec[] = [
     id: 'auto',
     slash: '/auto',
     title: 'Toggle auto-routing',
-    hint: 'Simple prompts to the fast model, involved ones to the strong one',
+    hint: 'Simple prompts to the first model in the chain, harder ones further along it',
   },
   {
     id: 'thinking',

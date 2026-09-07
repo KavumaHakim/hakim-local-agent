@@ -8,7 +8,7 @@ from agent.router import TaskRouter
 
 
 def router(enabled=True):
-    return TaskRouter("fast", "strong", enabled=enabled)
+    return TaskRouter(["fast", "strong"], enabled=enabled)
 
 
 class DisabledTests(unittest.TestCase):
@@ -72,7 +72,7 @@ class HardPromptTests(unittest.TestCase):
 
 class NoDowngradeTests(unittest.TestCase):
     def test_stays_on_strong_once_escalated(self):
-        decision = router().choose("hi", current_key="fast", escalated=True)
+        decision = router().choose("hi", current_key="fast", reached="strong")
         self.assertEqual(decision.key, "strong")
         self.assertIn("staying", decision.reason)
 
@@ -100,8 +100,113 @@ class ScoringTests(unittest.TestCase):
         self.assertTrue(reasons)
 
     def test_threshold_is_configurable(self):
-        strict = TaskRouter("fast", "strong", enabled=True, threshold=99)
+        strict = TaskRouter(["fast", "strong"], enabled=True, threshold=99)
         self.assertEqual(strict.choose("debug and refactor everything").key, "fast")
+
+
+class ChainTests(unittest.TestCase):
+    """More than two models, ordered cheapest first."""
+
+    def chain(self, *keys, **kwargs):
+        return TaskRouter(list(keys), enabled=True, **kwargs)
+
+    def test_a_simple_prompt_takes_the_first(self):
+        router = self.chain("small", "middle", "big")
+        self.assertEqual(router.choose("hello there").key, "small")
+
+    def test_a_hard_prompt_climbs_past_the_first(self):
+        router = self.chain("small", "middle", "big")
+        # One threshold of score: a single hard signal is worth 2, plus the
+        # length of this prompt.
+        decision = router.choose("please review this and explain why it stalls")
+        self.assertNotEqual(decision.key, "small")
+
+    def test_the_hardest_prompts_reach_the_end(self):
+        router = self.chain("small", "middle", "big")
+        hard = (
+            "Debug and refactor this, trace the root cause and analyse the "
+            "complexity:\n```\n" + "x = 1\n" * 40 + "```\n" + "why does it "
+            "stall? why is it slow? " + "detail " * 200
+        )
+        self.assertEqual(router.choose(hard).key, "big")
+
+    def test_it_never_goes_past_the_end(self):
+        """A very high score must cap, not index off the end."""
+        router = self.chain("small", "big")
+        hard = "debug refactor analyse ```code``` " + "word " * 400
+        self.assertEqual(router.choose(hard).key, "big")
+
+    def test_a_chain_of_one_never_switches(self):
+        """Which is the useful way to say "leave the model alone"."""
+        router = self.chain("only")
+        self.assertEqual(router.choose("hello").key, "only")
+        self.assertEqual(
+            router.choose("debug and refactor everything, and explain why").key,
+            "only",
+        )
+
+    # --- the floor: it never routes down ---
+
+    def test_it_does_not_drop_back_down_the_chain(self):
+        router = self.chain("small", "middle", "big")
+        decision = router.choose("hi", current_key="big")
+        self.assertEqual(decision.key, "big")
+
+    def test_a_model_already_reached_sets_the_floor(self):
+        """The conversation used it earlier, so the RAM is already spent."""
+        router = self.chain("small", "middle", "big")
+        decision = router.choose("hi", current_key="small", reached="middle")
+        self.assertEqual(decision.key, "middle")
+
+    def test_it_may_still_climb_above_the_floor(self):
+        router = self.chain("small", "middle", "big")
+        hard = (
+            "Debug and refactor this, trace the root cause and analyse the "
+            "complexity:\n```\n" + "x = 1\n" * 40 + "```\n" + "why does it "
+            "stall? why is it slow? " + "detail " * 200
+        )
+        self.assertEqual(router.choose(hard, current_key="middle").key, "big")
+
+    def test_a_model_outside_the_chain_is_not_a_floor(self):
+        """Picking one by hand must not let the router demote the next turn.
+
+        Position -1 rather than 0: treating an unknown key as the bottom would
+        make a hand-picked model behave differently from no choice at all.
+        """
+        router = self.chain("small", "big")
+        self.assertEqual(router.position("something-else"), -1)
+        self.assertEqual(router.choose("hello", current_key="something-else").key, "small")
+
+    # --- the chain itself ---
+
+    def test_blanks_are_dropped(self):
+        self.assertEqual(self.chain("small", "", "big").chain, ["small", "big"])
+
+    def test_repeats_are_dropped_keeping_the_first_position(self):
+        """A repeat would make one step of escalation change nothing."""
+        router = self.chain("small", "big", "small", "big")
+        self.assertEqual(router.chain, ["small", "big"])
+
+    def test_first_and_last_name_the_ends(self):
+        router = self.chain("small", "middle", "big")
+        self.assertEqual(router.first, "small")
+        self.assertEqual(router.last, "big")
+
+    def test_an_empty_chain_keeps_whatever_is_current(self):
+        router = TaskRouter([], enabled=True)
+        self.assertEqual(router.choose("hi", current_key="whatever").key, "whatever")
+        self.assertEqual(router.first, "")
+        self.assertEqual(router.last, "")
+
+    def test_two_entries_behave_exactly_as_the_old_pair_did(self):
+        """The old rule was: under the threshold the first, at or over it the
+        second. That is this generalisation at length two, and it is the
+        reason none of the tests above this class had to change."""
+        router = self.chain("fast", "strong")
+        for prompt in ("hello there", "what is 2 + 2?", ""):
+            self.assertEqual(router.choose(prompt).key, "fast", prompt)
+        involved = "Debug why the loop stalls and trace the root cause."
+        self.assertEqual(router.choose(involved).key, "strong")
 
 
 if __name__ == "__main__":

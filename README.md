@@ -1380,7 +1380,7 @@ and the primary cannot be hidden.
 ```
 POST   /api/models/rescan          re-read the folder
 POST   /api/models/primary         {"key": "..."}
-POST   /api/models/router          {"fast": "...", "strong": "..."}
+POST   /api/models/router          {"chain": ["...", "..."]}   cheapest first
 POST   /api/models/server          {"path": "..."} - which llama-server runs
 PATCH  /api/models/{key}           retune one model
 DELETE /api/models/{key}/override  back to registry values
@@ -1394,12 +1394,32 @@ POST   /api/models/{key}/hidden    {"hidden": true}
 Off by default. Turn on with the sidebar toggle or `/auto`.
 
 When on, [`agent/router.py`](agent/router.py) scores each prompt with cheap
-heuristics — **no extra model call** — and picks `fast` or `reasoning`.
+heuristics — **no extra model call** — and picks a model from an **ordered
+chain**, cheapest first.
 
 Signals: prompt length, code fences, line count, demanding verbs (*debug*,
 *refactor*, *trace*, *review*…), multiple questions, multiple filenames.
-Everyday openers on a short prompt subtract. Score ≥ 3 routes to the strong
-model.
+Everyday openers on a short prompt subtract.
+
+**The chain is yours to set**, in the Models pane: the models in the order the
+router should try them, reordered with arrows and saved on every change. It was
+a fixed `fast`/`strong` pair, which is the two-model case of the same idea —
+somebody with three models had no way to say *try the 2B, then the 3B, then the
+8B*, and no way to say it in the interface at all: the endpoint existed and
+nothing called it. A chain of one is a valid answer, and means "never switch".
+
+Each `THRESHOLD` of score is one step along the chain, capped at the end. With
+two entries that is the original rule exactly — under 3 the first, at or over
+it the second — which is why none of the two-model tests changed. With three,
+the last link needs a score of 6, so it is reserved for prompts that are long
+*and* code-bearing *and* full of demanding verbs. That is deliberate: the whole
+module leans small, because guessing low costs one wasted turn and guessing
+high costs minutes on every trivial question.
+
+An older `models.local.json` still says `{"fast": …, "strong": …}`. It is read
+as a two-entry chain on load — the pair had an order, cheap end first, so the
+migration is a rename rather than a guess — and written back in the new shape.
+Nobody loses their choice to an upgrade.
 
 Whole-word matching means *plan* does not fire inside *explanation*.
 
@@ -1415,9 +1435,14 @@ reasoning  score=4   Refactor the registry and review the design decisions
 
 ### Two rules it always follows
 
-**It never routes down.** Once a conversation has needed the strong model, it
-stays there. Switching back would pay the ~5 minute cost twice to reclaim RAM
-that is already spent.
+**It never routes down.** Once a conversation has reached a link in the chain
+it stays at or above it. Switching back would pay the ~5 minute cost twice to
+reclaim RAM that is already spent. With a chain the floor is a *position*
+rather than a flag, so what matters is the furthest-along model the
+conversation has already used. A model picked by hand is usually not in the
+chain at all, and that counts as no floor rather than position zero —
+otherwise choosing a big model yourself would let the router demote the next
+turn.
 
 **Every switch is announced** in the chat with the reason.
 
@@ -3239,7 +3264,7 @@ a connection failure.
 | `RAG_MAX_FILE_BYTES` | `20000000` | Largest file indexed |
 
 Model paths, ports, contexts, threads, GPU layers, RAM thresholds and the
-router's fast/strong pair live in [`models.json`](models.json).
+router's default chain live in [`models.json`](models.json).
 
 Four paths are code defaults rather than environment variables, because they
 are locations rather than settings: `skills/` (authored, versioned, meant to be

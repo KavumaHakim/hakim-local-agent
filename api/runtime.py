@@ -543,17 +543,21 @@ class Runtime:
         routed = False
 
         if auto_route:
-            strong = self.manager.router_strong
+            router = TaskRouter(self.manager.router_chain, enabled=True)
             stored = (
                 self.store.get_messages(conversation_id)
                 if conversation_id is not None
                 else []
             )
-            router = TaskRouter(self.manager.router_fast, strong, enabled=True)
+            # The furthest along the chain this conversation has already been.
+            # It was a boolean when there were two models; with a chain the
+            # floor is a position, so the *highest* one used is what matters.
+            reached = ""
+            for message in stored:
+                if router.position(message.model_key) > router.position(reached):
+                    reached = message.model_key or ""
             decision = router.choose(
-                prompt,
-                current_key=chosen,
-                escalated=any(message.model_key == strong for message in stored),
+                prompt, current_key=chosen, reached=reached
             )
             routed = decision.key != chosen
             chosen = decision.key
@@ -862,7 +866,8 @@ class Runtime:
                 kind="iteration_limit",
                 message=str(exc),
                 tools=calls,
-                can_escalate=target != self.manager.router_strong,
+                # Nothing to escalate to once the chain has run out.
+                can_escalate=target != (self.manager.router_chain or [target])[-1],
             )
         except ModelManagerError as exc:
             turn.emit("error", kind="model", message=str(exc), tools=calls)

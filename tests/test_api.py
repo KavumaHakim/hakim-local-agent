@@ -523,15 +523,14 @@ class ConversationRouteTests(ApiTestCase):
 
 
 class ModelRouteTests(ApiTestCase):
-    def test_listing_reports_every_model_and_the_router_pair(self):
+    def test_listing_reports_every_model_and_the_router_chain(self):
         body = self.client.get("/api/models").json()
         # Membership, not the exact list: adding a model to the fixture should
-        # not break a test about the router pair.
+        # not break a test about the router chain.
         keys = [m["key"] for m in body["models"]]
         self.assertIn("fast", keys)
         self.assertIn("big", keys)
-        self.assertEqual(body["router_fast"], "fast")
-        self.assertEqual(body["router_strong"], "big")
+        self.assertEqual(body["router_chain"], ["fast", "big"])
         self.assertEqual(body["default_key"], "fast")
         self.assertEqual(body["max_active"], 1)
 
@@ -987,8 +986,8 @@ class RemoteModelTests(ApiTestCase):
             os.environ["TEST_CLOUD_KEY"] = self._previous
 
     def route_to_cloud(self) -> None:
-        """Make the auto-router's strong model the hosted one."""
-        self.manager.router_strong = "cloud"
+        """Put the hosted model at the far end of the escalation chain."""
+        self.manager.router_chain = [self.manager.router_chain[0], "cloud"]
 
     def test_a_hosted_model_is_listed_with_its_provider(self):
         body = self.client.get("/api/models").json()

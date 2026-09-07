@@ -78,6 +78,19 @@ export function useModels() {
     }
   }, [])
 
+  /** Replace the auto-router's escalation chain, cheapest first. */
+  const setRouter = useCallback(async (chain: string[]) => {
+    setBusyKey('__router__')
+    setError(null)
+    try {
+      setData(await api.setRouter(chain))
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setBusyKey(null)
+    }
+  }, [])
+
   const rescan = useCallback(async (): Promise<string[]> => {
     setBusyKey('__rescan__')
     setError(null)
@@ -180,6 +193,7 @@ export function useModels() {
     load,
     unload,
     setPrimary,
+    setRouter,
     rescan,
     setHidden,
     override,
