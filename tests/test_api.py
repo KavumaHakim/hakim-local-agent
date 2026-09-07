@@ -437,6 +437,80 @@ class ConversationRouteTests(ApiTestCase):
         )
         self.assertEqual(self.client.get("/api/conversations").json(), [])
 
+    # --- search ---
+
+    def search(self, q: str, **params) -> list[dict]:
+        response = self.client.get(
+            "/api/conversations/search", params={"q": q, **params}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def test_search_is_not_swallowed_by_the_id_route(self):
+        """`/search` must be declared before `/{conversation_id}`.
+
+        Declared the other way round it is read as an id, and the answer is a
+        422 about parsing rather than a search. This is the test that catches
+        somebody tidying the routes into alphabetical order.
+        """
+        response = self.client.get("/api/conversations/search", params={"q": "x"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(response.json(), list)
+
+    def test_search_finds_a_conversation_by_its_message(self):
+        self.make_conversation("the mitochondrion is the powerhouse")
+
+        hits = self.search("mitochondrion")
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["match"], "mitochondrion")
+        self.assertGreaterEqual(hits[0]["matches"], 1)
+
+    def test_search_returns_the_snippet_in_three_pieces(self):
+        """So the page can highlight without being handed markup."""
+        self.make_conversation("a question about photosynthesis today")
+
+        hit = self.search("photosynthesis")[0]
+
+        self.assertIn("about", hit["before"])
+        self.assertEqual(hit["match"], "photosynthesis")
+        self.assertIn("today", hit["after"])
+
+    def test_search_returns_no_html(self):
+        self.make_conversation("something with <mark> in it")
+
+        body = self.client.get(
+            "/api/conversations/search", params={"q": "mark"}
+        ).text
+
+        self.assertNotIn("<mark>something", body)
+
+    def test_an_empty_query_returns_nothing_not_everything(self):
+        self.make_conversation("hello there")
+
+        self.assertEqual(self.search(""), [])
+        self.assertEqual(self.search("   "), [])
+
+    def test_search_matching_nothing_is_an_empty_list_not_a_404(self):
+        self.make_conversation("hello there")
+
+        self.assertEqual(self.search("mitochondrion"), [])
+
+    def test_a_wildcard_is_a_character(self):
+        """A LIKE search that does not escape these matches everything."""
+        self.make_conversation("there were 100 apples")
+
+        self.assertEqual(self.search("100%"), [])
+        self.assertEqual(self.search("_"), [])
+
+    def test_the_limit_is_clamped(self):
+        """A limit of zero would return nothing whatever matched."""
+        self.make_conversation("hello there")
+
+        self.assertEqual(len(self.search("hello", limit=0)), 1)
+        self.assertEqual(len(self.search("hello", limit=99999)), 1)
+
     def test_missing_conversation_is_a_404_not_a_crash(self):
         self.assertEqual(self.client.get("/api/conversations/999").status_code, 404)
         self.assertEqual(self.client.delete("/api/conversations/999").status_code, 404)
