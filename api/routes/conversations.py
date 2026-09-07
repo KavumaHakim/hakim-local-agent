@@ -11,6 +11,7 @@ from api.schemas import (
     ConversationOut,
     MessageOut,
     RenameRequest,
+    SearchHitOut,
     TruncateOut,
 )
 
@@ -22,6 +23,30 @@ def list_conversations(limit: int = 30, runtime: Runtime = Depends(get_runtime))
     return [
         ConversationOut(**vars(conversation))
         for conversation in runtime.store.list_conversations(limit=limit)
+    ]
+
+
+@router.get("/search", response_model=list[SearchHitOut])
+def search_conversations(
+    q: str = "",
+    limit: int = 30,
+    runtime: Runtime = Depends(get_runtime),
+):
+    """Conversations whose title or messages contain `q`.
+
+    **Declared before `/{conversation_id}`, and it has to be.** Routes match
+    in registration order, so with this one second, `/conversations/search`
+    would be handed to the route above it and fail trying to read "search" as
+    an integer id - a 422 that says nothing about the real problem.
+
+    An empty query returns nothing rather than everything: the box is cleared
+    by deleting what is in it, and answering that with the entire history
+    would be both surprising and the most expensive query available.
+    """
+    limit = max(1, min(limit, 100))
+    return [
+        SearchHitOut(**vars(hit))
+        for hit in runtime.store.search(q, limit=limit)
     ]
 
 

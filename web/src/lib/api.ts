@@ -20,6 +20,7 @@ import type {
   McpResponse,
   ResourcesResponse,
   RewindResult,
+  SearchHit,
   OcrBackend,
   ShutdownResponse,
   SpeechStatus,
@@ -382,6 +383,17 @@ export const api = {
     request<Conversation[]>(`/conversations?limit=${limit}`),
 
   conversation: (id: number) => request<ConversationDetail>(`/conversations/${id}`),
+
+  /**
+   * Conversations whose title or messages contain `q`.
+   *
+   * An empty query is not sent: the API answers it with nothing, and asking
+   * is a round trip to be told so.
+   */
+  searchConversations: (q: string, limit = 30) =>
+    request<SearchHit[]>(
+      `/conversations/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
 
   renameConversation: (id: number, title: string) =>
     request<Conversation>(`/conversations/${id}`, {

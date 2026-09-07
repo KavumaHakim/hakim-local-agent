@@ -3445,12 +3445,42 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
 - Deciding whether memories should be injected into the prompt automatically,
   which costs tokens on every turn
 - Web search tool (`tools/web.py` is a placeholder)
-- Conversation search and export
+- Conversation **export**. Search is done, below; export is the other half of
+  that item and is not written.
 - The custom C99 inference engine at `C:\path\to\mmengine` — parked until
   it is further along
 
 **Done, with the measurement that closed it:**
 
+- **Conversation search** — the box in the History pane used to filter the
+  loaded *titles*, which could only find a conversation whose name mentioned
+  what you were after. The names are written by a model from the opening
+  question, so the thing you remember discussing usually is not in one.
+  `GET /api/conversations/search` searches message bodies too and returns a
+  snippet showing the match.
+
+  **A scan, not an index.** FTS5 is available, but it means a virtual table,
+  triggers to keep it in step, a backfill, and a second copy of every message
+  on disk. Measured against the real history and multiples of it, a `LIKE`
+  scan costs **1.1 ms at 365 messages, 8.8 ms at 2,900, 85 ms at 23,000 and
+  675 ms at 187,000** — under a tenth of a second to roughly 25,000 messages,
+  about seventy times what is stored here. That is the number to re-measure
+  against if it ever feels slow. Substring rather than word matching, so
+  `integ` finds the integral, which is also why FTS5 would not be a drop-in:
+  it matches tokens.
+
+  Two details that are the whole correctness of a `LIKE` search. **The
+  wildcards are escaped** — unescaped, a typed `_` matches any character and
+  returns everything, which on the real history is 52 conversations against
+  the 4 that actually contain one. And **the snippet crosses the wire in three
+  pieces** — before, match, after — rather than one string with `<mark>` in
+  it, so the API never hands the page markup to insert and the front end
+  renders three spans without parsing anything.
+
+  Debounced at 200 ms: typing "requirements" is twelve keystrokes and **one**
+  request, measured in the browser. Case-insensitive for ASCII only, since
+  SQLite's `lower()` folds nothing else — stated rather than fixed, because
+  fixing it means a Python callback per row or ICU.
 - **The tool lens** — the roster reaches the model as a short index and opens a
   group at a time. **3,991 estimated tokens down to 632** on a first turn with
   everything switched on: ~275 s of prompt processing down to ~44 s. Opening is

@@ -63,6 +63,28 @@ export interface Conversation {
   titled?: boolean
 }
 
+/**
+ * One conversation that matched a search, and where it matched.
+ *
+ * The snippet arrives in three pieces rather than as one string with markup
+ * in it, so the match can be highlighted by rendering three spans — nothing
+ * is parsed, and the API never hands the page HTML to insert.
+ */
+export interface SearchHit {
+  conversation_id: number
+  title: string
+  updated_at: string
+  /** Matching messages in this conversation, not just the one shown. */
+  matches: number
+  /** Whether the name matched. A hit can have no snippet at all. */
+  title_matched: boolean
+  message_id: number | null
+  role: string
+  before: string
+  match: string
+  after: string
+}
+
 export interface ConversationDetail extends Conversation {
   messages: Message[]
   /** Whether this conversation has already needed the strong model. */

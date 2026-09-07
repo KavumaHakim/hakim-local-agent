@@ -125,6 +125,30 @@ class ConversationOut(BaseModel):
     titled: bool = False
 
 
+class SearchHitOut(BaseModel):
+    """One conversation that matched a search, and where it matched.
+
+    The snippet is three fields rather than one string with `<mark>` in it:
+    the API does not hand the page markup to insert, and the front end renders
+    three spans without parsing anything.
+    """
+
+    conversation_id: int
+    title: str
+    updated_at: str
+    # Matching messages in this conversation, so the count can be shown rather
+    # than implying the one snippet is everything.
+    matches: int
+    # Whether the name itself matched, which is how a conversation can appear
+    # with no snippet at all.
+    title_matched: bool
+    message_id: int | None = None
+    role: str = ""
+    before: str = ""
+    match: str = ""
+    after: str = ""
+
+
 class ConversationDetail(ConversationOut):
     messages: list[MessageOut] = []
     # Whether this conversation has already needed the strong model, which is

@@ -23,10 +23,12 @@ import type {
   ModelOverride,
   ModelsResponse,
   OcrBackend,
+  SearchHit,
   ToolsResponse,
   ToolSwitch,
   WorkspaceInfo,
 } from '../lib/types'
+import { api } from '../lib/api'
 import type { PaneId } from './Rail'
 import {
   READING_FONTS,
@@ -141,6 +143,23 @@ export function Pane(props: Props) {
   )
 }
 
+/**
+ * Saved conversations, and searching what was said in them.
+ *
+ * The search box used to filter the loaded titles, which meant it could only
+ * find a conversation whose *name* mentioned what you were looking for — and
+ * the names are written by a model from the opening question, so the thing
+ * you remember discussing is usually not in one. It now asks the API, which
+ * searches message bodies too and returns a snippet showing the match.
+ *
+ * Debounced rather than sent per keystroke: typing "integral" is eight
+ * queries, and the last one is the only one anybody wants. 200 ms is below
+ * what reads as lag and above the gap between keystrokes.
+ *
+ * Results are ordered by the API and rendered in that order. The pane does
+ * not re-sort or re-filter them — a second opinion here is how a list ends up
+ * disagreeing with the count beside it.
+ */
 function HistoryPane({
   conversations,
   namingConversations,
@@ -149,10 +168,39 @@ function HistoryPane({
   onDeleteConversation,
 }: Props) {
   const [query, setQuery] = useState('')
-  const needle = query.trim().toLowerCase()
-  const shown = needle
-    ? conversations.filter((c) => c.title.toLowerCase().includes(needle))
-    : conversations
+  // Results carry the query they answer. Keeping the two together is what
+  // makes "are these results current?" a comparison rather than a second
+  // piece of state that can disagree with the first — and it means the list
+  // can never quietly belong to a query the box no longer holds.
+  const [result, setResult] = useState<{
+    query: string
+    hits: SearchHit[]
+  } | null>(null)
+  const needle = query.trim()
+  const current = result?.query === needle ? result.hits : null
+  const searching = needle !== '' && current === null
+
+  useEffect(() => {
+    if (!needle) return
+    // `cancelled` rather than an AbortController: the request is local and
+    // cheap, and what actually matters is that a slow earlier query cannot
+    // land after a later one and overwrite it.
+    let cancelled = false
+    const timer = setTimeout(() => {
+      api
+        .searchConversations(needle)
+        .then((hits) => {
+          if (!cancelled) setResult({ query: needle, hits })
+        })
+        .catch(() => {
+          if (!cancelled) setResult({ query: needle, hits: [] })
+        })
+    }, 200)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [needle])
 
   return (
     <>
@@ -161,21 +209,142 @@ function HistoryPane({
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search"
+          placeholder="Search conversations"
           className="min-w-0 flex-1 bg-transparent text-[12.5px] outline-none placeholder:text-faint"
         />
+        {query && (
+          <button
+            type="button"
+            onClick={() => setQuery('')}
+            title="Clear"
+            className="shrink-0 text-[15px] leading-none text-faint transition hover:text-fg"
+          >
+            ×
+          </button>
+        )}
       </div>
 
-      {shown.length === 0 && (
-        <p className="px-1 text-[11.5px] text-faint">
-          {conversations.length === 0
-            ? 'Nothing saved yet.'
-            : `Nothing matches “${query}”.`}
-        </p>
+      {needle ? (
+        <SearchResults
+          // While a new query is in flight the previous answer stays on
+          // screen, dimmed, rather than the list emptying on every keystroke.
+          hits={current ?? result?.hits ?? null}
+          searching={searching}
+          query={needle}
+          activeConversationId={activeConversationId}
+          onOpen={onOpenConversation}
+        />
+      ) : (
+        <ConversationList
+          conversations={conversations}
+          namingConversations={namingConversations}
+          activeConversationId={activeConversationId}
+          onOpenConversation={onOpenConversation}
+          onDeleteConversation={onDeleteConversation}
+        />
       )}
+    </>
+  )
+}
 
+/** What matched, with the matching text shown in place. */
+function SearchResults({
+  hits,
+  searching,
+  query,
+  activeConversationId,
+  onOpen,
+}: {
+  hits: SearchHit[] | null
+  searching: boolean
+  query: string
+  activeConversationId: number | null
+  onOpen: (id: number) => void
+}) {
+  // `null` is "nothing to show yet", which is a different thing from an empty
+  // list: saying "nothing matches" before the first answer arrives would be a
+  // lie, and it would flash on every search.
+  if (hits === null) {
+    return <p className="px-1 text-[11.5px] text-faint">Searching…</p>
+  }
+  if (hits.length === 0 && !searching) {
+    return (
+      <p className="px-1 text-[11.5px] leading-relaxed text-faint">
+        Nothing matches “{query}”. Titles and message text are both searched.
+      </p>
+    )
+  }
+
+  return (
+    // Dimmed while a newer query is in flight: these results are the previous
+    // answer, and showing them at full strength would claim they are this one.
+    <div className={`space-y-px transition-opacity ${searching ? 'opacity-45' : ''}`}>
+      {hits.map((hit) => {
+        const active = hit.conversation_id === activeConversationId
+        return (
+          <button
+            key={hit.conversation_id}
+            type="button"
+            onClick={() => onOpen(hit.conversation_id)}
+            className={`block w-full rounded-md px-2 py-1.5 text-left transition ${
+              active ? 'bg-accent-tint' : 'hover:bg-tint'
+            }`}
+          >
+            <span className="flex items-baseline gap-1.5">
+              <span className="min-w-0 flex-1 truncate text-[12.5px] text-fg">
+                {hit.title}
+              </span>
+              {hit.matches > 1 && (
+                <span className="shrink-0 text-[10px] text-faint">
+                  {hit.matches}
+                </span>
+              )}
+            </span>
+            {hit.match ? (
+              <span className="mt-0.5 block text-[10.5px] leading-snug break-words text-faint">
+                {hit.before}
+                {/* The one place the match is emphasised. Three spans from
+                    the API rather than markup, so nothing is parsed here. */}
+                <mark className="rounded-[2px] bg-accent-tint px-px text-fg">
+                  {hit.match}
+                </mark>
+                {hit.after}
+              </span>
+            ) : (
+              <span className="mt-0.5 block text-[10.5px] text-faint">
+                Matches the name
+              </span>
+            )}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/** The saved conversations, newest first. */
+function ConversationList({
+  conversations,
+  namingConversations,
+  activeConversationId,
+  onOpenConversation,
+  onDeleteConversation,
+}: Pick<
+  Props,
+  | 'conversations'
+  | 'namingConversations'
+  | 'activeConversationId'
+  | 'onOpenConversation'
+  | 'onDeleteConversation'
+>) {
+  if (conversations.length === 0) {
+    return <p className="px-1 text-[11.5px] text-faint">Nothing saved yet.</p>
+  }
+
+  return (
+    <>
       <div className="space-y-px">
-        {shown.map((conversation) => {
+        {conversations.map((conversation) => {
           const active = conversation.id === activeConversationId
           return (
             <div
