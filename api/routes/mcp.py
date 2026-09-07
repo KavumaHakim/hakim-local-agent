@@ -44,6 +44,8 @@ from api.schemas import (
 from tools import mcp_catalog
 from tools.mcp_client import (
     McpConfigError,
+    McpError,
+    check_url,
     check_name,
     edit_config,
     load_servers,
@@ -97,15 +99,37 @@ def add_server(body: McpServerIn, runtime: Runtime = Depends(get_runtime)):
             name = check_name(body.name or "")
         except McpConfigError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
-        if not (body.command or "").strip():
+        if body.url and body.command:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                "A server needs a command to start it, e.g. 'npx' or 'uvx'.",
+                "A server is reached one way or the other: a command to start "
+                "it here, or a url to reach it over HTTP. Not both.",
             )
-        written = {
-            "command": body.command.strip(),
-            "args": [a for a in (body.args or []) if str(a).strip()],
-        }
+        if body.url:
+            try:
+                written = {"url": check_url(body.url, name)}
+            except McpError as exc:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, str(exc)
+                ) from None
+            headers = {
+                str(k): str(v)
+                for k, v in (body.headers or {}).items()
+                if str(k).strip() and str(v).strip()
+            }
+            if headers:
+                written["headers"] = headers
+        elif (body.command or "").strip():
+            written = {
+                "command": body.command.strip(),
+                "args": [a for a in (body.args or []) if str(a).strip()],
+            }
+        else:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "A server needs either a command to start it, e.g. 'npx', or "
+                "a url to reach it over HTTP.",
+            )
 
     # Blank values are dropped rather than written: an empty string is not a
     # credential, and writing one would make "set" true for something unusable.
@@ -224,7 +248,8 @@ def _snapshot(runtime: Runtime, errors: dict | None = None) -> McpOut:
         servers=[
             McpServerOut(
                 name=spec.name,
-                command=" ".join([spec.command, *spec.args])[:200],
+                command=spec.display[:200],
+                transport="http" if spec.remote else "stdio",
                 trusted=spec.trusted,
                 enabled=spec.enabled,
                 tools=len(counts.get(spec.name, [])),

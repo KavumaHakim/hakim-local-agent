@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -20,14 +21,18 @@ from pathlib import Path
 from tools.mcp_client import (
     McpConfigError,
     McpConnection,
+    McpHttpConnection,
     McpError,
     McpManager,
     ServerSpec,
     check_name,
+    check_url,
     edit_config,
     load_servers,
+    open_connection,
     resolve_env,
 )
+from tests import fake_mcp_http_server
 from tools import mcp_catalog
 
 SERVER = str(Path(__file__).resolve().parent / "fake_mcp_server.py")
@@ -317,7 +322,6 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(report["servers"].get("fake"), 3)
 
 
-
 class ReloadTests(unittest.TestCase):
     """Adding a server to mcp.json while the API is running.
 
@@ -417,7 +421,6 @@ class ReloadTests(unittest.TestCase):
 
         self.assertEqual(sorted(made.cached_tools()), ["fake"])
         self.assertEqual(made.stop_all(), [])
-
 
 
 class EditConfigTests(unittest.TestCase):
@@ -533,7 +536,6 @@ class NameTests(unittest.TestCase):
         self.assertEqual(check_name("my_server-2"), "my_server-2")
 
 
-
 class CatalogTests(unittest.TestCase):
     """The offered servers, checked for the mistakes a table invites."""
 
@@ -615,6 +617,323 @@ class EnvReferenceTests(unittest.TestCase):
             self.assertEqual(
                 resolve_env({"K": "Bearer ${T}"}), {"K": "Bearer ${T}"}
             )
+
+
+class HttpTransportTests(unittest.TestCase):
+    """Streamable HTTP, against a real server on a real socket."""
+
+    def serve(self, **kwargs):
+        handle = fake_mcp_http_server.serve(**kwargs)
+        self.addCleanup(handle.stop)
+        return handle
+
+    def connect(self, handle, **spec_kwargs) -> McpHttpConnection:
+        connection = McpHttpConnection(
+            ServerSpec(name="remote", url=handle.url, **spec_kwargs)
+        )
+        self.addCleanup(connection.stop)
+        return connection
+
+    def test_it_handshakes_and_lists(self):
+        tools = self.connect(self.serve()).list_tools()
+        self.assertEqual(sorted(t["name"] for t in tools), ["echo", "wipe"])
+
+    def test_a_call_returns_the_text_content(self):
+        connection = self.connect(self.serve())
+        result = connection.call("echo", {"text": "over http"})
+        self.assertEqual(result["content"][0]["text"], "over http")
+
+    def test_an_event_stream_answer_is_read(self):
+        """The server chooses per response; both shapes have to work."""
+        connection = self.connect(self.serve(stream=True))
+        result = connection.call("echo", {"text": "streamed"})
+        self.assertEqual(result["content"][0]["text"], "streamed")
+
+    def test_a_notification_before_the_reply_is_skipped(self):
+        """A client taking the first event as its answer breaks here."""
+        connection = self.connect(self.serve(stream=True, noisy=True))
+        result = connection.call("echo", {"text": "still works"})
+        self.assertEqual(result["content"][0]["text"], "still works")
+
+    def test_a_tool_error_is_raised_with_the_servers_message(self):
+        connection = self.connect(self.serve())
+        with self.assertRaises(McpError) as caught:
+            connection.call("nonexistent", {})
+        self.assertIn("no tool", str(caught.exception))
+
+    def test_the_protocol_version_is_sent(self):
+        handle = self.serve()
+        self.connect(handle).list_tools()
+        self.assertTrue(
+            all("MCP-Protocol-Version" in h for h in handle.seen_headers)
+        )
+
+    def test_both_content_types_are_accepted(self):
+        """Saying only one would make the server's choice fail half the time."""
+        handle = self.serve()
+        self.connect(handle).list_tools()
+        accept = handle.seen_headers[0]["Accept"]
+        self.assertIn("application/json", accept)
+        self.assertIn("text/event-stream", accept)
+
+    def test_configured_headers_are_sent(self):
+        handle = self.serve(require_auth="Bearer example-token")
+        connection = self.connect(
+            handle, headers={"Authorization": "Bearer example-token"}
+        )
+        self.assertEqual(len(connection.list_tools()), 2)
+
+    def test_a_header_can_come_from_the_environment(self):
+        """So a token need not be written into mcp.json at all.
+
+        Only a whole value expands, so the variable holds the entire header
+        including the `Bearer` prefix. Written the other way round -
+        `"Bearer ${VAR}"` - nothing is substituted, which the next test is
+        here to pin down.
+        """
+        handle = self.serve(require_auth="Bearer from-the-shell")
+        with mock.patch.dict(
+            os.environ, {"MY_MCP_TOKEN": "Bearer from-the-shell"}
+        ):
+            connection = self.connect(
+                handle, headers={"Authorization": "${MY_MCP_TOKEN}"}
+            )
+            self.assertEqual(len(connection.list_tools()), 2)
+        # The value went out, not the name of it.
+        sent = handle.seen_headers[0]["Authorization"]
+        self.assertEqual(sent, "Bearer from-the-shell")
+
+    def test_a_reference_inside_a_larger_header_is_not_expanded(self):
+        """Half-substituted credentials fail confusingly; they fail plainly.
+
+        `resolve_env` only expands a value that is entirely `${VAR}`. A header
+        written as `Bearer ${VAR}` is sent literally, and the server refuses
+        it - which is the error someone can act on, rather than a token that
+        is silently half a token.
+        """
+        handle = self.serve(require_auth="Bearer from-the-shell")
+        with mock.patch.dict(os.environ, {"MY_MCP_TOKEN": "from-the-shell"}):
+            connection = self.connect(
+                handle, headers={"Authorization": "Bearer ${MY_MCP_TOKEN}"}
+            )
+            with self.assertRaises(McpError):
+                connection.list_tools()
+        self.assertEqual(
+            handle.seen_headers[0]["Authorization"], "Bearer ${MY_MCP_TOKEN}"
+        )
+
+    def test_a_missing_credential_says_what_to_do(self):
+        connection = self.connect(self.serve(require_auth="Bearer needed"))
+        with self.assertRaises(McpError) as caught:
+            connection.list_tools()
+        message = str(caught.exception)
+        self.assertIn("credential", message)
+        self.assertIn("headers", message)
+        self.assertIn("OAuth", message)
+
+    def test_a_session_id_is_kept_and_sent_back(self):
+        handle = self.serve(sessions=True)
+        self.connect(handle).list_tools()
+
+        later = [h for h in handle.seen_headers if "Mcp-Session-Id" in h]
+        self.assertTrue(later)
+        self.assertEqual(later[0]["Mcp-Session-Id"], "test-session-1")
+
+    def test_an_expired_session_is_dropped_rather_than_resent(self):
+        """A 404 against a session we hold is the server saying it is gone.
+
+        Holding on to it would make every later call fail the same way
+        forever. The connection forgets it and marks itself not alive, so the
+        next call handshakes again - which is what the message promises.
+        """
+        connection = self.connect(self.serve(sessions=True, expire_session=True))
+        with self.assertRaises(McpError) as caught:
+            connection.list_tools()
+
+        self.assertIn("session", str(caught.exception))
+        self.assertFalse(connection.alive)
+        self.assertEqual(connection._session_id, "")
+
+    def test_stopping_ends_the_session_on_the_server(self):
+        handle = self.serve(sessions=True)
+        connection = McpHttpConnection(ServerSpec(name="remote", url=handle.url))
+        connection.list_tools()
+
+        connection.stop()
+
+        self.assertEqual(handle.deleted, ["test-session-1"])
+        self.assertFalse(connection.alive)
+
+    def test_an_http_error_is_reported_with_its_status(self):
+        connection = self.connect(self.serve(status=500))
+        with self.assertRaises(McpError) as caught:
+            connection.list_tools()
+        self.assertIn("500", str(caught.exception))
+
+    def test_a_server_that_is_not_there_says_so(self):
+        connection = McpHttpConnection(
+            ServerSpec(name="ghost", url="http://127.0.0.1:9/mcp")
+        )
+        self.addCleanup(connection.stop)
+        with self.assertRaises(McpError) as caught:
+            connection.list_tools()
+        self.assertIn("Could not reach", str(caught.exception))
+
+    def test_stopping_is_idempotent(self):
+        connection = self.connect(self.serve())
+        connection.start()
+        self.assertTrue(connection.alive)
+        connection.stop()
+        connection.stop()
+        self.assertFalse(connection.alive)
+
+    def test_it_can_be_started_again_after_stopping(self):
+        """The sweeper stops idle connections; the next call must revive one."""
+        connection = self.connect(self.serve())
+        connection.list_tools()
+        connection.stop()
+
+        self.assertEqual(connection.call("echo", {"text": "again"})
+                         ["content"][0]["text"], "again")
+
+
+class UrlValidationTests(unittest.TestCase):
+    def test_a_plain_url_passes(self):
+        self.assertEqual(check_url("https://x.test/mcp", "n"), "https://x.test/mcp")
+
+    def test_a_non_http_scheme_is_refused(self):
+        for url in ("file:///etc/passwd", "ftp://x.test/", "ws://x.test/"):
+            with self.assertRaises(McpError, msg=url):
+                check_url(url, "n")
+
+    def test_credentials_in_the_url_are_refused(self):
+        """Nobody should be asked to eyeball a password in a url."""
+        with self.assertRaises(McpError) as caught:
+            check_url("https://user:secret@x.test/mcp", "n")
+        self.assertIn("headers", str(caught.exception))
+
+    def test_a_url_with_no_host_is_refused(self):
+        with self.assertRaises(McpError):
+            check_url("http:///mcp", "n")
+
+
+class TransportChoiceTests(unittest.TestCase):
+    """`url` against `command`, and what the config makes of each."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "mcp.json"
+
+    def write(self, servers: dict) -> Path:
+        self.path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+        return self.path
+
+    def test_a_url_entry_is_read_as_remote(self):
+        spec = load_servers(
+            self.write({"remote": {"url": "https://x.test/mcp"}})
+        )[0]
+        self.assertTrue(spec.remote)
+        self.assertEqual(spec.display, "https://x.test/mcp")
+
+    def test_a_command_entry_is_read_as_local(self):
+        spec = load_servers(self.write({"local": {"command": "npx", "args": ["a"]}}))[0]
+        self.assertFalse(spec.remote)
+        self.assertEqual(spec.display, "npx a")
+
+    def test_headers_are_read(self):
+        spec = load_servers(
+            self.write(
+                {"r": {"url": "https://x.test/mcp", "headers": {"A": "b"}}}
+            )
+        )[0]
+        self.assertEqual(spec.headers, {"A": "b"})
+
+    def test_an_entry_with_both_is_skipped_rather_than_guessed_at(self):
+        servers = load_servers(
+            self.write(
+                {
+                    "both": {"command": "npx", "url": "https://x.test/"},
+                    "ok": {"command": "npx"},
+                }
+            )
+        )
+        self.assertEqual([s.name for s in servers], ["ok"])
+
+    def test_an_entry_with_neither_is_skipped(self):
+        servers = load_servers(self.write({"empty": {"args": ["x"]}, "ok": {"command": "y"}}))
+        self.assertEqual([s.name for s in servers], ["ok"])
+
+    def test_the_factory_picks_the_transport(self):
+        local = open_connection(ServerSpec(name="a", command="x"))
+        remote = open_connection(ServerSpec(name="b", url="https://x.test/mcp"))
+        self.addCleanup(local.stop)
+        self.addCleanup(remote.stop)
+        self.assertIsInstance(local, McpConnection)
+        self.assertIsInstance(remote, McpHttpConnection)
+
+
+class HttpThroughTheManagerTests(unittest.TestCase):
+    """A remote server has to behave like any other in the roster."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.handle = fake_mcp_http_server.serve()
+        self.addCleanup(self.handle.stop)
+        (self.root / "mcp.json").write_text(
+            json.dumps({"mcpServers": {"remote": {"url": self.handle.url}}}),
+            encoding="utf-8",
+        )
+        self.made = McpManager(self.root / "mcp.json", self.root / "cache.json")
+        self.addCleanup(self.made.stop_all)
+
+    def test_refresh_caches_what_it_offers(self):
+        report = self.made.refresh()
+        self.assertEqual(report["servers"], {"remote": 2})
+        self.assertEqual(report["errors"], {})
+
+    def test_its_tools_are_registered_like_any_other(self):
+        self.made.refresh()
+        names = sorted(t.name for t in self.made.tools())
+        self.assertEqual(names, ["remote__echo", "remote__wipe"])
+        self.assertTrue(all(t.category == "mcp:remote" for t in self.made.tools()))
+
+    def test_read_only_still_runs_without_asking(self):
+        self.made.refresh()
+        asked = []
+        echo = next(
+            t
+            for t in self.made.tools(approve=lambda w, y: asked.append(w) or True)
+            if t.name == "remote__echo"
+        )
+        self.assertEqual(echo.run(text="hi")["output"], "hi")
+        self.assertEqual(asked, [])
+
+    def test_anything_else_still_asks(self):
+        self.made.refresh()
+        asked = []
+        wipe = next(
+            t
+            for t in self.made.tools(approve=lambda w, y: asked.append(w) or False)
+            if t.name == "remote__wipe"
+        )
+        result = wipe.run()
+        self.assertFalse(result["success"])
+        self.assertTrue(asked)
+
+    def test_an_idle_remote_connection_is_swept(self):
+        made = McpManager(
+            self.root / "mcp.json", self.root / "cache.json", idle_timeout=0.01
+        )
+        self.addCleanup(made.stop_all)
+        made.refresh()
+        next(t for t in made.tools() if t.name == "remote__echo").run(text="x")
+
+        time.sleep(0.05)
+
+        self.assertEqual(made.sweep(), ["remote"])
 
 
 if __name__ == "__main__":

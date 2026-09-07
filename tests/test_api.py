@@ -1573,7 +1573,6 @@ class MetaRouteTests(ApiTestCase):
         self.assertEqual(body["queue_depth"], 0)
 
 
-
 class McpRouteTests(ApiTestCase):
     """What the MCP panel reads, and the one request that costs anything."""
 
@@ -1659,7 +1658,6 @@ class McpRouteTests(ApiTestCase):
             response = self.client.post("/api/mcp/refresh")
 
         self.assertEqual(response.status_code, 409)
-
 
 
 class McpCatalogRouteTests(ApiTestCase):
@@ -1885,7 +1883,6 @@ class McpWritesMidTurnTests(ApiTestCase):
         self.assertEqual(response.status_code, 409)
 
 
-
 class McpCredentialTests(ApiTestCase):
     """Credentials in, names out.
 
@@ -2005,6 +2002,100 @@ class McpCredentialTests(ApiTestCase):
         self.assertEqual(
             self.config()["mcpServers"]["mine"]["env"], {"SOME_KEY": self.PLACEHOLDER}
         )
+
+
+class McpRemoteServerTests(ApiTestCase):
+    """Adding a server reached over HTTP rather than started here."""
+
+    def config(self) -> dict:
+        return json.loads(
+            self.runtime.config.mcp_config.read_text(encoding="utf-8")
+        )
+
+    def add(self, **body):
+        return self.client.post("/api/mcp/servers", json=body)
+
+    def test_a_url_server_is_written(self):
+        response = self.add(name="remote", url="https://example.test/mcp")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            self.config()["mcpServers"]["remote"], {"url": "https://example.test/mcp"}
+        )
+
+    def test_it_is_reported_as_an_http_server(self):
+        self.add(name="remote", url="https://example.test/mcp")
+
+        server = self.client.get("/api/mcp").json()["servers"][0]
+
+        self.assertEqual(server["transport"], "http")
+        self.assertEqual(server["command"], "https://example.test/mcp")
+
+    def test_a_command_server_is_reported_as_stdio(self):
+        self.add(name="local", command="npx", args=["-y", "thing"])
+        server = self.client.get("/api/mcp").json()["servers"][0]
+        self.assertEqual(server["transport"], "stdio")
+
+    def test_headers_are_written(self):
+        self.add(
+            name="remote",
+            url="https://example.test/mcp",
+            headers={"Authorization": "Bearer example-not-real"},
+        )
+        self.assertEqual(
+            self.config()["mcpServers"]["remote"]["headers"],
+            {"Authorization": "Bearer example-not-real"},
+        )
+
+    def test_a_header_value_never_comes_back(self):
+        """Same rule as an env credential: names may travel, values may not."""
+        self.add(
+            name="remote",
+            url="https://example.test/mcp",
+            headers={"Authorization": "Bearer example-not-real"},
+        )
+        self.assertNotIn("example-not-real", self.client.get("/api/mcp").text)
+
+    def test_a_reference_header_is_stored_as_the_reference(self):
+        self.add(
+            name="remote",
+            url="https://example.test/mcp",
+            headers={"Authorization": "${MY_MCP_TOKEN}"},
+        )
+        self.assertEqual(
+            self.config()["mcpServers"]["remote"]["headers"]["Authorization"],
+            "${MY_MCP_TOKEN}",
+        )
+
+    def test_both_a_url_and_a_command_is_refused(self):
+        """It does not say which was meant, so neither is guessed at."""
+        response = self.add(name="x", url="https://example.test/mcp", command="npx")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Not both", response.json()["detail"])
+
+    def test_neither_is_refused(self):
+        response = self.add(name="x")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("url", response.json()["detail"])
+
+    def test_a_url_that_is_not_http_is_refused(self):
+        response = self.add(name="x", url="file:///etc/passwd")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("http", response.json()["detail"])
+
+    def test_credentials_in_the_url_are_refused(self):
+        response = self.add(name="x", url="https://user:pw@example.test/mcp")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("headers", response.json()["detail"])
+
+    def test_a_remote_server_switches_off_like_any_other(self):
+        self.add(name="remote", url="https://example.test/mcp")
+        self.client.patch("/api/mcp/servers/remote", json={"enabled": False})
+
+        self.assertFalse(self.config()["mcpServers"]["remote"]["enabled"])
+        self.assertFalse(self.client.get("/api/mcp").json()["servers"][0]["enabled"])
 
 
 if __name__ == "__main__":

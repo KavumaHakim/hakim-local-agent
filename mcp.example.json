@@ -6,10 +6,20 @@
     "is the one every other MCP client uses, so a config pastes in from",
     "elsewhere.",
     "",
-    "A credential goes in an env block. Either the value itself, or \"${VAR}\",",
-    "which is read from the environment when the server starts so the secret",
-    "never lands in this file. Keep mcp.json out of version control either way;",
-    "the .gitignore already does.",
+    "A server is reached one of two ways, and the entry says which: a command,",
+    "started here as a subprocess, or a url, reached over Streamable HTTP. One",
+    "or the other - an entry carrying both does not say which was meant, so it",
+    "is skipped rather than guessed at.",
+    "",
+    "A credential goes in an env block for a command server, or a headers block",
+    "for a url one. Either the value itself, or \"${VAR}\", which is read from",
+    "the environment so the secret never lands in this file. Only a value that",
+    "is entirely ${VAR} expands - \"Bearer ${VAR}\" is sent literally, so put",
+    "the whole header value in the variable, Bearer included. Keep mcp.json out",
+    "of version control either way; the .gitignore already does.",
+    "",
+    "Sign-in that needs a browser (interactive OAuth) is not supported. A server",
+    "wanting it answers 401, and the error says so.",
     "",
     "Nothing here runs until you run POST /api/mcp/refresh once: the tool list",
     "is cached, because the registry is rebuilt every turn and starting a",
@@ -34,6 +44,11 @@
     "sqlite": {
       "command": "uvx",
       "args": ["mcp-server-sqlite", "--db-path", "C:/path/to/db.sqlite"],
+      "enabled": false
+    },
+    "remote-example": {
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "${SOME_TOKEN}" },
       "enabled": false
     }
   }

@@ -93,6 +93,8 @@ interface Props {
     name?: string
     command?: string
     args?: string[]
+    url?: string
+    headers?: Record<string, string>
     env?: Record<string, string>
   }) => void
   onSetMcpServer: (name: string, body: { enabled?: boolean; trusted?: boolean }) => void
@@ -1248,13 +1250,16 @@ function Setting({
  * MCP servers: the ones this project offers, and the ones you add yourself.
  *
  * Its own pane rather than a section under Tools, because it is not a switch
- * on something already here — it is a list of programs this machine may start,
- * and each one arrives with a handful of tools and a lens group of its own.
+ * on something already here — it is a list of programs this machine may start
+ * and services it may reach, and each one arrives with a handful of tools and
+ * a lens group of its own.
  *
- * Two honest things the interface has to carry, because nothing else will say
- * them. A catalogue entry is **not bundled**: switching it on writes a command
- * line that `npx` or `uvx` resolves the first time it runs, which downloads a
- * package from npm or PyPI and executes it. And switching one *off* keeps the
+ * Three honest things the interface has to carry, because nothing else will
+ * say them. A catalogue entry is **not bundled**: switching it on writes a
+ * command line that `npx` or `uvx` resolves the first time it runs, which
+ * downloads a package from npm or PyPI and executes it. A server added by url
+ * is **somebody else's**, so a tool call and its arguments leave this machine
+ * — the row says `remote` for that reason. And switching one *off* keeps the
  * entry, so turning it back on is not typing the command again.
  */
 function McpPane({
@@ -1322,8 +1327,8 @@ function McpPane({
 
       {custom.length === 0 && !adding && (
         <p className="mb-4 text-[11px] leading-relaxed text-faint">
-          None yet. Anything speaking MCP over stdio works — give it the command
-          that starts it.
+          None yet. Anything speaking MCP works — give it the command that
+          starts it here, or the url of one running somewhere else.
         </p>
       )}
 
@@ -1574,7 +1579,17 @@ function CustomRow({
     <li className="rounded-md bg-tint px-2 py-1.5">
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
-          <p className="font-mono text-[11.5px] text-fg">{server.name}</p>
+          <p className="font-mono text-[11.5px] text-fg">
+            {server.name}
+            {server.transport === 'http' && (
+              <span
+                title="Reached over HTTP. It runs on somebody else's machine, and what a tool is given goes there."
+                className="ml-1.5 rounded-sm bg-tint-2 px-1 py-px align-[1px] font-sans text-[9.5px] tracking-wide text-faint uppercase"
+              >
+                remote
+              </span>
+            )}
+          </p>
           <p
             className="mt-0.5 truncate font-mono text-[10px] text-faint"
             title={server.command}
@@ -1618,24 +1633,46 @@ function CustomRow({
 }
 
 /**
- * Describing a server by hand.
+ * Describing a server by hand, over either transport.
+ *
+ * The two are genuinely different things to describe, not one form with an
+ * extra field — a command line and its arguments, or a url and a credential —
+ * so the choice comes first and the form below it changes. The API refuses an
+ * entry carrying both, and this is how it stays impossible to send one.
  *
  * Arguments are one per line rather than a single string, because splitting on
  * spaces would break every path with a space in it — which on Windows is most
  * of them, this project's own folder included.
+ *
+ * The header value is `type="password"` for the same reason the catalogue's
+ * credential form is: a bearer token should not sit readable on screen. Better
+ * still is `${SOME_VAR}`, which writes only the name and reads the value from
+ * this machine's environment — the hint says so, because nobody would guess.
  */
 function AddServerForm({
   busy,
   onSubmit,
 }: {
   busy: boolean
-  onSubmit: (body: { name: string; command: string; args: string[] }) => void
+  onSubmit: (body: {
+    name: string
+    command?: string
+    args?: string[]
+    url?: string
+    headers?: Record<string, string>
+  }) => void
 }) {
+  const [transport, setTransport] = useState('stdio')
   const [name, setName] = useState('')
   const [command, setCommand] = useState('')
   const [args, setArgs] = useState('')
+  const [url, setUrl] = useState('')
+  const [headerName, setHeaderName] = useState('Authorization')
+  const [headerValue, setHeaderValue] = useState('')
 
-  const ready = name.trim() !== '' && command.trim() !== ''
+  const remote = transport === 'http'
+  const ready =
+    name.trim() !== '' && (remote ? url.trim() !== '' : command.trim() !== '')
 
   return (
     <form
@@ -1643,30 +1680,95 @@ function AddServerForm({
       onSubmit={(event) => {
         event.preventDefault()
         if (!ready) return
-        onSubmit({
-          name: name.trim(),
-          command: command.trim(),
-          args: args
-            .split('\n')
-            .map((a) => a.trim())
-            .filter(Boolean),
-        })
+        if (remote) {
+          const headers: Record<string, string> = {}
+          if (headerName.trim() && headerValue.trim()) {
+            headers[headerName.trim()] = headerValue.trim()
+          }
+          onSubmit({ name: name.trim(), url: url.trim(), headers })
+        } else {
+          onSubmit({
+            name: name.trim(),
+            command: command.trim(),
+            args: args
+              .split('\n')
+              .map((a) => a.trim())
+              .filter(Boolean),
+          })
+        }
       }}
     >
+      <Choice
+        label="How it is reached"
+        value={transport}
+        onSelect={setTransport}
+        options={[
+          { value: 'stdio', label: 'A command here' },
+          { value: 'http', label: 'A url' },
+        ]}
+      />
+
       <TextField label="Name" value={name} onChange={setName} placeholder="my-server" />
-      <TextField label="Command" value={command} onChange={setCommand} placeholder="npx" />
-      <div>
-        <label className="mb-1 block text-[10.5px] text-faint">
-          Arguments, one per line
-        </label>
-        <textarea
-          value={args}
-          onChange={(event) => setArgs(event.target.value)}
-          rows={3}
-          placeholder={'-y\n@scope/server-name'}
-          className="w-full resize-none rounded-md border border-transparent bg-surface px-2 py-1.5 font-mono text-[11px] outline-none placeholder:text-faint focus:border-accent-line"
-        />
-      </div>
+
+      {remote ? (
+        <>
+          <TextField
+            label="URL"
+            value={url}
+            onChange={setUrl}
+            placeholder="https://example.com/mcp"
+          />
+          {/* Stacked rather than side by side: the pane is narrow enough that
+              a half-width field truncates "Authorization" in its own box. */}
+          <TextField
+            label="Header, if it needs one"
+            value={headerName}
+            onChange={setHeaderName}
+            placeholder="Authorization"
+          />
+          <label className="block">
+            <span className="mb-1 block text-[10.5px] text-faint">Its value</span>
+            <input
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={headerValue}
+              onChange={(event) => setHeaderValue(event.target.value)}
+              placeholder="Bearer …"
+              className="w-full rounded-md border border-transparent bg-surface px-2 py-1 font-mono text-[11px] outline-none placeholder:text-faint focus:border-accent-line"
+            />
+          </label>
+          <p className="text-[10.5px] leading-snug text-faint">
+            Sent with every request. Type{' '}
+            <span className="font-mono">{'${SOME_VAR}'}</span> to keep the value
+            out of the file and read it from this machine's environment instead.
+            Sign-in that needs a browser is not supported — a server wanting it
+            will answer 401.
+          </p>
+        </>
+      ) : (
+        <>
+          <TextField
+            label="Command"
+            value={command}
+            onChange={setCommand}
+            placeholder="npx"
+          />
+          <div>
+            <label className="mb-1 block text-[10.5px] text-faint">
+              Arguments, one per line
+            </label>
+            <textarea
+              value={args}
+              onChange={(event) => setArgs(event.target.value)}
+              rows={3}
+              placeholder={'-y\n@scope/server-name'}
+              className="w-full resize-none rounded-md border border-transparent bg-surface px-2 py-1.5 font-mono text-[11px] outline-none placeholder:text-faint focus:border-accent-line"
+            />
+          </div>
+        </>
+      )}
+
       <button
         type="submit"
         disabled={!ready || busy}

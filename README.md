@@ -870,7 +870,7 @@ Hakim Local Agent/
 │   ├── lens.py          which schemas a turn actually sends
 │   ├── skills.py        instruction packs, indexed and loaded by name
 │   ├── results.py       results too large for the window, kept on disk
-│   ├── mcp_client.py    MCP servers over stdio, no SDK
+│   ├── mcp_client.py    MCP servers, stdio and HTTP, no SDK
 │   ├── calculator.py    safe expression evaluator
 │   ├── filesystem.py    workspace-jailed list + read
 │   ├── python_tool.py   restricted Python (disabled by default)
@@ -2590,20 +2590,32 @@ pruned by count and by bytes.
 
 ### MCP servers
 
-Model Context Protocol servers are supported over stdio. Copy
-`mcp.example.json` to `mcp.json` — the config is the shape every other MCP
-client uses, so one can be pasted straight in:
+Model Context Protocol servers are supported over **both transports**: stdio,
+for a server started on this machine, and Streamable HTTP, for one running
+somewhere else. Copy `mcp.example.json` to `mcp.json` — the config is the shape
+every other MCP client uses, so one can be pasted straight in:
 
 ```json
 {
   "mcpServers": {
-    "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
+    "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
+    "remote": {
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "${SOME_TOKEN}" }
+    }
   }
 }
 ```
 
+**A `command` or a `url`, never both.** The two are different enough to be
+worth keeping separate — one is a subprocess with arguments and an environment,
+the other is an endpoint with headers — and an entry carrying both does not say
+which was meant, so it is skipped rather than guessed at. Everything after the
+handshake is the same JSON-RPC either way, which is why one `ServerSpec` covers
+both and nothing above `open_connection` knows which it got.
+
 `mcp.json` is **git-ignored**, because an `env` block is exactly where an API
-key ends up.
+key ends up — and now a `headers` block too.
 
 Each server becomes its own lens group, `mcp:<name>`, and its tools are named
 `<server>__<tool>`. That grain turned out to be right: naming a server in your
@@ -2619,8 +2631,9 @@ behaviour, and visible in `GET /api/mcp`. Idle servers are reaped after
 `mcp_idle_timeout` (300 s) by the same sweeper that unloads idle llama-servers.
 
 **Servers have their own pane**, beside Tools on the rail. It lists what this
-project offers, what you have added, the command each would run, how many
-tools are cached, and — after a refresh — why one would not start. Refresh is
+project offers, what you have added, the command each would run or the url it
+sits at (marked `remote`, because a tool call and its arguments leave this
+machine), how many tools are cached, and — after a refresh — why one would not start. Refresh is
 a button rather than something that happens on load, because it is the only
 thing there that starts a process, and every write is refused with a 409 while
 a turn is running or queued.
@@ -2645,6 +2658,15 @@ to give one, and the second is better:
   from this process's environment when the server starts, so the secret never
   touches the file.
 
+**A remote server's credential is a header**, and the same two ways apply:
+paste the value into `headers`, or write `${SOME_VAR}` and have only the name
+stored. One difference worth knowing — only a value that is *entirely*
+`${SOME_VAR}` expands. `"Bearer ${TOKEN}"` is sent literally, because
+half-substituted credentials fail in confusing ways and a plain 401 is the
+error someone can act on. Put the whole header value in the variable, `Bearer`
+included. A url with credentials in it (`https://user:pw@host/mcp`) is refused
+outright: nobody should be asked to eyeball a password in a url and judge it.
+
 Values are never sent back to the browser. `GET /api/mcp` reports `env_set`,
 the names of the credentials that have a value, and nothing else; a test
 asserts that the value cannot be found anywhere in any response. The child
@@ -2658,11 +2680,18 @@ slack, gitlab, brave-search, google-maps — is published as *"Package no longer
 supported"*, last released in 2025. The reference servers that run locally —
 filesystem, memory, sequential-thinking, everything — are still shipping
 (2026.8.31 at the time of writing). The vendors took their own integrations
-over and mostly publish them as **remote HTTP servers, which this client
-cannot reach**: it speaks stdio only. The archived packages still install and
-still work, so they are offered and labelled `unmaintained` in the pane rather
-than quietly left out. HTTP transport is what would unlock the current
-generation, and it is not built.
+over and mostly publish them as **remote HTTP servers**. Those are now
+reachable — that is what the HTTP transport was built for. The archived
+packages still install and still work, so they stay in the catalogue labelled
+`unmaintained` rather than being quietly dropped; the vendor's current server
+is added by url, in the same pane.
+
+The one thing still in the way is **sign-in**. Several of those endpoints want
+an interactive OAuth flow — a browser round trip, a redirect listener, dynamic
+client registration — and that is a feature rather than a detail, so it is not
+here. A server that takes a static token in a header works today. One that
+insists on the OAuth dance answers 401, and the error says exactly that rather
+than leaving someone guessing.
 
 Refreshing **re-reads `mcp.json` first**, so a server added while the API is
 running becomes real without a restart. It did not, until the panel existed to
@@ -2688,13 +2717,26 @@ only safe one: `readOnlyHint` is the *server's claim about itself*, so it can
 move a tool into the safer tier but never out of one, and an absent annotation
 means ask. `"trusted": true` on a server skips the gate for all of its tools.
 
-There is no SDK. Stdio MCP is newline-delimited JSON-RPC 2.0, and the client
-side is one request and one reply; the tests drive a real server subprocess over
-the real protocol, including one that logs a notification before answering —
-which is precisely what breaks a client that assumes the next line is its reply.
+There is no SDK. Stdio MCP is newline-delimited JSON-RPC 2.0, and the HTTP one
+is a POST that answers with either a JSON object or an event stream; the client
+side of both is a page of code. The tests drive a real server over each — a
+subprocess for stdio, a socket for HTTP — and both include the case that
+actually breaks clients: a notification arriving *before* the reply, which a
+client taking the first message as its answer gets wrong.
 
-Not supported: HTTP transport and OAuth (local servers are stdio), and MCP
-resources and prompts (tools only).
+Two details of Streamable HTTP that cost a client if missed. **Which response
+shape you get is the server's choice per request**, not a property of the
+server, so `Accept` names both and both are parsed. And **a session is a
+header**: if the server returns `Mcp-Session-Id` on the handshake, every later
+request carries it, `stop` sends a DELETE so the state can be dropped rather
+than aged out, and a 404 against a session we hold means it has expired — the
+connection forgets it and re-handshakes rather than resending it forever. The
+fake server in the tests *enforces* the session rather than merely issuing one,
+because a fake that does not would pass a client that never sends it back.
+
+Not supported: the deprecated 2024 HTTP+SSE two-endpoint transport, interactive
+OAuth (static credentials in `headers` instead), and MCP resources and prompts
+(tools only).
 
 ---
 
@@ -3465,10 +3507,11 @@ Qwen emits raw `<tool_call>` blocks inside `content`.
   characters and an apology; it now becomes 476 characters and a retrievable
   handle. `read_result` is registered every turn and offered on none until
   something actually overflows.
-- **MCP servers** — stdio, no SDK, each server its own lens group. Measured
-  cold: **455 tokens**, rising to 586 once the server is named and 802 for the
-  whole roster. The manifest is cached because the registry is rebuilt every
-  turn and a subprocess per server per question is not affordable here.
+- **MCP servers** — stdio and Streamable HTTP, no SDK, each server its own lens
+  group. Measured cold: **455 tokens**, rising to 586 once the server is named
+  and 802 for the whole roster. The manifest is cached because the registry is
+  rebuilt every turn and a subprocess per server per question is not affordable
+  here.
   `readOnlyHint` can move a tool into the safer tier and never out of one.
   They have **their own pane** now — a catalogue of ten servers with toggles,
   a form for your own, and credentials collected before a server is switched

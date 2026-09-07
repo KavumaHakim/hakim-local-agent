@@ -583,7 +583,10 @@ class StopTurnOut(BaseModel):
 
 class McpServerOut(BaseModel):
     name: str
+    # How it is reached: the command line, or the url for a remote one.
     command: str
+    # "stdio" for a subprocess here, "http" for one somewhere else.
+    transport: str = "stdio"
     trusted: bool
     # How many of its tools are cached. 0 means it has never been reached, or
     # answered with none - refreshing says which.
@@ -638,6 +641,11 @@ class McpServerIn(BaseModel):
     name: str | None = None
     command: str | None = None
     args: list[str] | None = None
+    # Streamable HTTP instead of a command. One or the other, never both.
+    url: str | None = None
+    # Sent with every request to a remote server. A "${VAR}" value is read
+    # from the environment, so a bearer token need not be stored here.
+    headers: dict[str, str] | None = None
     trusted: bool = False
     replace: bool = False
     # Credentials, by variable name. A value of "${SOME_VAR}" is read from the

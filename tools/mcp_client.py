@@ -29,10 +29,18 @@ way `git commit` and `POST` do. A hint is the server's claim rather than a
 guarantee, which is why it can only ever move a tool into the safer tier -
 absent annotations mean "ask".
 
-No SDK. The stdio transport is newline-delimited JSON-RPC 2.0, the client side
-of it is one request and one response, and this project does not take a
-dependency it can write in a page. HTTP transports and OAuth are not here; the
-servers people run locally are stdio.
+**Two transports, one protocol.** A server with a `command` is a subprocess
+here, spoken to over its stdin and stdout; one with a `url` is somebody else's,
+over Streamable HTTP. After the handshake they are the same JSON-RPC, so
+`open_connection` picks the transport and nothing above that line knows which
+it got. The 2024 two-endpoint HTTP+SSE transport is deprecated upstream and is
+not implemented.
+
+No SDK. Stdio MCP is newline-delimited JSON-RPC 2.0 and the HTTP one is a POST
+that answers with either JSON or an event stream; the client side of both is a
+page of code, and this project does not take a dependency it can write in a
+page. Interactive OAuth is not here - static credentials in `headers` cover
+the servers people actually run, and a 401 says what is missing.
 """
 
 from __future__ import annotations
@@ -46,6 +54,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+
+import requests
 
 from tools.base import Tool, ToolError
 
@@ -57,6 +68,10 @@ DEFAULT_TIMEOUT = 30.0
 # Handshake and listing are slower: `npx` may be fetching the package.
 STARTUP_TIMEOUT = 120.0
 
+# How much a streaming HTTP server may send before answering. A server that
+# logs forever must not hold a turn open forever.
+MAX_STREAM_BYTES = 2_000_000
+
 
 class McpError(ToolError):
     """A server could not be reached, or refused the call."""
@@ -64,10 +79,16 @@ class McpError(ToolError):
 
 @dataclass(frozen=True)
 class ServerSpec:
-    """How to start one server, from mcp.json."""
+    """How to reach one server, from mcp.json.
+
+    Two transports, and `url` is what chooses. A spec with a command is a
+    subprocess on this machine; a spec with a url is somebody else's, over
+    HTTP. Everything after the handshake is the same protocol either way,
+    which is why one dataclass covers both.
+    """
 
     name: str
-    command: str
+    command: str = ""
     args: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict)
     cwd: str = ""
@@ -75,10 +96,24 @@ class ServerSpec:
     # every tool. Off by default: trust is a thing someone states.
     trusted: bool = False
     enabled: bool = True
+    # Streamable HTTP. Set instead of `command`, never as well.
+    url: str = ""
+    # Sent with every HTTP request. `${VAR}` values are read from the
+    # environment, so a bearer token need not live in the file.
+    headers: dict[str, str] = field(default_factory=dict)
 
     @property
     def category(self) -> str:
         return f"mcp:{self.name}"
+
+    @property
+    def remote(self) -> bool:
+        return bool(self.url)
+
+    @property
+    def display(self) -> str:
+        """What to show as 'how this server is reached'."""
+        return self.url if self.remote else " ".join([self.command, *self.args])
 
 
 def load_servers(path: Path) -> list[ServerSpec]:
@@ -100,14 +135,21 @@ def load_servers(path: Path) -> list[ServerSpec]:
 
     found: list[ServerSpec] = []
     for name, entry in servers.items():
-        if not isinstance(entry, dict) or not isinstance(entry.get("command"), str):
+        if not isinstance(entry, dict) or not str(name).strip():
             continue
-        if not str(name).strip():
+        command = entry.get("command")
+        url = entry.get("url") or entry.get("serverUrl") or entry.get("endpoint")
+        # One or the other. An entry with neither is not a server, and an
+        # entry with both does not say which was meant, so neither is guessed
+        # at - the pane shows what is configured and this stays predictable.
+        if not isinstance(command, str) and not isinstance(url, str):
+            continue
+        if isinstance(command, str) and isinstance(url, str):
             continue
         found.append(
             ServerSpec(
                 name=str(name).strip(),
-                command=entry["command"],
+                command=command if isinstance(command, str) else "",
                 args=tuple(str(a) for a in entry.get("args", []) or ()),
                 env={
                     str(k): str(v) for k, v in (entry.get("env") or {}).items()
@@ -115,6 +157,10 @@ def load_servers(path: Path) -> list[ServerSpec]:
                 cwd=str(entry.get("cwd", "") or ""),
                 trusted=bool(entry.get("trusted", False)),
                 enabled=entry.get("enabled", True) is not False,
+                url=(url or "").strip() if isinstance(url, str) else "",
+                headers={
+                    str(k): str(v) for k, v in (entry.get("headers") or {}).items()
+                },
             )
         )
     return found
@@ -414,6 +460,307 @@ class McpConnection:
         return self._request("tools/call", {"name": tool, "arguments": arguments})
 
 
+class McpHttpConnection:
+    """One server reached over Streamable HTTP.
+
+    The same protocol as the stdio transport, over a different pipe, so this
+    exposes the identical surface - `start`, `list_tools`, `call`, `stop`,
+    `alive`, `last_used` - and `open_connection` picks between them. Nothing
+    above this line knows which a server is.
+
+    **Streamable HTTP, not the older HTTP+SSE.** One endpoint: every request
+    is a POST, and the server answers either with a single JSON object or with
+    an event stream carrying the reply among whatever else it wants to send.
+    Both are handled, because which one you get is the server's choice per
+    request and not a property of the server. The 2024 two-endpoint transport
+    (`GET /sse` plus a separate POST url) is deprecated upstream and is not
+    implemented.
+
+    **A session is a header.** If the server returns `Mcp-Session-Id` on the
+    initialize response, every later request carries it, and `stop` sends a
+    DELETE so the server can drop the state rather than waiting for it to age
+    out. Servers that do not use sessions simply never send the header.
+
+    **What is not here: interactive OAuth.** The spec's authorization flow
+    wants a browser round trip, a redirect listener and dynamic client
+    registration; that is a feature, not a detail. Static credentials cover
+    the servers people actually run - `headers` in the config, with `${VAR}`
+    read from the environment - and a 401 says plainly which is missing.
+    """
+
+    def __init__(self, spec: ServerSpec, *, timeout: float = DEFAULT_TIMEOUT) -> None:
+        self._spec = spec
+        self._timeout = timeout
+        self._session_id = ""
+        self._started = False
+        self._next_id = 0
+        self._lock = threading.Lock()
+        self.last_used = 0.0
+
+        self._http = requests.Session()
+        # No ambient credentials, the same rule the HTTP tool follows: a
+        # proxy setting or a .netrc entry is not part of what this server was
+        # configured to receive.
+        self._http.trust_env = False
+
+    @property
+    def alive(self) -> bool:
+        """Whether the handshake has been done and not torn down.
+
+        There is no process to poll, so this is the honest equivalent: a
+        connection that has initialized and still holds whatever session the
+        server gave it.
+        """
+        return self._started
+
+    def start(self) -> None:
+        if self._started:
+            return
+        check_url(self._spec.url, self._spec.name)
+        # Set before the handshake so `_request` will send it, and cleared
+        # again if the handshake fails.
+        self._started = True
+        try:
+            self._request(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": CLIENT_INFO,
+                },
+                timeout=STARTUP_TIMEOUT,
+            )
+            self._notify("notifications/initialized")
+        except McpError:
+            self._started = False
+            self._session_id = ""
+            raise
+        self.last_used = time.time()
+
+    def stop(self) -> None:
+        """End the session, then forget it.
+
+        Best effort: a server that is gone, or one that never used sessions,
+        is not a failure to report. Stopping is what the sweeper does to an
+        idle connection, and it must not raise into it.
+        """
+        session, self._session_id = self._session_id, ""
+        self._started = False
+        if session:
+            try:
+                self._http.delete(
+                    self._spec.url,
+                    headers={**self._headers(), "Mcp-Session-Id": session},
+                    timeout=5,
+                )
+            except requests.RequestException:
+                pass
+        self._http.close()
+        # A closed Session cannot be reused, so a later start gets a new one.
+        self._http = requests.Session()
+        self._http.trust_env = False
+
+    # --- the protocol ---
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            # Both, because the server chooses per response which to send.
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": PROTOCOL_VERSION,
+        }
+        headers.update(resolve_env(self._spec.headers))
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+        return headers
+
+    def _post(self, payload: dict[str, Any], timeout: float):
+        try:
+            return self._http.post(
+                self._spec.url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=self._headers(),
+                timeout=timeout,
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            raise McpError(
+                f"Could not reach the MCP server {self._spec.name!r} at "
+                f"{self._spec.url}: {exc}"
+            ) from None
+
+    def _notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        """A message with no id, so there is no reply to wait for."""
+        response = self._post(
+            {"jsonrpc": "2.0", "method": method, "params": params or {}},
+            self._timeout,
+        )
+        # 202 Accepted is the documented answer; anything 2xx is fine, and a
+        # notification failing is not worth ending a turn over.
+        response.close()
+
+    def _request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._next_id += 1
+            request_id = self._next_id
+            wait = timeout or self._timeout
+            response = self._post(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": method,
+                    "params": params or {},
+                },
+                wait,
+            )
+
+            try:
+                session = response.headers.get("Mcp-Session-Id")
+                if session:
+                    self._session_id = session
+                self._check_status(response, method)
+                message = self._read_reply(response, request_id, method, wait)
+            finally:
+                response.close()
+
+            error = message.get("error")
+            if isinstance(error, dict):
+                raise McpError(
+                    f"{self._spec.name}: {error.get('message', 'call failed')}"
+                )
+            result = message.get("result")
+            return result if isinstance(result, dict) else {}
+
+    def _check_status(self, response, method: str) -> None:
+        if response.status_code < 400:
+            return
+        if response.status_code in (401, 403):
+            raise McpError(
+                f"The MCP server {self._spec.name!r} refused the request "
+                f"({response.status_code}). It wants a credential this client "
+                f"did not send - add one under 'headers' for this server, for "
+                f"example an Authorization header. Interactive OAuth sign-in "
+                f"is not supported here."
+            )
+        if response.status_code == 404 and self._session_id:
+            # The documented way a server says a session has expired.
+            self._session_id = ""
+            self._started = False
+            raise McpError(
+                f"The MCP server {self._spec.name!r} no longer has this "
+                f"session. It will be re-established on the next call."
+            )
+        raise McpError(
+            f"The MCP server {self._spec.name!r} answered {method!r} with "
+            f"HTTP {response.status_code}."
+        )
+
+    def _read_reply(
+        self, response, request_id: int, method: str, wait: float
+    ) -> dict[str, Any]:
+        """The JSON-RPC message with our id, from either response shape."""
+        content_type = (response.headers.get("Content-Type") or "").lower()
+
+        if "text/event-stream" in content_type:
+            return self._read_event_stream(response, request_id, method, wait)
+
+        try:
+            body = json.loads(response.content.decode("utf-8", errors="replace"))
+        except ValueError:
+            raise McpError(
+                f"The MCP server {self._spec.name!r} answered {method!r} with "
+                f"something that is not JSON."
+            ) from None
+        # A server may batch, exactly as the stdio transport may interleave.
+        for message in body if isinstance(body, list) else [body]:
+            if isinstance(message, dict) and message.get("id") == request_id:
+                return message
+        raise McpError(
+            f"The MCP server {self._spec.name!r} answered {method!r} without "
+            f"a reply to it."
+        )
+
+    def _read_event_stream(
+        self, response, request_id: int, method: str, wait: float
+    ) -> dict[str, Any]:
+        """Read events until ours arrives.
+
+        The same rule as the stdio transport: anything that is not the reply
+        to this id - a log, a progress notification, a keep-alive - is
+        skipped rather than treated as an answer.
+        """
+        deadline = time.time() + wait
+        seen = 0
+        for raw in response.iter_lines(decode_unicode=True):
+            if time.time() > deadline:
+                break
+            if raw is None:
+                continue
+            line = raw.strip()
+            if not line or not line.startswith("data:"):
+                continue  # event:, id:, retry: and blank separators
+            seen += len(line)
+            if seen > MAX_STREAM_BYTES:
+                raise McpError(
+                    f"The MCP server {self._spec.name!r} sent more than "
+                    f"{MAX_STREAM_BYTES:,} bytes without answering {method!r}."
+                )
+            try:
+                message = json.loads(line[5:].strip())
+            except ValueError:
+                continue
+            if isinstance(message, dict) and message.get("id") == request_id:
+                return message
+        raise McpError(
+            f"The MCP server {self._spec.name!r} did not answer {method!r} "
+            f"within {wait:.0f}s."
+        )
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        self.start()
+        result = self._request("tools/list", timeout=STARTUP_TIMEOUT)
+        tools = result.get("tools")
+        return [t for t in tools if isinstance(t, dict)] if isinstance(tools, list) else []
+
+    def call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self.start()
+        self.last_used = time.time()
+        return self._request("tools/call", {"name": tool, "arguments": arguments})
+
+
+def check_url(url: str, name: str) -> str:
+    """Validate a server url, or say what is wrong with it."""
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise McpError(
+            f"The MCP server {name!r} needs an http or https url, got "
+            f"{parsed.scheme or 'none'!r}."
+        )
+    if not parsed.hostname:
+        raise McpError(f"The url for the MCP server {name!r} has no host.")
+    if parsed.username or parsed.password:
+        # The same refusal the HTTP tool makes: nobody should be asked to
+        # eyeball a password embedded in a url and judge it.
+        raise McpError(
+            f"The url for the MCP server {name!r} has credentials in it. Put "
+            f"them in 'headers' instead, where they can be a ${{VAR}}."
+        )
+    return url.strip()
+
+
+def open_connection(spec: ServerSpec, *, timeout: float = DEFAULT_TIMEOUT):
+    """The connection for this spec, whichever transport it names."""
+    if spec.remote:
+        return McpHttpConnection(spec, timeout=timeout)
+    return McpConnection(spec, timeout=timeout)
+
+
 def _readonly(tool: dict[str, Any]) -> bool:
     """Whether a server claims this tool only reads.
 
@@ -560,7 +907,7 @@ class McpManager:
         errors: dict[str, str] = {}
 
         for spec in self.servers:
-            connection = McpConnection(spec)
+            connection = open_connection(spec)
             try:
                 manifest[spec.name] = connection.list_tools()
             except McpError as exc:
@@ -585,7 +932,7 @@ class McpManager:
             spec = self._specs.get(name)
             if spec is None:
                 raise McpError(f"No MCP server named {name!r} is configured.")
-            connection = McpConnection(spec)
+            connection = open_connection(spec)
             self._connections[name] = connection
             return connection
 

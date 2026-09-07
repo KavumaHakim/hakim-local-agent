@@ -256,8 +256,10 @@ export interface McpCatalogItem {
 /** One MCP server, as `mcp.json` describes it and the cache remembers it. */
 export interface McpServer {
   name: string
-  /** The command line, truncated server-side. Shown so it can be checked. */
+  /** The command line, or the url for a remote one. Shown so it can be checked. */
   command: string
+  /** "stdio" for a subprocess here, "http" for one somewhere else. */
+  transport: string
   /** Its tools skip the approval gate. Stated in the file, never inferred. */
   trusted: boolean
   /** How many of its tools are cached. 0 means it has never been reached. */

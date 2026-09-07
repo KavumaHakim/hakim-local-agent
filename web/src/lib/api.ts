@@ -131,6 +131,8 @@ export const api = {
     name?: string
     command?: string
     args?: string[]
+    url?: string
+    headers?: Record<string, string>
     trusted?: boolean
     replace?: boolean
     /** By variable name. A "${VAR}" value is read from the environment. */
