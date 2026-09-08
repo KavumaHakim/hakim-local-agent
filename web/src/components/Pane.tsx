@@ -86,7 +86,6 @@ interface Props {
 
   tools: ToolsResponse | null
   toolPending: string | null
-  toolError: string | null
   onToggleTool: (id: string, enabled: boolean) => void
   onSetOcrBackend: (backend: OcrBackend) => void
 
@@ -94,7 +93,6 @@ interface Props {
   mcp: {
     data: McpResponse | null
     refreshing: boolean
-    error: string | null
     pending: string | null
   } | null
   onRefreshMcp: () => void
@@ -499,7 +497,7 @@ function CallsPane({ messages }: Props) {
 }
 
 function ToolsPane(props: Props) {
-  const { tools, toolPending, toolError, onToggleTool, onSetOcrBackend } = props
+  const { tools, toolPending, onToggleTool, onSetOcrBackend } = props
   if (!tools) return <p className="text-[11.5px] text-faint">Loading…</p>
 
   const parents = tools.switches.filter((entry) => !entry.depends_on)
@@ -528,8 +526,6 @@ function ToolsPane(props: Props) {
         pending={toolPending}
         onChoose={onSetOcrBackend}
       />
-
-      {toolError && <p className="mt-2 text-[11px] text-danger">{toolError}</p>}
     </>
   )
 }
@@ -1760,8 +1756,6 @@ function McpPane({
           {mcp.refreshing ? 'Asking each server…' : 'Refresh tool list'}
         </button>
       )}
-
-      {mcp.error && <p className="mt-2 text-[11px] text-danger">{mcp.error}</p>}
 
       <p className="mt-3 border-t border-line pt-2 text-[10.5px] leading-relaxed text-faint">
         Written to{' '}

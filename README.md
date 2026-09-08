@@ -2930,6 +2930,17 @@ you reopen. Settings is what you set once, and fits without scrolling.
 - **Any question can be edited and asked again**, which rewinds the
   conversation to that point — see above
 - **Tool switches** in the sidebar, with each tool's own risk text
+- **A refusal gets a dialog, not a footnote.** When the API turns something
+  down it says why, and the useful ones are exactly the ones nobody saw: "A
+  turn is running. Tool changes apply from the next turn." That was eleven
+  pixels of red text at the foot of a 262px column, under whatever you had
+  scrolled past — you flipped a switch, the switch flipped back, and the
+  sentence explaining it was below the fold. It is now a small dialog,
+  dismissed with Escape, the backdrop, or a focused Close button. The Models
+  pane was worse than a footnote: `useModels` had tracked an error since it
+  was written and **nothing ever rendered it**, so a load that ran out of RAM
+  failed in silence. Errors anchored to a row — a server that would not start,
+  an upload, a turn — stay on their row, where the anchoring is the point
 - **The workspace is chosen here**, from the folder pill in the composer or
   the Workspace panel - see below
 - Slash completion inline in the composer, and a ⌘K palette over commands,

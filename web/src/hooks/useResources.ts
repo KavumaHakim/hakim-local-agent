@@ -199,6 +199,10 @@ export function useModels() {
     override,
     clearOverride,
     setServerExe,
+    // Nothing rendered this hook's error until the alert dialog did, so a
+    // load that ran out of RAM failed in silence. Now that it is shown, it
+    // needs a way to be put away again.
+    clearError: useCallback(() => setError(null), []),
   }
 }
 
@@ -288,7 +292,15 @@ export function useTools() {
     }
   }, [])
 
-  return { data, toggle, pending, error, setOcrBackend, refresh }
+  return {
+    data,
+    toggle,
+    pending,
+    error,
+    setOcrBackend,
+    refresh,
+    clearError: useCallback(() => setError(null), []),
+  }
 }
 
 /**
@@ -373,7 +385,18 @@ export function useMcp() {
     [act],
   )
 
-  return { data, refresh, refreshing, error, reload: load, add, set, remove, pending }
+  return {
+    data,
+    refresh,
+    refreshing,
+    error,
+    reload: load,
+    add,
+    set,
+    remove,
+    pending,
+    clearError: useCallback(() => setError(null), []),
+  }
 }
 
 /**

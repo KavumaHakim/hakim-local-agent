@@ -14,6 +14,7 @@ import { EmptyState, MessageView } from './components/Messages'
 import { Pane } from './components/Pane'
 import { Rail, type PaneId } from './components/Rail'
 import { Resources } from './components/Resources'
+import { Alert } from './components/Alert'
 import { RemoteConsent } from './components/RemoteConsent'
 import { TurnStatus } from './components/TurnStatus'
 import { ModelBrowser } from './components/ModelBrowser'
@@ -429,6 +430,15 @@ export default function App() {
     )?.title ?? 'New conversation'
   const lastIndex = chat.messages.length - 1
 
+  /**
+   * The one refusal on screen, from whichever hook last had one.
+   *
+   * Ordered rather than collected: only one of these can be the thing you
+   * just clicked, and stacking dialogs for the others would be three clicks
+   * to dismiss one mistake.
+   */
+  const alert = models.error ?? tools.error ?? mcp.error
+
   return (
     <div className="flex h-full">
       <Rail
@@ -474,7 +484,6 @@ export default function App() {
           tools={tools.data}
           toolPending={tools.pending}
           onSetOcrBackend={(backend) => void tools.setOcrBackend(backend)}
-          toolError={tools.error}
           onToggleTool={(id, enabled) => void toggleTool(id, enabled)}
           mcp={mcp}
           onRefreshMcp={() => void mcp.refresh()}
@@ -664,6 +673,21 @@ export default function App() {
             setPickingWorkspace(false)
           }}
           onClearError={workspace.clearError}
+        />
+      )}
+
+      {alert && (
+        <Alert
+          message={alert}
+          onDismiss={() => {
+            // All three, not just the one showing. They are each "what you
+            // just clicked was refused", only one click happened, and a
+            // leftover from another pane would pop a second dialog for an
+            // action nobody remembers taking.
+            models.clearError()
+            tools.clearError()
+            mcp.clearError()
+          }}
         />
       )}
 
