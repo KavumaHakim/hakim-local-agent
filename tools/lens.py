@@ -125,8 +125,55 @@ CATEGORY_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
 }
 
 
+# The most a category line may cost when it has to be derived rather than read
+# from CATEGORY_HELP, and the most any one tool's summary inside it may cost.
+#
+# About 55 tokens a server. Set against the ~2,600 the lens saves by holding
+# the schemas back, that is affordable - and it is the only description of
+# that server the model ever sees, so it is not the place to economise.
+DERIVED_HELP_CHARS = 200
+GIST_CHARS = 80
+
+
 def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _server_name(category: str) -> str:
+    """The server behind an ``mcp:<name>`` category, or "" for a built-in."""
+    prefix, separator, name = category.partition(":")
+    return name.lower() if separator and prefix == "mcp" else ""
+
+
+def _bare_tool_name(name: str, category: str) -> str:
+    """`web_search_exa` from `exa__web_search_exa`, or "" if there is no prefix.
+
+    MCP tools are registered with their server in front so two servers may
+    both offer `search`. The bare half is what the server itself calls the
+    tool, and so what a person or a skill file would write.
+    """
+    server = _server_name(category)
+    lowered = name.lower()
+    prefix = f"{server}__"
+    if server and lowered.startswith(prefix) and len(lowered) > len(prefix):
+        return lowered[len(prefix) :]
+    return ""
+
+
+def _first_sentence(text: str) -> str:
+    """The opening sentence of a tool description, on one line.
+
+    MCP descriptions are written for a documentation pane: several
+    paragraphs, with the summary as the first line and usage notes under it.
+    Only the summary belongs in an index.
+    """
+    head = (text or "").strip().split("\n", 1)[0].strip()
+    match = re.search(r"(?<=[.!?])\s", head)
+    return head[: match.start()].strip() if match else head
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def _mentions(text: str, phrase: str) -> bool:
@@ -170,6 +217,24 @@ class ToolLens:
         self._tool_signals: dict[str, str] = {
             tool.name.lower(): tool.category for tool in registry.list_tools()
         }
+        # MCP needs two more names, and without them a server could not be
+        # opened by anything a person actually writes. Its tools are
+        # registered as `exa__web_search_exa`, which nobody types; the bare
+        # name is what the server calls it. And the server's own name - "ask
+        # exa for that" - names the group directly, since here the group *is*
+        # the server.
+        #
+        # A second pass, and `setdefault`, so a real tool name always wins: a
+        # server that happens to offer `read_text_file` must not take that
+        # word away from the filesystem group.
+        for tool in registry.list_tools():
+            bare = _bare_tool_name(tool.name, tool.category)
+            if bare:
+                self._tool_signals.setdefault(bare, tool.category)
+        for category in sorted(self._known):
+            server = _server_name(category)
+            if server:
+                self._tool_signals.setdefault(server, category)
 
     @property
     def open_categories(self) -> set[str]:
@@ -239,7 +304,7 @@ class ToolLens:
         closed = sorted(self.closed_categories)
         listing = "\n".join(
             f"- {name} ({_plural(self._count(name), 'tool')}): "
-            f"{CATEGORY_HELP.get(name, '')}"
+            f"{self._describe(name)}"
             for name in closed
         )
         return {
@@ -265,6 +330,68 @@ class ToolLens:
                 },
             },
         }
+
+    def _describe(self, category: str) -> str:
+        """One line saying what a closed category is for.
+
+        Built-ins have a hand-written line above. MCP servers cannot: their
+        categories are `mcp:<whatever is in mcp.json>`, so there is nothing to
+        write a line against ahead of time. Before this, those lines came out
+        empty - the model was shown a group it could load and told absolutely
+        nothing about it, which is worse than hiding it, because it costs a
+        `load_tools` call to find out.
+
+        So a category with no written line describes itself from its own
+        tools: each one's name and the first sentence of its description.
+        Those are the server's own words about what it does, which is both the
+        best summary available and the only one that cannot go stale when
+        mcp.json changes.
+        """
+        written = CATEGORY_HELP.get(category)
+        if written:
+            return written
+
+        tools = [
+            tool
+            for tool in self._registry.list_tools()
+            if tool.category == category and tool.name != LOAD_TOOLS
+        ]
+        if not tools:
+            return ""
+
+        # Each tool with its own summary while the budget lasts, then names
+        # alone, and whole entries only - clipping the joined line mid-name
+        # would leave something that reads like a tool name and is not one,
+        # which a model will then try to call.
+        #
+        # Every tool rather than one standing for the server, because the
+        # first alphabetically is not the one the server is for: taking it
+        # would describe `exa` as a page fetcher rather than the web search it
+        # is mostly wanted for.
+        #
+        # Bare names throughout: `exa__web_search_exa` says the server twice,
+        # and the server already names the line.
+        line = ""
+        for tool in tools:
+            name = _bare_tool_name(tool.name, tool.category) or tool.name
+            gist = _clip(_first_sentence(tool.description), GIST_CHARS)
+            described = f"{name} ({gist})" if gist else name
+            if not line:
+                # The first entry goes in whatever it costs: a line that
+                # names nothing describes nothing, which is what this fixes.
+                line = _clip(described, DERIVED_HELP_CHARS)
+                continue
+            for piece in (described, name):
+                if len(line) + len(piece) + 2 <= DERIVED_HELP_CHARS:
+                    line = f"{line}, {piece}"
+                    break
+            else:
+                # Not even the bare name fits. Stop rather than skip ahead to
+                # a shorter one - a gap in the middle of the list reads as
+                # though the tool is not there. The count on the line already
+                # says how many there are.
+                break
+        return line
 
     def _count(self, category: str) -> int:
         return sum(

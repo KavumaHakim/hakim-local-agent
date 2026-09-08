@@ -379,3 +379,176 @@ class TerminalSignalTests(unittest.TestCase):
             "write a haiku about rain",
         ):
             self.assertNotIn("terminal", self.opened_by(prompt), prompt)
+
+
+def mcp_registry() -> ToolRegistry:
+    """A roster with an MCP server in it, named the way McpManager names them.
+
+    The prefix matters to every test here: a server's tools are registered as
+    `<server>__<tool>`, and its category as `mcp:<server>`.
+    """
+
+    def run(**_):
+        return {"success": True}
+
+    schema = {"type": "object", "properties": {}}
+    return ToolRegistry(
+        [
+            Tool("calculate", "calculator", "adds", schema, run),
+            Tool(
+                "exa__web_search_exa",
+                "mcp:exa",
+                "Search the web for any topic and get clean, ready-to-use "
+                "content.\n\n   Best for: finding current information.",
+                schema,
+                run,
+            ),
+            Tool(
+                "exa__web_fetch_exa",
+                "mcp:exa",
+                "Read a webpage's full content as clean markdown.",
+                schema,
+                run,
+            ),
+        ]
+    )
+
+
+def index_text(lens: ToolLens) -> str:
+    for definition in lens.definitions():
+        if definition["function"]["name"] == LOAD_TOOLS:
+            return definition["function"]["description"]
+        continue
+    raise AssertionError("the index is not being sent")
+
+
+class McpInTheIndexTests(unittest.TestCase):
+    """What the model is told about a server it has not loaded yet.
+
+    CATEGORY_HELP is hand-written and keyed on the built-in category names.
+    An MCP server's category is `mcp:<whatever is in mcp.json>`, so it never
+    had an entry, and the line came out as `- mcp:exa (2 tools):` with
+    nothing after the colon. The model was shown a group it could load and
+    told nothing whatever about it, which is how a run ends with the model
+    saying it has no way to search the web while exa sits in the index.
+    """
+
+    def test_a_server_line_says_what_the_server_does(self):
+        line = next(
+            row
+            for row in index_text(ToolLens(mcp_registry())).splitlines()
+            if row.startswith("- mcp:exa")
+        )
+
+        self.assertNotEqual(line.strip(), "- mcp:exa (2 tools):")
+        self.assertIn("Search the web", line)
+
+    def test_it_names_every_tool_in_the_server(self):
+        line = index_text(ToolLens(mcp_registry()))
+        self.assertIn("web_search_exa", line)
+        self.assertIn("web_fetch_exa", line)
+
+    def test_the_server_prefix_is_not_repeated_on_each_tool(self):
+        """`mcp:exa` already names the server; `exa__web_search_exa` in the
+        same line pays for it twice."""
+        self.assertNotIn("exa__", index_text(ToolLens(mcp_registry())))
+
+    def test_only_the_first_sentence_of_a_description_is_used(self):
+        """MCP descriptions are written for a documentation pane - several
+        paragraphs of usage notes under a one-line summary."""
+        self.assertNotIn("Best for", index_text(ToolLens(mcp_registry())))
+
+    def test_a_built_in_still_uses_its_written_line(self):
+        line = index_text(ToolLens(fs_registry()))
+        self.assertIn("read, list, write and create files", line)
+
+    def test_a_long_server_is_bounded(self):
+        """The lens exists to keep the prompt small, so a server with thirty
+        tools must not spend the saving on its own index line."""
+
+        def run(**_):
+            return {"success": True}
+
+        schema = {"type": "object", "properties": {}}
+        registry = ToolRegistry(
+            [Tool("calculate", "calculator", "adds", schema, run)]
+            + [
+                Tool(
+                    f"gh__issue_{n}",
+                    "mcp:gh",
+                    f"Does the {n}th thing with issues, described at length.",
+                    schema,
+                    run,
+                )
+                for n in range(30)
+            ]
+        )
+        line = next(
+            row
+            for row in index_text(ToolLens(registry)).splitlines()
+            if row.startswith("- mcp:gh")
+        )
+        self.assertLess(len(line), 240)
+
+    def test_a_bounded_line_ends_on_a_whole_tool_name(self):
+        """Clipping mid-name would leave something that reads like a tool
+        name and is not one, which the model then tries to call."""
+
+        def run(**_):
+            return {"success": True}
+
+        schema = {"type": "object", "properties": {}}
+        registry = ToolRegistry(
+            [Tool("calculate", "calculator", "adds", schema, run)]
+            + [
+                Tool(f"gh__a_rather_long_tool_name_{n}", "mcp:gh", "Does it.", schema, run)
+                for n in range(30)
+            ]
+        )
+        line = index_text(ToolLens(registry))
+        self.assertNotIn("\u2026", line)
+        for shown in line.split("- mcp:gh (30 tools): ")[1].split(", "):
+            self.assertIn(shown.split(" (")[0], {t.name[4:] for t in registry.list_tools()})
+
+
+class McpSignalTests(unittest.TestCase):
+    """What opens a server's group without the model spending a round trip.
+
+    Nothing did. The only derived signal was the registered name,
+    `exa__web_search_exa`, which nobody writes - so a server could only ever
+    be opened by the model reading the index and calling `load_tools`.
+    """
+
+    def opened_by(self, prompt: str) -> set[str]:
+        lens = ToolLens(mcp_registry())
+        return lens.consider(prompt)
+
+    def test_the_server_name_opens_it(self):
+        self.assertEqual(self.opened_by("ask exa about GGUF quantisation"), {"mcp:exa"})
+
+    def test_the_bare_tool_name_opens_it(self):
+        """What the server calls the tool, and what a skill file would write."""
+        self.assertEqual(self.opened_by("use web_search_exa for this"), {"mcp:exa"})
+
+    def test_the_registered_name_still_opens_it(self):
+        self.assertEqual(self.opened_by("call exa__web_fetch_exa"), {"mcp:exa"})
+
+    def test_an_unrelated_message_opens_nothing(self):
+        self.assertEqual(self.opened_by("write me a haiku about rain"), set())
+
+    def test_a_server_cannot_take_a_name_a_real_tool_owns(self):
+        """A server offering `read_text_file` must not stop that phrase
+        opening the filesystem group."""
+
+        def run(**_):
+            return {"success": True}
+
+        schema = {"type": "object", "properties": {}}
+        registry = ToolRegistry(
+            [
+                Tool("read_text_file", "filesystem", "reads", schema, run),
+                Tool("files__read_text_file", "mcp:files", "also reads", schema, run),
+            ]
+        )
+        lens = ToolLens(registry)
+        self.assertIn("filesystem", lens.consider("read_text_file the notes"))

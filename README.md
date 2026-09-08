@@ -1518,6 +1518,23 @@ once the conversation looks like it needs them. Two things open a group:
 - **the model asking**, through `load_tools`, when the heuristic missed. The
   index it reads lists each closed group, its tool count and what it is for.
 
+The built-in groups have a hand-written line each. An MCP server cannot: its
+group is `mcp:<whatever is in mcp.json>`, so there is nothing to write a line
+against ahead of time, and those lines used to come out **empty** — the model
+was shown a group it could load and told nothing whatever about it. A group
+with no written line now describes itself from its own tools, each one's bare
+name and the first sentence of its description, capped at 200 characters:
+
+```
+- filesystem (2 tools): read, list, write and create files in the workspace
+- mcp:exa (2 tools): web_fetch_exa (Read a webpage's full content as clean
+  markdown.), web_search_exa (Search the web for any topic and get clean,
+  ready-to-use content.)
+```
+
+Those are the server's own words, which is both the best summary available and
+the only one that cannot go stale when `mcp.json` changes.
+
 **Opening is monotonic, and that is the whole design.** `tools` is rendered
 into the prompt *prefix* by the chat template, ahead of the messages, so
 changing the set invalidates llama-server's prefix cache and re-reads the
@@ -2653,7 +2670,13 @@ key ends up — and now a `headers` block too.
 
 Each server becomes its own lens group, `mcp:<name>`, and its tools are named
 `<server>__<tool>`. That grain turned out to be right: naming a server in your
-message opens its tools and nobody else's.
+message opens its tools and nobody else's. Three names do it — the server
+(`ask exa about…`), the tool as the server calls it (`web_search_exa`), and the
+registered form (`exa__web_search_exa`). The bare name matters because the
+registered one is not what anybody writes, and for a while it was the only one
+the lens knew, which left every server unreachable by anything but the model
+reading the index. A real tool's name always wins the tie: a server offering
+`read_text_file` cannot take that phrase away from the filesystem group.
 
 **Registering a server's tools needs their schemas, and the registry is rebuilt
 every turn.** Starting a dozen subprocesses per question is not affordable here,
