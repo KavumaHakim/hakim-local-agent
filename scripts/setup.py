@@ -336,19 +336,145 @@ def check_llama_server(*, download: bool) -> bool:
     return True
 
 
-def check_weights() -> bool:
+def fetch_model(key: str) -> bool:
+    """Download one entry from the model catalog, reporting rather than raising.
+
+    Never fatal, for the same reason the speech step is not: several gigabytes
+    over a domestic connection is the likeliest thing here to fail, and a
+    failure at this point should not throw away an install that is otherwise
+    finished. The download resumes, so "run it again" is a real answer.
+    """
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
+    try:
+        import get_model
+    except ImportError as exc:
+        ui.warn(f"could not load the model fetcher: {exc}")
+        return False
+
+    try:
+        entry = get_model.CATALOG[key]
+    except KeyError:
+        ui.warn(f"no such model in the catalog: {key}")
+        return False
+
+    if get_model.have(key):
+        ui.ok(f"{entry['label']} is already here")
+        return True
+
+    size = get_model.recorded_bytes(key) / 1e9
+    ui.note(f"{entry['label']}, about {size:.1f} GB. This is the slow part.")
+    try:
+        get_model.install(key, on_progress=_download_progress)
+    except Exception as exc:  # noqa: BLE001 - never fatal, always reported
+        ui.warn(f"{entry['label']}: {exc}")
+        ui.note("Run this again to carry on - it picks up where it stopped.")
+        return False
+
+    ui.ok(f"{entry['label']} is in weights/")
+    return True
+
+
+def check_weights(*, download: bool) -> bool:
+    """Make sure there is something to talk to, and offer one if there is not.
+
+    An `mmproj-*.gguf` does not count. It is half of a vision pair and is never
+    offered as something to talk to, so a weights/ folder holding only the OCR
+    projector is still a folder with nothing to run - and saying "1 model
+    found" there would be a lie that only shows up at the first message.
+    """
     WEIGHTS.mkdir(exist_ok=True)
     found = sorted(WEIGHTS.glob("*.gguf"))
-    if found:
-        for path in found:
+    chat = [path for path in found if not path.name.startswith("mmproj-")]
+    if chat:
+        for path in chat:
             ui.ok(f"{path.name} {ui.DIM}({path.stat().st_size / 1e9:.1f} GB){ui.RESET}")
         return True
 
-    ui.warn("nothing here yet - a model is the one thing you choose yourself")
-    ui.note("Any .gguf works. Drop one in and it is measured automatically.")
-    ui.note("On 8 GB of RAM, start with a 2-3B instruct model at Q4_K_M.")
-    ui.note("The README explains why, under 'Choosing a model'.")
+    if download:
+        return fetch_model("gemma")
+
+    ui.warn("nothing here yet - and nothing runs without one")
+    ui.note("Get the starter model:  python scripts/get_model.py")
+    ui.note("See what else there is:  python scripts/get_model.py --list")
+    ui.note("Or drop in any .gguf yourself - it is measured automatically.")
+    ui.note("The README explains the sizing, under 'Choosing a model'.")
     return False
+
+
+def check_ocr(*, download: bool) -> dict:
+    """Set up reading text off an image, or say what is missing.
+
+    Two backends that fail independently, so they are reported independently,
+    and they are not competitors so much as different trades - measured on this
+    machine:
+
+        Tesseract   ~50 MB RAM    under a second   lines of text, in order
+        GLM-OCR     ~1.4 GB RAM   about 30 s       tables, columns, headings
+
+    So Tesseract is the default and the one worth having, and GLM-OCR earns its
+    1.4 GB when the page has structure worth preserving. Having neither means
+    the `ocr_image` tool says so rather than failing at the moment somebody
+    attaches an image, which is why nothing here is fatal.
+
+    Tesseract is a system package and is never installed on someone's behalf -
+    it goes outside this folder, which the rest of setup promises not to do.
+    It is detected, and the one command for this platform is printed.
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
+    found = {"tesseract": False, "glm": False}
+
+    try:
+        from tools.tesseract import probe
+
+        info = probe()
+    except Exception as exc:  # noqa: BLE001 - a probe that throws is a "no"
+        info = None
+        ui.warn(f"could not check for Tesseract: {exc}")
+
+    if info is not None:
+        found["tesseract"] = True
+        ui.ok(f"Tesseract {info.version}")
+        # A build with no language data installs, runs, reports its version and
+        # then fails every read with "Could not initialize tesseract". Scoop's
+        # does exactly this, so an empty list is worth catching here rather
+        # than at the first image.
+        if not info.languages:
+            ui.warn("it has no language data, so every read will fail")
+            ui.note("Put an eng.traineddata in its tessdata folder:")
+            ui.note("https://github.com/tesseract-ocr/tessdata_fast")
+    else:
+        ui.note(f"Tesseract is not installed - {_tesseract_command()}")
+        ui.note("Fast, tiny, and the default backend. Worth having.")
+
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
+    try:
+        import get_model
+
+        found["glm"] = get_model.have("ocr")
+    except ImportError:
+        found["glm"] = (WEIGHTS / "GLM-OCR-Q8_0.gguf").is_file()
+
+    if found["glm"]:
+        ui.ok("GLM-OCR is here, both halves")
+    elif download:
+        found["glm"] = fetch_model("ocr")
+    else:
+        ui.note("GLM-OCR: python scripts/get_model.py --what ocr  (1.4 GB)")
+
+    return found
+
+
+def _tesseract_command() -> str:
+    """The one line that installs it here, rather than five that might."""
+    if os.name == "nt":
+        return "winget install UB-Mannheim.TesseractOCR"
+    if sys.platform == "darwin":
+        return "brew install tesseract"
+    return "sudo apt install tesseract-ocr  (or your distribution's equivalent)"
 
 
 def check_speech(*, download: bool) -> dict:
@@ -576,20 +702,55 @@ def verify() -> bool:
 # --- the walkthrough ------------------------------------------------------
 
 
+# These three decide only whether a box starts ticked, so they are deliberately
+# cheap and never touch the network: a walkthrough that pauses before drawing
+# its first menu looks broken.
+def _have_a_chat_model() -> bool:
+    """A .gguf that is not half of a vision pair."""
+    return any(
+        not path.name.startswith("mmproj-") for path in WEIGHTS.glob("*.gguf")
+    )
+
+
+def _have_glm_ocr() -> bool:
+    """Both halves. The language model alone loads and then cannot see."""
+    return (WEIGHTS / "GLM-OCR-Q8_0.gguf").is_file() and (
+        WEIGHTS / "mmproj-GLM-OCR-Q8_0.gguf"
+    ).is_file()
+
+
+def _have_a_voice() -> bool:
+    return any((ROOT / "tts").glob("*.onnx"))
+
+
 def plan(arguments) -> dict:
     """Work out what to do, asking when there is somebody to ask."""
     scripted = arguments.yes or not ui.interactive()
 
+    # Anything that downloads gigabytes is opt-in when nobody is watching and
+    # offered-and-ticked when somebody is. A person at a terminal who reads
+    # "3.0 GB" and presses Enter has agreed to it; a script that pulls 4.5 GB
+    # because it was run with --yes has not been asked at all.
     choices = {
         "rag": arguments.with_rag,
         "web_build": arguments.build_web,
         "llama": not arguments.no_llama,
+        "model": arguments.with_model and not arguments.no_model,
+        "ocr": arguments.with_ocr,
         "speech": arguments.with_speech,
         "tests": not arguments.skip_tests,
     }
 
     if scripted:
         return choices
+
+    # Ticked by default, unless a flag said otherwise or it is already here.
+    # Offering to download a 3 GB model to somebody who already has six is how
+    # a setup script gets a reputation for not looking first.
+    if not arguments.no_model:
+        choices["model"] = not _have_a_chat_model()
+    choices["ocr"] = arguments.with_ocr or not _have_glm_ocr()
+    choices["speech"] = arguments.with_speech or not _have_a_voice()
 
     ui.say(
         f"\n  Everything goes in {ui.BOLD}.venv{ui.RESET} inside this folder. "
@@ -605,10 +766,24 @@ def plan(arguments) -> dict:
             "key": "llama",
         },
         {
+            "label": "Get a model to start with",
+            "note": "3.0 GB. Gemma 4 E2B - the fastest thing here that can "
+                    "still call tools. Without a model, nothing runs at all.",
+            "on": choices["model"],
+            "key": "model",
+        },
+        {
             "label": "Let me talk to it, and hear it back",
             "note": "220 MB. Dictate a message, and read any answer aloud.",
             "on": choices["speech"],
             "key": "speech",
+        },
+        {
+            "label": "Let it read text off images",
+            "note": "1.4 GB. GLM-OCR, which keeps tables and columns. "
+                    "Tesseract is the fast default and is checked for too.",
+            "on": choices["ocr"],
+            "key": "ocr",
         },
         {
             "label": "Let it search my documents",
@@ -634,6 +809,18 @@ def plan(arguments) -> dict:
     return choices
 
 
+def _ocr_state(ocr: dict) -> str:
+    """Which OCR backends ended up available, named rather than counted."""
+    ready = [
+        name
+        for name, key in (("Tesseract", "tesseract"), ("GLM-OCR", "glm"))
+        if ocr.get(key)
+    ]
+    if not ready:
+        return "no backend - the ocr_image tool will say so"
+    return f"{' and '.join(ready)} - switch the tool on in the sidebar"
+
+
 def _size(path: Path) -> str:
     try:
         return f"{path.stat().st_size / 1e9:.1f} GB"
@@ -641,7 +828,9 @@ def _size(path: Path) -> str:
         return "?"
 
 
-def report(*, llama: bool, weights: bool, speech: dict, choices: dict) -> None:
+def report(
+    *, llama: bool, weights: bool, speech: dict, ocr: dict, choices: dict
+) -> None:
     """Say where everything went, what was done, and how to start it.
 
     Printed in full every time rather than only when something is missing. A
@@ -723,7 +912,9 @@ def report(*, llama: bool, weights: bool, speech: dict, choices: dict) -> None:
         ),
         (
             "A model",
-            f"{len(models)} found" if models else "still needed - your choice to make",
+            f"{len(models)} in weights/"
+            if models
+            else "still needed - scripts/get_model.py fetches one",
         ),
         (
             "Dictation",
@@ -736,6 +927,10 @@ def report(*, llama: bool, weights: bool, speech: dict, choices: dict) -> None:
             "ready - press the speaker on any answer"
             if speech.get("voice")
             else "skipped - add a voice with scripts/get_speech.py --what voice",
+        ),
+        (
+            "Reading images",
+            _ocr_state(ocr),
         ),
         (
             "Hosted models",
@@ -754,8 +949,17 @@ def report(*, llama: bool, weights: bool, speech: dict, choices: dict) -> None:
     elif llama and not weights:
         ui.say(f"   {ui.BOLD}One thing left: a model.{ui.RESET}")
         ui.say(
-            f"   Put any {ui.BOLD}.gguf{ui.RESET} into {ui.BOLD}weights/{ui.RESET} "
-            f"and it is found on its own -"
+            f"   {ui.ACCENT}{ui.BOLD}python scripts/get_model.py{ui.RESET}   "
+            f"fetches the starter, Gemma 4 E2B (3.0 GB)"
+        )
+        ui.say(
+            f"   {ui.DIM}python scripts/get_model.py --list{ui.RESET}   "
+            f"{ui.DIM}shows the others{ui.RESET}"
+        )
+        ui.say()
+        ui.say(
+            f"   Or put any {ui.BOLD}.gguf{ui.RESET} into {ui.BOLD}weights/"
+            f"{ui.RESET} yourself and it is found on its own -"
         )
         ui.say("   nothing to configure, it is measured from the file itself.")
         ui.say(
@@ -823,8 +1027,9 @@ def step_names(choices: dict) -> list[str]:
         "Installing the Python side",
         "Installing the web interface",
         "Fetching llama.cpp" if choices["llama"] else "Looking for llama.cpp",
-        "Looking for a model",
+        "Getting you a model" if choices["model"] else "Looking for a model",
         "Setting up the voice" if choices["speech"] else "Checking the voice",
+        "Setting up OCR" if choices["ocr"] else "Checking OCR",
         "Writing your configuration",
     ]
     if choices["tests"]:
@@ -858,6 +1063,26 @@ def main() -> int:
         help="also fetch dictation and a voice (about 220 MB)",
     )
     parser.add_argument(
+        "--with-model",
+        action="store_true",
+        help="also fetch the starter model, Gemma 4 E2B (about 3.0 GB)",
+    )
+    parser.add_argument(
+        "--no-model",
+        action="store_true",
+        help="never fetch a model, even when weights/ is empty",
+    )
+    parser.add_argument(
+        "--with-ocr",
+        action="store_true",
+        help="also fetch GLM-OCR and its projector (about 1.4 GB)",
+    )
+    parser.add_argument(
+        "--everything",
+        action="store_true",
+        help="all of the above: the model, speech, OCR and document search",
+    )
+    parser.add_argument(
         "--skip-tests", action="store_true", help="do not run the verification tests"
     )
     parser.add_argument(
@@ -866,6 +1091,16 @@ def main() -> int:
         help="do not download llama.cpp (about 18 MB from GitHub)",
     )
     arguments = parser.parse_args()
+
+    # One flag for "I want the lot", rather than four that have to be
+    # remembered in the right combination. It sets the others rather than being
+    # checked alongside them, so there is one place the answer comes from.
+    if arguments.everything:
+        arguments.with_model = True
+        arguments.with_speech = True
+        arguments.with_ocr = True
+        arguments.with_rag = True
+        arguments.no_model = False
 
     ui.banner("HAKIM", "a local agent that runs on your own machine")
     ui.say()
@@ -889,6 +1124,7 @@ def main() -> int:
     llama = False
     weights = False
     speech: dict = {}
+    ocr: dict = {}
 
     try:
         advance()
@@ -911,10 +1147,13 @@ def main() -> int:
         llama = check_llama_server(download=choices["llama"])
 
         advance()
-        weights = check_weights()
+        weights = check_weights(download=choices["model"])
 
         advance()
         speech = check_speech(download=choices["speech"])
+
+        advance()
+        ocr = check_ocr(download=choices["ocr"])
 
         advance()
         make_env_file()
@@ -928,7 +1167,7 @@ def main() -> int:
         ui.say("\n  Stopped part-way. Run this again to carry on where it left off.")
         return 1
 
-    report(llama=llama, weights=weights, speech=speech, choices=choices)
+    report(llama=llama, weights=weights, speech=speech, ocr=ocr, choices=choices)
     # --yes means unattended, so it must not hold at the end either: someone
     # scripting this in a terminal would otherwise wait forever on a keypress
     # they never asked to be prompted for.

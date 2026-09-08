@@ -367,38 +367,52 @@ what you want, and shows progress while it works.
 
    [+] 1  Get llama.cpp for me
           18 MB. It is the engine that actually runs your models.
-   [ ] 2  Let me talk to it, and hear it back
+   [+] 2  Get a model to start with
+          3.0 GB. Gemma 4 E2B - the fastest thing here that can still
+          call tools. Without a model, nothing runs at all.
+   [+] 3  Let me talk to it, and hear it back
           220 MB. Dictate a message, and read any answer aloud.
-   [ ] 3  Let it search my documents
+   [+] 4  Let it read text off images
+          1.4 GB. GLM-OCR, which keeps tables and columns. Tesseract is
+          the fast default and is checked for too.
+   [ ] 5  Let it search my documents
           2 GB and slow to install. You can add this later.
-   [ ] 4  Build the web interface for production
+   [ ] 6  Build the web interface for production
           Most people want the development mode instead. Leave this off.
-   [+] 5  Check it works when you are done
+   [+] 7  Check it works when you are done
           Runs the tests. About a minute, and worth it.
 
   number to change one, Enter when it looks right  >
 ```
+
+**The downloads are ticked on a fresh clone and unticked once you have them.**
+Boxes 2, 3 and 4 start on only when the files are actually missing — running
+setup again on a machine that already has a model offers nothing it would
+have to download twice.
 
 The checklist **redraws in place** — pressing a number replaces it rather than
 printing it again underneath — and it clears itself once accepted. Then:
 
 ```
 Here is the plan
-   1. Checking your Python        6. Looking for a model
-   2. Making a private environment 7. Setting up the voice
-   3. Installing the Python side  8. Writing your configuration
-   4. Installing the web interface 9. Making sure it all works
-   5. Fetching llama.cpp
+   1. Checking your Python          6. Getting you a model
+   2. Making a private environment  7. Setting up the voice
+   3. Installing the Python side    8. Setting up OCR
+   4. Installing the web interface  9. Writing your configuration
+   5. Fetching llama.cpp           10. Making sure it all works
 
-===------  3/9 Installing the Python side
+===-------  3/10 Installing the Python side
   / requirements.txt (14s)
 
-====-----  5/9 Fetching llama.cpp
-  downloading [██████████████..........]  58% 10.8/18.4 MB  2.1 MB/s
+=====-----  6/10 Getting you a model
+  Gemma 4 E2B, about 3.0 GB. This is the slow part.
+  downloading [███████████.............]  46% 1.4/3.0 GB  2.1 MB/s
 ```
 
-**The only thing left for you is a model.** Drop any `.gguf` into `weights/`
-and it is picked up on the next scan, sized from its own header.
+**A model is no longer left to you**, though it still can be: untick box 2 and
+drop any `.gguf` into `weights/` instead, and it is picked up on the next scan,
+sized from its own header. See
+[Choosing a model for your hardware](#choosing-a-model-for-your-hardware).
 
 It does not just exit when it finishes. It prints where everything went, what
 was and was not installed, and how to start — then waits for you to close it:
@@ -410,7 +424,11 @@ was and was not installed, and how to start — then waits for you to close it:
    python           /home/you/hakim-local-agent/.venv/bin/python
    llama.cpp        /home/you/hakim-local-agent/vendor/llama/build/bin/llama-server
    models           /home/you/hakim-local-agent/weights
-                    - Ministral-3-3B-Instruct-Q4_K_M.gguf (2.1 GB)
+                    - gemma-4-E2B-it-Q4_0.gguf (3.0 GB)
+                    - GLM-OCR-Q8_0.gguf (1.0 GB)
+                    - mmproj-GLM-OCR-Q8_0.gguf (0.5 GB)
+   dictation        /home/you/hakim-local-agent/whisper
+   voice            /home/you/hakim-local-agent/tts
    settings         /home/you/hakim-local-agent/.env
    your data        /home/you/hakim-local-agent/data
    workspace        /home/you/hakim-local-agent
@@ -421,7 +439,10 @@ was and was not installed, and how to start — then waits for you to close it:
    Document search  skipped - add it with --with-rag
    Web interface    ready for development mode
    llama.cpp        ready
-   A model          1 found
+   A model          3 in weights/
+   Dictation        ready - press the microphone
+   Reading aloud    ready - press the speaker on any answer
+   Reading images   Tesseract and GLM-OCR - switch the tool on in the sidebar
    Hosted models    none - everything runs locally
 
 -- how to start it ------------------------------------------------------
@@ -446,10 +467,21 @@ input that will never come. `--yes` forces that mode in a terminal too.
 | Flag | Effect |
 |---|---|
 | `-y`, `--yes` | ask nothing; take the defaults and the flags below |
+| `--everything` | the lot: the starter model, speech, OCR and document search |
+| `--with-model` | fetch the starter model, Gemma 4 E2B (about 3.0 GB) |
+| `--no-model` | never fetch a model, even when `weights/` is empty |
+| `--with-speech` | fetch dictation and a voice (about 220 MB) |
+| `--with-ocr` | fetch GLM-OCR and its projector (about 1.4 GB) |
 | `--with-rag` | also install document search (torch, about 2 GB) |
 | `--build-web` | build the UI instead of running Vite in development |
 | `--no-llama` | do not download llama.cpp |
 | `--skip-tests` | do not run the verification tests |
+
+**The gigabytes are opt-in when nobody is watching.** A person at a terminal
+who reads "3.0 GB" and presses Enter has agreed to it. A script run with
+`--yes` has not been asked at all, so it downloads nothing beyond llama.cpp
+unless a flag above says to — which is why `--everything` exists rather than
+being the default.
 
 The toolkit behind it is [`scripts/ui.py`](scripts/ui.py), which is standard
 library only and has to be: setup runs *before* anything is installed, so
@@ -627,12 +659,23 @@ directory, so the project folder can be renamed or moved without editing
 anything. That is not a style choice: they were absolute once, the folder was
 renamed, and the hardcoded path was the one thing that broke.
 
-**5. Get a model.** The one thing the setup script does not fetch for you.
-Drop any `.gguf` into `weights/` and it is picked up on the next scan — sized
-from its own GGUF header, no configuration needed.
+**5. Get a model.** Setup offers to fetch one, and this is the same thing on
+its own:
 
-On 8 GB of RAM, a 2–3B instruct model at `Q4_K_M` is the sensible starting
-point. For the arithmetic behind that, and what fits on other machines, see
+```bash
+python scripts/get_model.py
+```
+
+3.0 GB into `weights/`: Gemma 4 E2B, the fastest local model here that can
+still call tools. `--list` shows the other five it knows about, `--what ocr`
+fetches the GLM-OCR pair, and an interrupted download resumes from where it
+stopped.
+
+Nothing obliges you to use it. Drop any `.gguf` into `weights/` and it is
+picked up on the next scan — sized from its own GGUF header, no configuration
+needed. On 8 GB of RAM, a 2–3B instruct model at `Q4_K_M` is the sensible
+starting point. For the arithmetic behind that, and what fits on other
+machines, see
 [Choosing a model for your hardware](#choosing-a-model-for-your-hardware).
 
 **6. Optional: API keys.** Only for hosted models; the agent is fully local
@@ -666,24 +709,37 @@ By hand it is `cp .env.example .env` and fill in what you need.
 
 1140 tests, no model server needed, and none of them touch the network.
 
-### What the setup script deliberately does not do
+### What the setup script downloads, and what it asks first
 
-**It never downloads a model.** Which model to run is the one genuinely
-personal decision in this project — it depends on your RAM, your language, and
-what you want the agent for — and several gigabytes is not something a setup
-script should pull over someone's connection on their behalf. It names what is
-missing and points at where to look.
+It fetches `llama.cpp` without asking, because that choice is not personal:
+there is exactly one right build for a given machine, it is 18 MB, and getting
+it by hand means picking correctly out of 27 similarly-named archives.
 
-It does fetch `llama.cpp`, because that choice is not personal: there is
-exactly one right build for a given machine, it is 18 MB, and getting it by
-hand means picking correctly out of 27 similarly-named archives.
+**It used to refuse to download a model at all**, on the reasoning that which
+model to run is the one genuinely personal decision here — it depends on your
+RAM, your language and what you want the agent for. That is still true of the
+*fifth* model somebody adds. It was never true of the first one: a fresh clone
+with no `.gguf` in `weights/` cannot answer a single message, and "your choice
+to make" is a poor thing to hand somebody who has not yet seen the thing work.
+So there is now a starter — Gemma 4 E2B, the fastest local model here that can
+still call tools — offered with its 3.0 GB stated, ticked when `weights/` is
+empty and unticked when it is not.
 
-The speech model and the voice sit between those two cases, which is why they
-are **off by default and offered rather than assumed**. They are a choice —
-`tiny.en` against `base.en`, one voice against another — but a small one with
-an obvious default, and getting them by hand means the same 9-archive problem
-whisper.cpp has. So the menu asks, the answer is remembered in what it fetched,
-and nothing is downloaded for somebody who only wanted to type.
+The speech model, the voice and GLM-OCR are the same shape of decision: a
+choice, but a small one with an obvious default, and getting them by hand means
+the same archive-picking problem. So they are **offered rather than assumed** —
+ticked when missing, silent when already present, and each says what it costs
+before it starts.
+
+**Nothing is downloaded for a script that did not ask.** Piped, redirected, in
+CI or with `--yes`, every one of those boxes is off unless its flag is given.
+The tick-by-default only happens where somebody is there to untick it.
+
+**Tesseract is detected, never installed.** It is a system package that lands
+outside this folder, and the rest of setup promises not to touch anything
+outside it. Setup finds it, reports its version, warns when it has no language
+data — a build that installs, runs, and then fails every read — and otherwise
+prints the one command for your platform.
 
 ### If something goes wrong
 
@@ -693,7 +749,8 @@ and nothing is downloaded for somebody who only wanted to type.
 | `Permission denied: ./setup.sh` | `chmod +x setup.sh start.sh`, or just run `bash setup.sh` |
 | `ensurepip is not available` | Debian/Ubuntu split it out: `sudo apt install python3-venv` |
 | `llama-server not found` | Not on `PATH` and not at the `server_exe` path. See step 4 |
-| No models listed | No `.gguf` in `weights/`. See step 5 |
+| No models listed | No `.gguf` in `weights/`: `python scripts/get_model.py` fetches the starter |
+| A `.gguf.part` in `weights/` | An interrupted download. Run the same `get_model.py` command again and it resumes from there |
 | No microphone in the composer | No whisper.cpp build or no speech model: `python scripts/get_speech.py` |
 | No speaker on an answer | No Piper voice: `python scripts/get_speech.py --what voice` |
 | Port 8000 or 5173 in use | An earlier run is still going. Both launchers name the process holding it |
@@ -802,6 +859,7 @@ Hakim Local Agent/
 ├── scripts/ui.py        menus, spinners and progress bars, stdlib only
 ├── scripts/get_llama.py fetches the right llama.cpp build for this machine
 ├── scripts/get_speech.py fetches whisper.cpp, a speech model and a voice
+├── scripts/get_model.py fetches a model into weights/, and the OCR pair
 ├── vendor/llama/        that build, once fetched (git-ignored)
 ├── vendor/whisper/      a whisper.cpp build, if you want dictation (git-ignored)
 ├── whisper/             ggml-*.bin speech models (git-ignored)
@@ -1258,6 +1316,49 @@ editing. Good sources:
 [bartowski](https://huggingface.co/bartowski) and
 [unsloth](https://huggingface.co/unsloth) on Hugging Face both publish
 well-made GGUF quantisations of most open models.
+
+#### Fetching one without leaving the terminal
+
+[`scripts/get_model.py`](scripts/get_model.py) holds a small catalog of the
+models this project was measured against, so the common cases do not need a
+browser at all:
+
+```bash
+python scripts/get_model.py              # the starter, Gemma 4 E2B (3.0 GB)
+python scripts/get_model.py --list       # everything on offer, marked
+python scripts/get_model.py --what ocr   # GLM-OCR and its projector (1.4 GB)
+python scripts/get_model.py --what all   # all six, about 14 GB
+```
+
+| Name | Model | Size | Free RAM |
+|---|---|---|---|
+| `gemma` | Gemma 4 E2B — the starter | 3.0 GB | 2,627 MB |
+| `mistral` | Ministral 3B | 2.1 GB | 1,900 MB |
+| `fast` | Qwen3.5 2B `Q4_K_M` | 1.3 GB | 1,150 MB |
+| `tiny` | Qwen3.5 2B `Q3_K_S` | 1.0 GB | 900 MB |
+| `reasoning` | Qwen3 8B — does not fit in 8 GB | 5.0 GB | 6,200 MB |
+| `ocr` | GLM-OCR **and** its projector | 1.4 GB | 1,150 MB |
+
+Three things about it are worth knowing.
+
+**A partial download never looks like a model.** Files land as `name.gguf.part`
+and are renamed into place only once complete. `weights/` is scanned by
+extension and anything found is offered as something to talk to, so a 3 GB
+download interrupted at 2.9 GB under the real name would present itself as a
+broken model rather than as an unfinished one. The `.part` is kept, which is
+what lets the next run resume rather than start again.
+
+**The size is asked for, not remembered.** The byte counts above are for the
+sentence printed before a download starts; the number used to decide whether it
+*finished* is fetched from Hugging Face at the time, because a repository can
+be re-quantised under a name that never changes and a stale total would condemn
+a perfectly good file as truncated.
+
+**`fast` and `tiny` arrive under upstream's names**, not the hand-renamed ones
+in `models.json` (`Qwen3.5-2B-M-TS-…`). They are picked up by discovery and
+sized from their own headers instead of landing on a curated entry — the same
+path any file dropped in by hand takes. The other four land on their registry
+entries exactly.
 
 ### What it works out for itself
 
@@ -1833,6 +1934,15 @@ project already starts and supervises `llama-server` the same way; a dependency
 to avoid twenty lines would not pay for itself.
 
 #### The two files it needs
+
+```bash
+python scripts/get_model.py --what ocr
+```
+
+fetches both, or setup's "Let it read text off images" box does the same
+thing. By hand, they are the two files below from
+[ggml-org/GLM-OCR-GGUF](https://huggingface.co/ggml-org/GLM-OCR-GGUF), dropped
+into `weights/`.
 
 GLM-OCR ships as a pair, and the language half alone is not enough:
 

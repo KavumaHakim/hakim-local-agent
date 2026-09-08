@@ -6,9 +6,18 @@
 #  which does the work. Keeping the logic in one Python file is what stops the
 #  Windows and Unix paths drifting apart.
 #
-#  Options are passed straight through:
+#  Run with no options it walks through the choices, with the downloads
+#  already ticked on a fresh clone. Options are passed straight through:
+#
+#      ./setup.sh --everything    the lot: model, speech, OCR, document search
+#      ./setup.sh --with-model    the starter model, Gemma 4 E2B (~3.0 GB)
+#      ./setup.sh --with-speech   dictation and a voice (~220 MB)
+#      ./setup.sh --with-ocr      GLM-OCR and its projector (~1.4 GB)
 #      ./setup.sh --with-rag      also install document search (torch, ~2 GB)
 #      ./setup.sh --build-web     build the UI instead of running Vite
+#
+#  --yes takes the defaults and asks nothing, which also means it downloads
+#  no gigabytes it was not explicitly told to.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 

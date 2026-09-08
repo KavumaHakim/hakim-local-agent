@@ -6,9 +6,18 @@ REM  This only finds a Python interpreter and hands over to scripts\setup.py,
 REM  which does the work. Keeping the logic in one Python file is what stops
 REM  the Windows and Unix paths drifting apart.
 REM
-REM  Options are passed straight through:
+REM  Run with no options it walks through the choices, with the downloads
+REM  already ticked on a fresh clone. Options are passed straight through:
+REM
+REM      setup.bat --everything   the lot: model, speech, OCR, document search
+REM      setup.bat --with-model   the starter model, Gemma 4 E2B (~3.0 GB)
+REM      setup.bat --with-speech  dictation and a voice (~220 MB)
+REM      setup.bat --with-ocr     GLM-OCR and its projector (~1.4 GB)
 REM      setup.bat --with-rag     also install document search (torch, ~2 GB)
 REM      setup.bat --build-web    build the UI instead of running Vite
+REM
+REM  --yes takes the defaults and asks nothing, which also means it downloads
+REM  no gigabytes it was not explicitly told to.
 REM ---------------------------------------------------------------------------
 
 setlocal

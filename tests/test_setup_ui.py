@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import re
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -503,6 +504,7 @@ class ReportTests(unittest.TestCase):
             "llama": True,
             "weights": True,
             "speech": {"whisper": True, "model": True, "voice": True},
+            "ocr": {"tesseract": True, "glm": True},
             "choices": {"rag": False, "tests": True, "llama": True, "web_build": False},
         }
         defaults.update(kwargs)
@@ -547,6 +549,39 @@ class ReportTests(unittest.TestCase):
     def test_a_missing_model_is_the_headline_when_it_is_the_only_gap(self):
         text = self.render(llama=True, weights=False)
         self.assertIn("One thing left", text)
+
+    def test_a_missing_model_comes_with_the_command_that_fixes_it(self):
+        """"Your choice to make" was true and unhelpful. Setup can fetch one,
+        so the gap it reports should name the thing that closes it."""
+        text = self.render(llama=True, weights=False)
+        self.assertIn("get_model.py", text)
+
+    def test_it_names_the_ocr_backends_it_ended_up_with(self):
+        """Two backends with different costs - which one you have decides
+        whether reading an image takes half a second or half a minute."""
+        text = self.render(ocr={"tesseract": True, "glm": False})
+        self.assertIn("Tesseract", text)
+        self.assertNotIn("GLM-OCR", text.split("Reading images")[1].splitlines()[0])
+
+    def test_it_says_plainly_when_no_backend_can_read_an_image(self):
+        text = self.render(ocr={"tesseract": False, "glm": False})
+        self.assertIn("no backend", text)
+
+    def test_a_lone_projector_is_not_counted_as_a_model(self):
+        """An mmproj-*.gguf is half of a vision pair and is never something to
+        talk to, so a weights/ holding only the OCR projector is still a
+        weights/ with nothing to run. Counting it says "ready" to somebody
+        whose first message will fail."""
+        with tempfile.TemporaryDirectory() as scratch:
+            weights = Path(scratch)
+            (weights / "mmproj-GLM-OCR-Q8_0.gguf").write_bytes(b"x")
+            with mock.patch.object(self.setup, "WEIGHTS", weights):
+                with redirect_stdout(io.StringIO()):
+                    self.assertFalse(self.setup.check_weights(download=False))
+                    self.assertFalse(self.setup._have_a_chat_model())
+
+                    (weights / "gemma-4-E2B-it-Q4_0.gguf").write_bytes(b"x")
+                    self.assertTrue(self.setup.check_weights(download=False))
 
     def test_it_never_prints_an_api_key(self):
         """It reports how many are set, which is all anybody needs to know."""
